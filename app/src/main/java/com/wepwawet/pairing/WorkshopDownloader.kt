@@ -1312,7 +1312,7 @@ class WorkshopDownloader(
             val authDetails = AuthSessionDetails()
             authDetails.username = username
             authDetails.password = password
-            authDetails.deviceFriendlyName = "WepWawet"
+            authDetails.deviceFriendlyName = "WallpaperSuite"
             authDetails.persistentSession = true
             authDetails.authenticator = GuardAuthenticator()
 

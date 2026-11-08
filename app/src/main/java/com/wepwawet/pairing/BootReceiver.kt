@@ -94,6 +94,15 @@ class BootReceiver : BroadcastReceiver() {
      */
     private fun startPairingService(context: Context) {
         try {
+            // v0.8.1: the pairing subsystem is opt-in (Settings toggle, default
+            // OFF). After a boot or app update, do NOT restart the pairing
+            // service unless the user explicitly enabled it — no pairing
+            // activity at all while the toggle is off.
+            if (!PairingService.isPairingEnabled(context)) {
+                WepWawetLogger.proxy("$TAG: pairing disabled — not starting after boot/update")
+                return
+            }
+
             // Set appContext first so the static UI accessors (isPaired,
             // queueWallpaper, pairedDeviceName) work even before the
             // user opens the app. Without this, calls to

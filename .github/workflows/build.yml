@@ -1,4 +1,4 @@
-name: Build WepWawet APK
+name: Build WallpaperSuite APK
 
 on:
   push:
@@ -86,7 +86,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wepwawet-apk
+          name: wallpapersuite-apk
           path: ${{ steps.find-apk.outputs.apk_path }}
           retention-days: 30
 
@@ -101,7 +101,7 @@ jobs:
       - name: Download APK
         uses: actions/download-artifact@v4
         with:
-          name: wepwawet-apk
+          name: wallpapersuite-apk
           path: release/
 
       - name: Find APK

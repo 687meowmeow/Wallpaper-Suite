@@ -20,7 +20,7 @@ import kotlin.concurrent.thread
  *
  * Fields:
  *   pid: Process ID (5 digits) — we use a random 5-digit number
- *   hostname: Device name — we use "WepWawet"
+ *   hostname: Device name — we use "WallpaperSuite"
  *   flag: Usually "1"
  *   interfaceId: Network interface ID — we use "lo" (loopback) for self-pair
  *
@@ -62,13 +62,13 @@ class WeDiscoveryBroadcaster(private val context: Context) {
      * restart/update and re-prompted for PIN even though the user had
      * already paired.
      *
-     * @param hostname the device hostname broadcast in the ping (default "WepWawet").
+     * @param hostname the device hostname broadcast in the ping (default "WallpaperSuite").
      * @param guid the persistent device GUID from [PairingIdentity.getGuid].
      *   Must be non-blank — passing an empty guid would corrupt the wire
      *   format ("WallpaperEngine/Ping:07889:WepWawet:4:") and the phone's
      *   DiscoverService would discard the packet.
      */
-    fun start(hostname: String = "WepWawet", guid: String) {
+    fun start(hostname: String = "WallpaperSuite", guid: String) {
         require(guid.isNotBlank()) {
             "WeDiscoveryBroadcaster.start: guid must not be blank — pass PairingIdentity.getGuid(context)"
         }

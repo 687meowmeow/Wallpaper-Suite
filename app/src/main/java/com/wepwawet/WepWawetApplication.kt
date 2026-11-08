@@ -286,7 +286,7 @@ class WepWawetApplication : Application(), Configuration.Provider, ImageLoaderFa
             @Suppress("DEPRECATION")
             runCatching {
                 val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                val dir = File(downloads, "WepWawet").apply { mkdirs() }
+                val dir = File(downloads, "WallpaperSuite").apply { mkdirs() }
                 File(dir, "boot.txt").writeText(content)
             }
         }

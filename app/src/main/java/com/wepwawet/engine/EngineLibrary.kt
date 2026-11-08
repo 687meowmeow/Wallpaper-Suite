@@ -55,7 +55,10 @@ object EngineLibrary {
      */
     suspend fun enumerateWallpapers(context: Context): List<WallpaperInfoSparse> =
         withContext(Dispatchers.IO) {
+            val startedAt = System.currentTimeMillis()
             val result = ArrayList<WallpaperInfoSparse>()
+            var officials = 0
+            var downloads = 0
             try {
                 val engine = sceneLib(context)
                 val blacklisted = WeEnginePrefs.readOfficialBlacklist(context)
@@ -66,12 +69,16 @@ object EngineLibrary {
                             // official wallpapers that failed to extract are hidden entirely
                             continue
                         }
+                        WepWawetLogger.engineWarn("Library: corrupt wallpaper entry",
+                            "file" to wallpaper.filePath)
                         wallpaper.title = "(corrupt)"
                     }
+                    if (wallpaper.isOfficial) officials++ else downloads++
                     result.add(wallpaper)
                 }
             } catch (t: Throwable) {
-                WepWawetLogger.workshopWarn("enumerateWallpapers failed: ${t.message}")
+                WepWawetLogger.engineError("Library: enumerateWallpapers failed",
+                    exception = t)
             }
             // local SAF wallpapers
             for (local in WeEnginePrefs.readLocalWallpapers(context)) {
@@ -85,9 +92,16 @@ object EngineLibrary {
                     info.type = "Video"
                     result.add(info)
                 } catch (t: Throwable) {
-                    WepWawetLogger.workshopWarn("local wallpaper unavailable: ${t.message}")
+                    WepWawetLogger.engineWarn("Library: local wallpaper unavailable",
+                        "exception" to (t.message ?: t.javaClass.name))
                 }
             }
+            WepWawetLogger.engine("Library: enumerated wallpapers",
+                "officials" to officials,
+                "downloads" to downloads,
+                "locals" to (result.size - officials - downloads),
+                "total" to result.size,
+                "ms" to (System.currentTimeMillis() - startedAt))
             result.sortedByDescending { it.lastModifiedDate }
         }
 
@@ -128,21 +142,30 @@ object EngineLibrary {
                 val relativePath = WeEnginePrefs.DOWNLOAD_FOLDER + displayName
                 val file = File(context.filesDir, relativePath)
                 WeEnginePrefs.ensureDirectoriesExist(file)
+                WepWawetLogger.engine("Library: importing package",
+                    "name" to displayName,
+                    "target" to relativePath)
                 context.contentResolver.openInputStream(uri)?.use { input ->
                     file.outputStream().use { output ->
                         input.copyTo(output)
                     }
                 } ?: return@withContext ImportResult.Failed(displayName, "Could not open $displayName")
                 if (!engine.isWallpaperVersionValid(relativePath)) {
+                    WepWawetLogger.engineWarn("Library: import rejected — engine version mismatch",
+                        "name" to displayName)
                     file.delete()
                     return@withContext ImportResult.Failed(displayName, "unsupported version")
                 }
                 val info = engine.getWallpaperInfoSparse(relativePath)
                     ?: return@withContext ImportResult.Failed(displayName, "not a wallpaper package")
                 info.filePath = relativePath
+                WepWawetLogger.engine("Library: import OK",
+                    "title" to info.title,
+                    "type" to info.type,
+                    "size" to file.length())
                 ImportResult.Success(info)
             } catch (t: Throwable) {
-                WepWawetLogger.workshopWarn("importMpkgStream failed: ${t.message}")
+                WepWawetLogger.engineError("Library: importMpkgStream failed", exception = t)
                 ImportResult.Failed(displayName, t.message ?: "import error")
             }
         }
@@ -183,7 +206,7 @@ object EngineLibrary {
                 info.type = "Video"
                 ImportResult.Success(info)
             } catch (t: Throwable) {
-                WepWawetLogger.workshopWarn("importLocalMedia failed: ${t.message}")
+                WepWawetLogger.engineError("Library: importLocalMedia failed", exception = t)
                 ImportResult.Failed(name = "", reason = t.message ?: "import error")
             }
         }
@@ -221,7 +244,7 @@ object EngineLibrary {
                 }
                 true
             } catch (t: Throwable) {
-                WepWawetLogger.workshopWarn("deleteWallpaper failed: ${t.message}")
+                WepWawetLogger.engineError("Library: deleteWallpaper failed", exception = t)
                 false
             }
         }

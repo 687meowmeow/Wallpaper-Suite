@@ -10,7 +10,7 @@ import com.wepwawet.log.WepWawetLogger
 import java.io.File
 
 /**
- * Write files to the user-visible Downloads/WepWawet/ directory.
+ * Write files to the user-visible Downloads/WallpaperSuite/ directory.
  *
  * Uses MediaStore on Android 10+ (no permission needed for our own files
  * in the Downloads collection), and the legacy File API on Android 9 and
@@ -26,10 +26,10 @@ import java.io.File
 object PublicDownloadsWriter {
 
     private const val TAG = "PublicDownloadsWriter"
-    private const val SUBDIR = "WepWawet"  // relative to public Downloads/
+    private const val SUBDIR = "WallpaperSuite"  // relative to public Downloads/
 
     /**
-     * Write [content] bytes to Downloads/WepWawet/[fileName].
+     * Write [content] bytes to Downloads/WallpaperSuite/[fileName].
      *
      * @return the URI of the written file, or null on failure (error logged via WepWawetLogger).
      */
@@ -55,14 +55,14 @@ object PublicDownloadsWriter {
     }
 
     /**
-     * Write [text] to Downloads/WepWawet/[fileName] (UTF-8 encoded).
+     * Write [text] to Downloads/WallpaperSuite/[fileName] (UTF-8 encoded).
      */
     fun writeText(context: Context, fileName: String, text: String): Uri? {
         return writeBytes(context, fileName, text.toByteArray(Charsets.UTF_8))
     }
 
     /**
-     * Append [extra] to an existing file at Downloads/WepWawet/[fileName].
+     * Append [extra] to an existing file at Downloads/WallpaperSuite/[fileName].
      * If the file doesn't exist, does nothing (returns null).
      *
      * Used by the boot.txt breadcrumb pattern.
@@ -91,7 +91,7 @@ object PublicDownloadsWriter {
     // ====== Internals ======
 
     /**
-     * Find an existing file in Downloads/WepWawet/ by display name.
+     * Find an existing file in Downloads/WallpaperSuite/ by display name.
      * Returns the MediaStore Uri, or null if not found.
      */
     private fun findFile(context: Context, collection: Uri, displayName: String): Uri? {

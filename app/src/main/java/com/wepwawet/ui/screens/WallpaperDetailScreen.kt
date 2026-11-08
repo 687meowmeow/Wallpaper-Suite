@@ -146,6 +146,12 @@ fun WallpaperDetailScreen(
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var isPaired by remember { mutableStateOf(PairingService.isPaired()) }
 
+    // v0.8.1: the pairing subsystem toggle — "Send to phone" only exists
+    // while this is ON (Settings → "Send to phone"). The Download button
+    // (download straight into this app's integrated Wallpaper Engine) is
+    // the default and always available.
+    var pairingEnabled by remember { mutableStateOf(PairingService.isPairingEnabled(context)) }
+
     // v0.7.1: Snackbar host state for the favorite-heart confirmation message
     // ("favorited <creatorName>" / "unfavorited <creatorName>"). Lives at the
     // screen level (NOT inside the LazyColumn item) so it survives scroll
@@ -220,6 +226,7 @@ fun WallpaperDetailScreen(
     LaunchedEffect(Unit) {
         while (true) {
             isPaired = PairingService.isPaired()
+            pairingEnabled = PairingService.isPairingEnabled(context)
             kotlinx.coroutines.delay(1000)
         }
     }
@@ -513,41 +520,75 @@ fun WallpaperDetailScreen(
                 }
             }
 
-            // === Send to phone button — calls WorkshopDownloadJob.launchSendToPhone ===
-            // v0.4.7+ CRITICAL: This uses the SAME code path as the debug download
-            // (with installDir!) just queues for transfer instead of saving to
-            // Downloads. This fixes the v0.5.0-v0.5.1 regression where send-to-phone
-            // was rewritten inline WITHOUT installDir → produced a different/broken
-            // .mpkg → black wallpaper on phone.
-            // User said: "send to phone should make the same thing the debug
-            // download makes and sends it perfectly" — this restores that.
+            // === Download button (v0.8.1 — THE button) ===
+            // Downloads the real .pkg via JavaSteam on this device, packs it
+            // into the .mpkg the engine plays, and imports it straight into
+            // the integrated Wallpaper Engine's library — the wallpaper
+            // appears on the main page, ready to preview and apply. No PC,
+            // no pairing, no public Downloads copy. (Same known-good
+            // installDir pack pipeline the old debug download used.)
             item {
                 Button(
                     onClick = {
                         if (!downloadState.isRunning) {
                             // Use the singleton WorkshopDownloadJob — its state
                             // flows into `downloadState` which we already observe.
-                            com.wepwawet.pairing.WorkshopDownloadJob.launchSendToPhone(context, current)
+                            com.wepwawet.pairing.WorkshopDownloadJob.launchDebugDownload(context, current)
                         }
                     },
                     enabled = !downloadState.isRunning,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Icon(Icons.Filled.Send, contentDescription = null)
+                    Icon(Icons.Filled.Download, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        if (isThisItemDownloading) {
-                            when {
-                                downloadState.progress > 0f -> "Sending… ${(downloadState.progress * 100).toInt()}%"
-                                else -> "Sending…"
-                            }
+                        when {
+                            isThisItemDownloading ->
+                                if (downloadState.progress > 0f) "Downloading… ${(downloadState.progress * 100).toInt()}%"
+                                else "Downloading…"
+                            downloadState.workshopId == itemId && downloadState.resultMessage != null -> "In your library ✓ (tap again to re-download)"
+                            downloadState.workshopId == itemId && downloadState.errorMessage != null -> "Retry download"
+                            else -> "Download"
                         }
-                        else if (!isPaired) "Send to phone (pair first)"
-                        else if (!hasSteamCredentials) "Send to phone (enter Steam login in Settings)"
-                        else if (downloadState.workshopId == itemId && downloadState.resultMessage != null) "Sent ✓ (tap again to re-send)"
-                        else if (downloadState.workshopId == itemId && downloadState.errorMessage != null) "Retry send to phone"
-                        else "Send to phone"
                     )
+                }
+            }
+
+            // === Send to phone (ONLY while the pairing toggle is on) ===
+            // v0.8.1: hidden entirely while pairing is disabled in Settings —
+            // the user wants zero pairing surface in the default state.
+            // Uses the SAME code path as the download button (with
+            // installDir!) just queues for transfer to the official WE
+            // Android app instead of importing into our own engine.
+            if (pairingEnabled) {
+                item {
+                    OutlinedButton(
+                        onClick = {
+                            if (!downloadState.isRunning) {
+                                // Use the singleton WorkshopDownloadJob — its state
+                                // flows into `downloadState` which we already observe.
+                                com.wepwawet.pairing.WorkshopDownloadJob.launchSendToPhone(context, current)
+                            }
+                        },
+                        enabled = !downloadState.isRunning,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(Icons.Filled.Send, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (isThisItemDownloading) {
+                                when {
+                                    downloadState.progress > 0f -> "Sending… ${(downloadState.progress * 100).toInt()}%"
+                                    else -> "Sending…"
+                                }
+                            }
+                            else if (!isPaired) "Send to phone (pair first)"
+                            else if (!hasSteamCredentials) "Send to phone (enter Steam login in Settings)"
+                            else if (downloadState.workshopId == itemId && downloadState.resultMessage != null) "Sent ✓ (tap again to re-send)"
+                            else if (downloadState.workshopId == itemId && downloadState.errorMessage != null) "Retry send to phone"
+                            else "Send to phone"
+                        )
+                    }
                 }
             }
 
@@ -575,32 +616,6 @@ fun WallpaperDetailScreen(
                             )
                         }
                     }
-                }
-            }
-
-            // === Debug: Save .mpkg to Downloads — runs via WorkshopDownloadJob
-            //     (singleton, app-scoped) so the download survives the user
-            //     navigating away from this screen. ===
-            item {
-                OutlinedButton(
-                    onClick = {
-                        if (!downloadState.isRunning) {
-                            com.wepwawet.pairing.WorkshopDownloadJob.launchDebugDownload(context, current)
-                        }
-                    },
-                    enabled = !downloadState.isRunning,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Icon(Icons.Filled.Download, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        when {
-                            isThisItemDownloading -> "Downloading…"
-                            downloadState.workshopId == itemId && downloadState.resultMessage != null -> "Saved ✓ (tap again to re-download)"
-                            downloadState.workshopId == itemId && downloadState.errorMessage != null -> "Retry download"
-                            else -> "Save .mpkg to Downloads (debug)"
-                        }
-                    )
                 }
             }
 

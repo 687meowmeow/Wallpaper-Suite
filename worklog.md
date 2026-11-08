@@ -2837,3 +2837,96 @@ System.loadLibrary'd at runtime. Caught by diffing the actual release APK
 (R8 kept the JNI classes but the zip had no engine). Fixed with scoped
 negations; the release was deleted and re-cut. Always verify the SHIPPED
 artifact, not the local one.
+
+---
+
+## v0.8.1-alpha (build 119) — the rendering fix + Download + pairing toggle + WallpaperSuite
+
+**The blank/black wallpaper bug, root-caused against the decompile.** User
+report: tapping a library wallpaper shows blank, applying it gives a black
+live wallpaper. The v0.8.0 port was diffed file-by-file against a fresh
+jadx 1.5.6 decompile of the current official APK (2.8.8, BUILD_TIME
+1779936743365 — `libscenejni.so` md5-identical to the one we ship). The
+divergence: the official `WEWallpaperService.loadWallpaper` and
+`PreviewActivity.onCreate` BOTH call `videoWallpaperView.setLib(this.lib)`
+right after constructing a `VideoWallpaperView`; our port never did. Without
+the lib, `VideoDrawable.load` hit `lib?.getWallpaperFileVirtualOffset(file)
+?: return` — a SILENT return — so the MediaPlayer never got a data source,
+never prepared, and every Video-type wallpaper (the majority of workshop
+downloads) rendered black in the service and blank in the preview. Scenes
+were ported faithfully (renderer, properties, feature flags all match
+line-for-line). Fix: `videoWallpaperView.lib = lib` in
+`WEWallpaperService.loadWallpaper` and `videoView.lib = EngineLibrary
+.sceneLib(ctx)` in `WallpaperPreviewScreen`'s factory. The same failure
+path now logs engineWarn ("SceneLib is NULL" / "no video byte range") so
+it can never go silent again.
+
+**Download button (user request).** "Send to phone" + "Save .mpkg to
+Downloads (debug)" are replaced by a single **Download** button: the known-
+good debug pipeline (JavaSteam .pkg download → magic-byte detect →
+packFromPkg / packVideoWallpaper / packSceneWallpaper with installDir,
+wake lock, .pkg cache) now ends in `autoImportToLibrary` and NOTHING else —
+no public-Downloads copy, no queue. Result message "Added to your
+wallpaper library ✓ (size)". `autoImportToLibrary` now returns Boolean
+(engine-version acceptance) so a rejected import surfaces as a failure
+instead of a silent delete.
+
+**Pairing toggle (user request).** The entire pairing subsystem is opt-in,
+OFF by default: `PairingService.isPairingEnabled/setPairingEnabled` (pref
+`pairing_enabled` in `wepwawet_pairing`). OFF ⇒ MainActivity does NOT
+start the service (and defensively stops a stale one), BootReceiver skips
+the boot/update restart, the workshop browser's Bluetooth button is
+hidden, and the detail screen's "Send to phone" button does not exist.
+ON ⇒ the service starts immediately, everything pairing-related returns.
+All transitions logged (PROXY domain).
+
+**Engine logging (user request).** New `ENGINE` domain (tag `WEP-ENG`) in
+WepWawetLogger with engine/engineDebug/engineWarn/engineError entry
+points. The library grid (reload, taps, thumbnail failures), the preview
+(open, view-type decision, apply, load callback, workshop-url resolution),
+`EngineLibrary` (enumerate counts/durations, import accept/reject, delete)
+and the engine views themselves (WEWallpaperService engine create/surface/
+load/type, SceneWallpaperView renderer install + GL surface + scene init +
+feature flags + canvas size, VideoWallpaperView surface + drawable choice +
+VFS byte range + prepare result + frame watchdog) all log through it.
+DEBUG entries are suppressed unless the verbose-logging toggle is ON
+(minLevel TRACE ↔ WARN — the existing mechanism), which is the requested
+verbose hook. The verbose toggle ALSO now drives the WE engine's own
+log-to-file: it writes the official `general_log_errors` pref and calls
+`WEWallpaperService.instance?.requestWallpaperApplyGeneralProperties()`
+(the service re-reads general settings and calls `lib.setLogToFileEnabled`
+live, exactly like the official client's settings screen).
+
+**Workshop page button (user request).** Tapping a wallpaper → preview
+resolves `getWallpaperProjectString(filePath, "workshopurl")` (every mpkg
+we pack embeds `workshopurl` in project.json), extracts the item id, and
+shows a "Workshop page" OutlinedButton that navigates to the existing
+in-app workshop detail screen (`detail/{itemId}`). Official wallpapers
+without a workshopurl simply don't show the button.
+
+**WallpaperSuite rename (user request).** App name is WallpaperSuite
+everywhere user-visible: `app_name` string (launcher + FGS notification +
+wallpaper-picker label via the new explicit service `android:label`),
+notification titles, discovery hostname, Steam deviceFriendlyName, log
+export labels, the public exports folder (`Downloads/WallpaperSuite/`),
+the About line, the CI workflow name + artifact id, and a full README
+rewrite. Code identifiers (package `com.wepwawet`, class names like
+WepWawetLogger, `Theme.WepWawet` style, `wepwawet_settings` prefs) are
+deliberately UNCHANGED — renaming those would break the app identity
+(updates + existing prefs) with zero user-visible benefit.
+
+**Preview lifecycle cleanup:** the preview's AndroidView no longer
+double-destroys the renderer (onRelease + DisposableEffect both called
+onDestroyWallpaper; now only the DisposableEffect runs stop+destroy,
+matching the official Activity onPause→onStop→onDestroy sequence).
+
+Reminders for future agents:
+  74. `VideoWallpaperView` NEEDS `lib` set (the official setLib call) —
+      it is the difference between videos playing and black. The null-lib
+      path now logs, so grep WEP-ENG for "SceneLib is NULL" if videos ever
+      go black again.
+  75. The ktlint parse pass (`ktlint --reporter=plain?group_by_file`) is
+      the offline syntax gate that works for Kotlin string templates
+      (scripts/kotlin_lex.py false-positives on `"${a.b}"`).
+  76. `autoImportToLibrary` returns whether the engine ACCEPTED the
+      package — never treat a version-rejected import as success.

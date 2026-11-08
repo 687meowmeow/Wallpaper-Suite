@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">WepWawet</string>
-    <string name="app_subtitle">On-device backend for Wallpaper Engine</string>
+    <string name="app_name">WallpaperSuite</string>
+    <string name="app_subtitle">Steam Workshop wallpapers with an on-device Wallpaper Engine</string>
 
     <!-- Navigation -->
     <string name="nav_workshop">Workshop</string>
@@ -48,7 +48,7 @@
     <!-- Foreground service notifications -->
     <string name="notif_proxy_channel_name">Pairing proxy</string>
     <string name="notif_proxy_channel_desc">Status of the on-device Wallpaper Engine pairing proxy.</string>
-    <string name="notif_proxy_title">WepWawet is running</string>
+    <string name="notif_proxy_title">WallpaperSuite is running</string>
     <string name="notif_proxy_text_idle">Idle — pair your Wallpaper Engine Android app.</string>
     <string name="notif_proxy_text_paired">Paired with %1$d device(s).</string>
     <string name="notif_proxy_text_streaming">Streaming wallpaper to %1$s…</string>

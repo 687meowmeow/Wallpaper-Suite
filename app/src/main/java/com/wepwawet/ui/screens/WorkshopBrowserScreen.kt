@@ -245,6 +245,23 @@ fun WorkshopBrowserScreen(
     // configuration change (rotation) because plain remember is discarded
     // with the Activity.
     var query by rememberSaveable { mutableStateOf(repoQuery) }
+
+    // v0.8.1: pairing subsystem toggle (Settings → "Send to phone"). The
+    // Bluetooth button + the send-to-phone flow are only visible/possible
+    // while this is ON. Re-checked on every resume so flipping the toggle
+    // in Settings is reflected when the user comes back.
+    val pairingContext = LocalContext.current
+    var pairingEnabled by remember { mutableStateOf(com.wepwawet.pairing.PairingService.isPairingEnabled(pairingContext)) }
+    val pairingLifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(pairingLifecycleOwner) {
+        val observer = object : androidx.lifecycle.DefaultLifecycleObserver {
+            override fun onResume(owner: androidx.lifecycle.LifecycleOwner) {
+                pairingEnabled = com.wepwawet.pairing.PairingService.isPairingEnabled(pairingContext)
+            }
+        }
+        pairingLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { pairingLifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     // Sync local state when the repo's query changes (e.g., after navigation
     // back, or after clearSearch was called from elsewhere — sort/tag change
     // LaunchedEffect below calls repo.clearSearch() which clears the repo
@@ -660,15 +677,21 @@ fun WorkshopBrowserScreen(
                                 )
                             }
                         }
-                        // Pairing (Bluetooth) button.
-                        IconButton(onClick = {
-                            WepWawetLogger.workshop("topbar pairing tapped")
-                            onOpenPairing()
-                        }) {
-                            Icon(
-                                Icons.Filled.Bluetooth,
-                                contentDescription = "Pairing",
-                            )
+                        // Pairing (Bluetooth) button — v0.8.1: only visible
+                        // while the pairing subsystem is enabled in Settings
+                        // ("Send to phone" toggle). With pairing off, the
+                        // button is hidden entirely so nothing pairing-
+                        // related is reachable.
+                        if (pairingEnabled) {
+                            IconButton(onClick = {
+                                WepWawetLogger.workshop("topbar pairing tapped")
+                                onOpenPairing()
+                            }) {
+                                Icon(
+                                    Icons.Filled.Bluetooth,
+                                    contentDescription = "Pairing",
+                                )
+                            }
                         }
                     }
                 },

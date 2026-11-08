@@ -35,6 +35,7 @@ import io.wallpaperengine.weutil.GLUtil
 import io.wallpaperengine.weutil.VecUtil
 import io.wallpaperengine.weutil.WallpaperSurfaceHack
 import io.wallpaperengine.wrapper.SceneLib
+import com.wepwawet.log.WepWawetLogger
 import java.io.File
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
@@ -318,6 +319,8 @@ class VideoWallpaperView(context: Context) :
         if (currentFile == null || !isSurfaceValid) return@Runnable
         pendingReloadCheck = false
         if (isPaused) return@Runnable
+        WepWawetLogger.engineWarn("VideoView: watchdog fired — video stopped producing frames, reloading",
+            "file" to currentFile)
         loadWallpaper(currentFile!!)
     }
 
@@ -621,6 +624,8 @@ class VideoWallpaperView(context: Context) :
         GLES30.glViewport(0, 0, width, height)
         surfaceWidth = width
         surfaceHeight = height
+        WepWawetLogger.engine("VideoView: surface changed",
+            "width" to width, "height" to height)
         synchronized(this) {
             isSurfaceValid = true
             pendingFile?.let { loadWallpaper(it) }
@@ -631,9 +636,12 @@ class VideoWallpaperView(context: Context) :
     }
 
     override fun onSurfaceCreated(gl: GL10, config: EGLConfig) {
+        WepWawetLogger.engine("VideoView: GL surface created")
         program = try {
             createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
         } catch (e: Exception) {
+            WepWawetLogger.engine("VideoView: ESSL3 program failed — falling back to GLSL 100",
+                "reason" to (e.message ?: ""))
             createProgram(VERTEX_SHADER_100, FRAGMENT_SHADER_100)
         }
         positionHandle = attr("aPosition", program)
@@ -716,6 +724,9 @@ class VideoWallpaperView(context: Context) :
 
     @Synchronized
     override fun loadWallpaper(file: String) {
+        WepWawetLogger.engine("VideoView: loading wallpaper",
+            "file" to file,
+            "surface_valid" to isSurfaceValid)
         isProducingFrames = false
         if (!isSurfaceValid) {
             pendingFile = file
@@ -743,6 +754,10 @@ class VideoWallpaperView(context: Context) :
             type.startsWith("image/") -> WallpaperImageDrawable()
             else -> VideoDrawable()
         }
+        WepWawetLogger.engine("VideoView: drawable chosen",
+            "mime" to (if (type.isEmpty()) "(package)" else type),
+            "drawable" to wallpaperView!!.javaClass.simpleName,
+            "local_player" to isLocalPlayer)
         wallpaperView?.load(file)
 
         val defaults = Property.fromJson(PropertyList.defaultVideoProperties)
@@ -1322,9 +1337,29 @@ class VideoWallpaperView(context: Context) :
                 try {
                     video.setDataSource(context, Uri.parse(file))
                 } catch (t: Throwable) {
+                    WepWawetLogger.engineWarn("VideoView: local URI data source failed",
+                        "file" to file,
+                        "exception" to (t.message ?: t.javaClass.name))
                 }
             } else {
-                val range = lib?.getWallpaperFileVirtualOffset(file) ?: return
+                // v0.8.1: the missing-lib case is exactly what made every
+                // package Video wallpaper render black before — it MUST be
+                // visible in the logs, not a silent return.
+                val engineLib = lib
+                if (engineLib == null) {
+                    WepWawetLogger.engineWarn("VideoView: SceneLib is NULL — cannot open package video (this is a bug; setLib was never called)",
+                        "file" to file)
+                    return
+                }
+                val range = engineLib.getWallpaperFileVirtualOffset(file)
+                if (range == null) {
+                    WepWawetLogger.engineWarn("VideoView: no video byte range in package — not a video wallpaper?",
+                        "file" to file)
+                    return
+                }
+                WepWawetLogger.engine("VideoView: opening package video",
+                    "offset" to range.vOffset,
+                    "size" to range.vSize)
                 try {
                     video.setDataSource(
                         WeEnginePrefs.mpkgVideoReader(
@@ -1333,6 +1368,8 @@ class VideoWallpaperView(context: Context) :
                         )
                     )
                 } catch (e: Exception) {
+                    WepWawetLogger.engineWarn("VideoView: package video data source failed",
+                        "exception" to (e.message ?: e.javaClass.name))
                 }
             }
             surface?.release()
@@ -1342,7 +1379,12 @@ class VideoWallpaperView(context: Context) :
             try {
                 video.prepare()
                 videoWasPrepared = true
+                WepWawetLogger.engine("VideoView: video prepared",
+                    "width" to video.videoWidth,
+                    "height" to video.videoHeight)
             } catch (t: Throwable) {
+                WepWawetLogger.engineWarn("VideoView: prepare failed — video will not play",
+                    "exception" to (t.message ?: t.javaClass.name))
             }
         }
 
@@ -1368,8 +1410,15 @@ class VideoWallpaperView(context: Context) :
         }
 
         override fun play() {
-            if (!video.isPlaying) {
-                video.start()
+            try {
+                if (!video.isPlaying) {
+                    video.start()
+                }
+            } catch (t: Throwable) {
+                // v0.8.1: the official never hits this (its lib is always
+                // set) — log instead of crashing the GL thread.
+                WepWawetLogger.engineWarn("VideoView: video.start() failed",
+                    "exception" to (t.message ?: t.javaClass.name))
             }
             pendingReloadCheck = true
             getActiveHandler()?.removeCallbacks(reloadWallpaper)

@@ -21,6 +21,7 @@ import io.wallpaperengine.weutil.FreeAlignTouchHandler
 import io.wallpaperengine.weutil.GLUtil
 import io.wallpaperengine.weutil.WallpaperSurfaceHack
 import io.wallpaperengine.wrapper.SceneLib
+import com.wepwawet.log.WepWawetLogger
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
@@ -195,6 +196,7 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
         val renderer = Renderer()
         sceneRenderer = renderer
         setRenderer(renderer)
+        WepWawetLogger.engine("SceneView: renderer installed")
     }
 
     // =====================================================================
@@ -411,9 +413,13 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
         private var wallpaperHeight: Int = 0
 
         private fun loadScene(packageFile: String) {
+            WepWawetLogger.engine("SceneView: loading scene",
+                "file" to packageFile)
             if (sceneContext == 0) {
                 val lib = lib ?: return
                 sceneContext = lib.initContext(this@SceneWallpaperView.context)
+                WepWawetLogger.engine("SceneView: engine context created",
+                    "context" to sceneContext)
             }
             val lib = lib ?: return
             lib.shutdownScene(sceneContext)
@@ -427,6 +433,13 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
             supportsAlignment = (featureFlags and 2) != 0
             val parallaxAvailable = (featureFlags and 4) != 0
             val physicsAvailable = (featureFlags and 8) != 0
+            WepWawetLogger.engine("SceneView: scene initialized",
+                "file" to packageFile,
+                "canvas" to "${canvasSize.x}x${canvasSize.y}",
+                "flags_audio" to supportsAudioProcessing,
+                "flags_alignment" to supportsAlignment,
+                "flags_parallax" to parallaxAvailable,
+                "flags_physics" to physicsAvailable)
 
             val defaults = Property.fromJson(PropertyList.defaultSceneProperties)
             if (parallaxAvailable || physicsAvailable) {
@@ -494,12 +507,16 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
             getActiveHandler()?.post {
                 loadCallback?.run()
             }
+            WepWawetLogger.engine("SceneView: scene load complete — properties ready",
+                "properties" to working.size)
         }
 
         fun requestLoadScene(packageFile: String) {
             if (surfaceValid) {
                 loadScene(packageFile)
             } else {
+                WepWawetLogger.engine("SceneView: surface not valid yet — scene pending",
+                    "file" to packageFile)
                 pendingScene = packageFile
             }
         }
@@ -560,6 +577,8 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
         override fun onSurfaceChanged(gl: GL10, width: Int, height: Int) {
             wallpaperWidth = width
             wallpaperHeight = height
+            WepWawetLogger.engine("SceneView: surface changed",
+                "width" to width, "height" to height)
             if (sceneContext != 0) {
                 lib?.resizeScene(sceneContext, width, height)
             }
@@ -573,6 +592,7 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
         }
 
         override fun onSurfaceCreated(gl: GL10, config: EGLConfig) {
+            WepWawetLogger.engine("SceneView: GL surface created")
             surfaceValid = true
             pendingScene?.let {
                 loadScene(it)

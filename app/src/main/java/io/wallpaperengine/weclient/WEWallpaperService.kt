@@ -33,6 +33,7 @@ import io.wallpaperengine.weviews.SceneWallpaperView
 import io.wallpaperengine.weviews.VideoWallpaperView
 import io.wallpaperengine.weviews.WallpaperControls
 import io.wallpaperengine.wrapper.SceneLib
+import com.wepwawet.log.WepWawetLogger
 import java.util.Calendar
 
 /**
@@ -178,6 +179,12 @@ class WEWallpaperService : WallpaperService() {
             }
             lib.initLibrary(this@WEWallpaperService)
             lib.setLogToFileEnabled(generalSettings.logToFileEnabled)
+            WepWawetLogger.engine("WEWallpaperService: engine created",
+                "is_preview" to isPreview,
+                "touch_input" to generalSettings.touchInputEnabled,
+                "max_fps" to generalSettings.maxFps,
+                "power_save" to generalSettings.powerSavingEnabled,
+                "log_to_file" to generalSettings.logToFileEnabled)
         }
 
         private fun shouldBePaused(): Boolean {
@@ -462,6 +469,9 @@ class WEWallpaperService : WallpaperService() {
                 this@WEWallpaperService, WeEnginePrefs.PREF_KEY_SELECTED_WALLPAPER
             )
             currentFile = storedString
+            WepWawetLogger.engine("Service: reloadActiveWallpaper",
+                "selected" to (storedString ?: "(none — nothing applied yet)"),
+                "holder_ready" to (holder != null))
             if (storedString != null) {
                 if (holder != null) {
                     loadWallpaper(storedString)
@@ -527,6 +537,8 @@ class WEWallpaperService : WallpaperService() {
         }
 
         fun loadWallpaper(file: String) {
+            WepWawetLogger.engine("Service: loadWallpaper",
+                "file" to file)
             audioRecorder?.stopAudioListener()
             audioRecorder = null
 
@@ -538,6 +550,9 @@ class WEWallpaperService : WallpaperService() {
             }
 
             val wallpaperType = lib.getWallpaperType(file)
+            WepWawetLogger.engine("Service: resolved wallpaper type",
+                "file" to file,
+                "type" to (wallpaperType ?: "null (local/SAF)"))
             if (wallpaperType == "Scene") {
                 val sceneWallpaperView: SceneWallpaperView
                 synchronized(Companion) {
@@ -556,6 +571,12 @@ class WEWallpaperService : WallpaperService() {
                     videoWallpaperView.setCustomHandler(handler)
                     videoWallpaperView.setLocalPlayer(wallpaperType == null)
                 }
+                // v0.8.1 FIX (the blank/black wallpaper bug): the official
+                // client calls setLib(this.lib) right here — without it the
+                // video view can never resolve the .mpkg byte range for its
+                // MediaPlayer (getWallpaperFileVirtualOffset needs the SceneLib
+                // instance) and every package Video wallpaper renders black.
+                videoWallpaperView.lib = lib
                 wallpaperControls = videoWallpaperView
                 wallpaper = videoWallpaperView
             }
@@ -641,6 +662,8 @@ class WEWallpaperService : WallpaperService() {
         override fun onSurfaceCreated(holder: android.view.SurfaceHolder) {
             super.onSurfaceCreated(holder)
             this.holder = getSurfaceHolder()
+            WepWawetLogger.engine("Service: wallpaper surface created",
+                "surface_frame" to (this.holder?.surfaceFrame?.toString() ?: "null"))
             val pending = pendingFile
             if (pending != null) {
                 loadWallpaper(pending)

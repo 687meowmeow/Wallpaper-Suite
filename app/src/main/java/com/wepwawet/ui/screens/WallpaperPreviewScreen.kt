@@ -21,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -55,6 +56,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 import com.wepwawet.engine.EngineLibrary
+import com.wepwawet.log.WepWawetLogger
 import com.wepwawet.ui.components.SlimTopBar
 import io.wallpaperengine.weclient.WeEnginePrefs
 import io.wallpaperengine.weclient.WallpaperProperties
@@ -71,12 +73,21 @@ import kotlinx.coroutines.withContext
  * Live-rendering preview of a library wallpaper with Apply, per-wallpaper
  * properties, file details and playlist management — the Compose
  * replacement for the official client's PreviewActivity.
+ *
+ * v0.8.1: every lifecycle step around the integrated engine logs through
+ * [com.wepwawet.log.WepWawetLogger.engine] (the WEP-ENG domain) so blank/
+ * black-render issues are diagnosable from the in-app Logs screen; chatty
+ * entries are DEBUG-level and only appear while the verbose-logging toggle
+ * is ON. When the wallpaper's project.json carries a workshopurl (every
+ * wallpaper downloaded through the app does), a "Workshop page" button
+ * opens the item's in-app workshop detail page.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun WallpaperPreviewScreen(
     wallpaper: WallpaperInfoSparse,
     onBack: () -> Unit,
+    onOpenWorkshop: (itemId: String) -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -88,6 +99,7 @@ fun WallpaperPreviewScreen(
         EngineLibrary.getSelectedWallpaper(context) == wallpaper.filePath
     ) }
     var details by remember { mutableStateOf<Triple<String, String, Int>?>(null) }
+    var workshopId by remember { mutableStateOf<String?>(null) }
 
     // The live renderer: Scene through the native engine, everything else
     // (Video/Image/GIF) through the ported GL video pipeline.
@@ -95,25 +107,34 @@ fun WallpaperPreviewScreen(
     var view by remember { mutableStateOf<View?>(null) }
     var propertiesRevision by remember { mutableStateOf(0) }
 
+    WepWawetLogger.engine("Preview: opened wallpaper",
+        "title" to wallpaper.title,
+        "file" to wallpaper.filePath,
+        "type" to (wallpaper.type.ifEmpty { "(unknown)" }),
+        "is_local" to wallpaper.isLocal,
+        "is_official" to wallpaper.isOfficial)
+
     val audioPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { /* the engine retries the Visualizer on next load */ }
 
     fun applyNow(forcePicker: Boolean) {
         scope.launch {
-            val reloaded = withContext(Dispatchers.IO) {
-                // refresh metadata in case the file changed
-                wallpaper
-            }
-            val hotReloaded = WeEnginePrefs.callApplyWallpaper(context, reloaded, forcePicker)
+            WepWawetLogger.engine("Preview: apply requested",
+                "file" to wallpaper.filePath,
+                "force_picker" to forcePicker)
+            val hotReloaded = WeEnginePrefs.callApplyWallpaper(context, wallpaper, forcePicker)
             applied = true
             if (!hotReloaded) {
-                snackbar.showSnackbar("Finish choosing WepWawet in the wallpaper picker")
+                snackbar.showSnackbar("Finish choosing WallpaperSuite in the wallpaper picker")
+            } else {
+                WepWawetLogger.engine("Preview: wallpaper hot-reloaded in the running service")
             }
         }
     }
 
     fun onLoaded() {
+        WepWawetLogger.engine("Preview: wallpaper finished loading (load callback fired)")
         val c = controls ?: return
         // Audio-responsive wallpapers need the microphone permission for the
         // system-mix Visualizer (Android 10+ requirement).
@@ -169,8 +190,12 @@ fun WallpaperPreviewScreen(
                         val type = try {
                             EngineLibrary.sceneLib(ctx).getWallpaperType(wallpaper.filePath)
                         } catch (t: Throwable) {
+                            WepWawetLogger.engineWarn("Preview: getWallpaperType failed",
+                                "exception" to (t.message ?: t.javaClass.name))
                             null
                         }
+                        WepWawetLogger.engine("Preview: creating renderer view",
+                            "type" to (type ?: "null → local/SAF player"))
                         val created: View = if (type == "Scene") {
                             SceneWallpaperView(ctx).also { sceneView ->
                                 sceneView.onCreated(EngineLibrary.sceneLib(ctx))
@@ -179,6 +204,10 @@ fun WallpaperPreviewScreen(
                         } else {
                             VideoWallpaperView(ctx).also { videoView ->
                                 videoView.setLocalPlayer(type == null)
+                                // v0.8.1 FIX (blank preview bug): the official
+                                // PreviewActivity calls setLib(this.lib) — the
+                                // package-video byte-range lookup needs it.
+                                videoView.lib = EngineLibrary.sceneLib(ctx)
                                 controls = videoView
                             }
                         }
@@ -186,7 +215,7 @@ fun WallpaperPreviewScreen(
                         created
                     },
                     update = { _ -> },
-                    onRelease = { controls?.onDestroyWallpaper() },
+                    onRelease = { },
                 )
             }
 
@@ -201,6 +230,23 @@ fun WallpaperPreviewScreen(
                     val type = WeEnginePrefs.getWallpaperType(context, lib, wallpaper) ?: "—"
                     val resolution = WeEnginePrefs.getWallpaperResolution(context, lib, wallpaper)
                     val fps = WeEnginePrefs.getWallpaperFPS(context, lib, wallpaper.filePath)
+                    // v0.8.1: resolve the workshop page (only exists for
+                    // wallpapers that carry a workshopurl in project.json —
+                    // every workshop download through this app does).
+                    val workshopUrl = runCatching {
+                        if (!wallpaper.isLocal) {
+                            lib.getWallpaperProjectString(wallpaper.filePath, "workshopurl")
+                        } else null
+                    }.getOrNull()
+                    workshopId = workshopUrl?.let { url ->
+                        Regex("[?&]id=(\\d+)").find(url)?.groupValues?.get(1)
+                    }
+                    if (workshopId == null) {
+                        WepWawetLogger.engineDebug("Preview: no workshop url for this wallpaper")
+                    } else {
+                        WepWawetLogger.engine("Preview: workshop page available",
+                            "item_id" to workshopId!!)
+                    }
                     Triple(
                         type,
                         resolution?.let { "${it.x} × ${it.y}" } ?: "—",
@@ -211,6 +257,7 @@ fun WallpaperPreviewScreen(
 
             DisposableEffect(view) {
                 onDispose {
+                    WepWawetLogger.engine("Preview: leaving — stopping renderer")
                     controls?.onStopWallpaper()
                     controls?.onDestroyWallpaper()
                 }
@@ -228,6 +275,29 @@ fun WallpaperPreviewScreen(
                     if (fps > 0) {
                         DetailPill("FPS", fps.toString())
                     }
+                }
+            }
+
+            // v0.8.1: jump to this wallpaper's workshop page inside the app
+            // (the in-app workshop detail screen) when its package carries a
+            // workshopurl — true for everything downloaded through the app.
+            workshopId?.let { id ->
+                OutlinedButton(
+                    onClick = {
+                        WepWawetLogger.engine("Preview: opening workshop page", "item_id" to id)
+                        onOpenWorkshop(id)
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.OpenInNew,
+                        contentDescription = null,
+                        modifier = Modifier.height(18.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Workshop page")
                 }
             }
 

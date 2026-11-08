@@ -88,7 +88,7 @@ class PairingService : Service() {
         /** v0.7.21: The last notification text — used by the delete receiver to
          *  re-post the notification with the correct text. */
         @Volatile
-        var lastNotificationText: String = "WepWawet proxy running"
+        var lastNotificationText: String = "WallpaperSuite proxy running"
 
         /**
          * v0.7.23: Weak reference to the currently-running PairingService
@@ -123,6 +123,52 @@ class PairingService : Service() {
         private const val KEY_PIN = "pairing_pin"
         private const val KEY_PAIRED_DEVICE = "paired_device_name"
         private const val DEFAULT_PIN = "1234"
+
+        // v0.8.1: the master switch for the ENTIRE pairing subsystem. The
+        // user wants zero pairing activity unless this is explicitly ON —
+        // no foreground service, no discovery broadcasts, no boot restart,
+        // and no "Send to phone" button anywhere in the UI.
+        private const val KEY_PAIRING_ENABLED = "pairing_enabled"
+
+        /**
+         * v0.8.1: is the pairing subsystem enabled? Default OFF — the app is
+         * a self-contained Wallpaper Engine client now; pairing (acting as a
+         * fake PC for the official WE Android app) is opt-in.
+         */
+        fun isPairingEnabled(context: Context): Boolean {
+            return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getBoolean(KEY_PAIRING_ENABLED, false)
+        }
+
+        /**
+         * v0.8.1: flip the pairing subsystem on/off. Turning it ON starts the
+         * pairing foreground service immediately (same as the old app-launch
+         * auto-start); turning it OFF stops the service right away. Both
+         * paths are logged so the toggle's effect is verifiable in the Logs
+         * screen.
+         */
+        fun setPairingEnabled(context: Context, enabled: Boolean) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_PAIRING_ENABLED, enabled)
+                .apply()
+            WepWawetLogger.proxy("pairing toggle changed",
+                "enabled" to enabled)
+            if (enabled) {
+                appContext = context.applicationContext
+                runCatching {
+                    start(context, getPairingPin(context))
+                }.onFailure {
+                    WepWawetLogger.proxyWarn("pairing toggle: service start failed",
+                        "exception" to (it.message ?: it.javaClass.name))
+                }
+            } else {
+                runCatching {
+                    stop(context)
+                }
+                WepWawetLogger.proxy("pairing disabled — pairing service stopped")
+            }
+        }
 
         /** Get the user's saved pairing PIN (default: "1234"). */
         fun getPairingPin(context: Context): String {
@@ -545,7 +591,7 @@ class PairingService : Service() {
             val notifText = if (!displayName.isNullOrBlank()) {
                 "Paired: $displayName"
             } else {
-                "WepWawet proxy running. PIN: $pin"
+                "WallpaperSuite proxy running. PIN: $pin"
             }
             updateNotification(notifText)
 
@@ -581,7 +627,7 @@ class PairingService : Service() {
         val initialNotifText = if (!persistedName.isNullOrBlank()) {
             "Paired: $persistedName"
         } else {
-            "WepWawet proxy running. PIN: $pin"
+            "WallpaperSuite proxy running. PIN: $pin"
         }
         val notification = createNotification(initialNotifText)
 
@@ -662,7 +708,7 @@ class PairingService : Service() {
                 server.onDisconnected = {
                     pairedDeviceName = null
                     val pinForNotif = runningPin ?: getPairingPin(applicationContext)
-                    updateNotification("WepWawet proxy running. PIN: $pinForNotif")
+                    updateNotification("WallpaperSuite proxy running. PIN: $pinForNotif")
                     WepWawetLogger.proxy("Pairing: phone disconnected — UI reverted to 'not paired' (persisted name kept)")
                 }
                 // v0.7.1 (round 6): pass the persistent keypair so the
@@ -742,7 +788,7 @@ class PairingService : Service() {
     private fun createNotificationChannel() {
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "WepWawet Pairing",
+            "WallpaperSuite Pairing",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
             description = "Pairing proxy service for Wallpaper Engine"
@@ -799,7 +845,7 @@ class PairingService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("WepWawet")
+            .setContentTitle("WallpaperSuite")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setOngoing(true)

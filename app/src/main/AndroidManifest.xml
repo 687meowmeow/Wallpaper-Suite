@@ -46,7 +46,7 @@
     <!-- But for the official WE Android app to find the .mpkg outbox, we may need to expose via FileProvider -->
 
     <!-- WRITE_EXTERNAL_STORAGE for Android 9 and below so we can write crash logs
-         and boot breadcrumbs to the public Downloads/WepWawet/ directory via legacy
+         and boot breadcrumbs to the public Downloads/WallpaperSuite/ directory via legacy
          File API. On Android 10+ we use MediaStore (no permission needed). -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
@@ -230,6 +230,7 @@
         -->
         <service
             android:name="io.wallpaperengine.weclient.WEWallpaperService"
+            android:label="@string/app_name"
             android:permission="android.permission.BIND_WALLPAPER"
             android:enabled="true"
             android:exported="true"

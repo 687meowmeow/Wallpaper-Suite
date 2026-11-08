@@ -55,6 +55,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.wepwawet.engine.EngineLibrary
+import com.wepwawet.log.WepWawetLogger
 import com.wepwawet.ui.components.SlimTopBar
 import io.wallpaperengine.weclient.WeEnginePrefs
 import io.wallpaperengine.weutil.WallpaperInfoSparse
@@ -89,6 +90,7 @@ fun LibraryScreen(
     fun reload() {
         scope.launch {
             loading = true
+            WepWawetLogger.engineDebug("LibraryScreen: reloading")
             wallpapers = EngineLibrary.enumerateWallpapers(context)
             selectedPath = EngineLibrary.getSelectedWallpaper(context)
             loading = false
@@ -266,7 +268,13 @@ fun LibraryScreen(
                             LibraryWallpaperCard(
                                 wallpaper = wallpaper,
                                 isActive = selectedPath == wallpaper.filePath,
-                                onClick = { onOpenWallpaper(wallpaper) },
+                                onClick = {
+                                    WepWawetLogger.engine("LibraryScreen: wallpaper tapped",
+                                        "title" to wallpaper.title,
+                                        "file" to wallpaper.filePath,
+                                        "is_local" to wallpaper.isLocal)
+                                    onOpenWallpaper(wallpaper)
+                                },
                                 onLongClick = { pendingDelete = wallpaper },
                             )
                         }
@@ -332,6 +340,10 @@ private fun LibraryWallpaperCard(
                 WeEnginePrefs.getWallpaperPreviewBitmap(
                     context, EngineLibrary.sceneLib(context), wallpaper,
                 )
+            }.onFailure {
+                WepWawetLogger.engineWarn("LibraryScreen: preview thumbnail failed",
+                    "file" to wallpaper.filePath,
+                    "exception" to (it.message ?: it.javaClass.name))
             }.getOrNull()
         }
     }

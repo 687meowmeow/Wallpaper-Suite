@@ -148,12 +148,17 @@ fun WepWawetNavHost() {
         }
 
         // v0.8.0: live-rendering preview + apply + properties + playlist.
+        // v0.8.1: onOpenWorkshop — the preview's "Workshop page" button jumps
+        // to the existing in-app workshop detail screen for the item the
+        // wallpaper was downloaded from (resolved from the package's
+        // workshopurl in project.json).
         composable("preview") {
             val wallpaper = com.wepwawet.engine.PreviewRequestHolder.peek()
                 ?: io.wallpaperengine.weutil.WallpaperInfoSparse()
             WallpaperPreviewScreen(
                 wallpaper = wallpaper,
                 onBack = { nav.popBackStack() },
+                onOpenWorkshop = { itemId -> nav.navigate("detail/$itemId") },
             )
         }
 

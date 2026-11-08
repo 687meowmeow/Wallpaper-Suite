@@ -1,8 +1,8 @@
-# WepWawet
+# WallpaperSuite
 
 > A complete personal Wallpaper Engine for Android: browse 3M+ Steam Workshop items, download them with your own Steam account, **and render them as live wallpapers directly on your phone** — powered by the official WE engine. **No PC required.**
 
-**Status: v0.8.0-alpha.** The app now integrates the official Wallpaper Engine renderer (scenes, videos, images, GIFs) as a live wallpaper service, with a wallpaper library as the home screen, manual import, playlists, per-wallpaper properties and battery-aware playback. The workshop browser, mpkg packer and pairing proxy from earlier versions are all still here.
+**Status: v0.8.1-alpha.** The app integrates the official Wallpaper Engine renderer (scenes, videos, images, GIFs) as a live wallpaper service, with a wallpaper library as the home screen, a one-tap **Download** button that puts workshop items straight into the engine, manual import, playlists, per-wallpaper properties and battery-aware playback. The workshop browser, mpkg packer and pairing proxy are all still here — pairing is now **opt-in** behind a Settings toggle.
 
 [![Build APK](https://github.com/687meowmeow/Wallpaper-Suite/actions/workflows/build.yml/badge.svg)](https://github.com/687meowmeow/Wallpaper-Suite/actions/workflows/build.yml)
 
@@ -20,26 +20,30 @@ Because I'm too lazy to turn my PC on.
 
 ## What this is
 
-WepWawet is an Android app (Kotlin + Jetpack Compose, min Android 10 / API 29, target SDK 35) that lets you browse the Steam Workshop for Wallpaper Engine (app 431960), inspect items, and download the actual wallpaper packs to your device.
+WallpaperSuite is an Android app (Kotlin + Jetpack Compose, min Android 10 / API 29, target SDK 35) that lets you browse the Steam Workshop for Wallpaper Engine (app 431960), inspect items, and download the actual wallpaper packs to your device — where the app's **integrated Wallpaper Engine** (the official `libscenejni.so` renderer, ported 1:1 from the free WE Android client) plays them as live wallpapers.
 
 Downloads run through **on-device JavaSteam**. Your Steam credentials stay on your phone and JavaSteam talks directly to Steam's auth and content servers. No PC, no server, no third-party service. Steam Guard 2FA is supported, and refresh tokens are saved so you can skip 2FA on later sessions.
 
-The app also includes a foreground **pairing proxy** (`PairingService`) that lets the official Wallpaper Engine Android app pair with WepWawet acting as a "fake PC". This lets WE's own UI pull content served by WepWawet.
+The app can also act as a **pairing proxy** for the official Wallpaper Engine Android app (WepWawet-style "fake PC" mode). This is **off by default** — enable it with the **Settings → "Send to phone"** toggle, which starts the pairing service and brings the send-to-phone button back. While the toggle is off, nothing pairing-related runs at all: no foreground service, no discovery broadcasts, no boot restart.
 
 ## Features
 
+- **Wallpaper library home screen**: every wallpaper the engine knows (bundled official WE wallpapers, workshop downloads, imported files) in one grid, with an Active badge and the Browse Workshop button.
+- **Live preview**: tap any wallpaper to render it live through the engine — scenes, videos, images and GIFs — with per-wallpaper properties (sliders, combos, colors), playlist management and a workshop-page button that opens the item's page inside the app.
 - **Browse & search**: scroll through Wallpaper Engine workshop items, sort them, search by text, and filter by tags.
-- **Item details**: see previews, descriptions, and creator names for any wallpaper.
 - **Steam login**: sign in with your own account, including Steam Guard / 2FA. Your login is remembered.
-- **Download**: grab wallpaper packs straight to your phone, with a download manager to track progress.
-- **Works with the official WE app**: converts wallpapers into a format the Android Wallpaper Engine app can use, and pairs with it as a "fake PC".
-- **Logs**: built-in logging with crash capture and one-tap export for bug reports.
+- **Download**: one button downloads the real `.pkg` via JavaSteam, packs it into the `.mpkg` the engine plays, and imports it straight into the app's wallpaper library. No PC, no pairing required.
+- **Send to phone (opt-in)**: the PC-pairing subsystem for the official WE Android app, behind a Settings toggle.
+- **Manual import**: open `.mpkg` / video / image / GIF files from any file manager, or pick them in-app.
+- **Battery aware**: the wallpaper pauses when not visible and in system power-save mode, scenes respect the FPS limit, videos run at native FPS.
+- **Logs**: built-in logging (including an engine lifecycle domain) with crash capture and one-tap export for bug reports.
 
 ## Tech stack
 
 | Area | Tech |
 |------|------|
 | Language / UI | Kotlin 2.2, Jetpack Compose, Navigation Compose |
+| Renderer | Official `libscenejni.so` (from the free WE Android client) + the ported `io.wallpaperengine.*` Java layer |
 | Networking | OkHttp, Retrofit, kotlinx.serialization |
 | Steam access | [JavaSteam](https://github.com/Longi94/JavaSteam) via a patched fork (`com.github.687meowmeow:JavaSteam`, `1.8.0-wepwawet10`) |
 | Images | Coil |
@@ -58,6 +62,8 @@ The JavaSteam fork exists because upstream skips some Wallpaper Engine workshop 
 | `app/src/main/java/com/wepwawet/ui/` | Compose UI: screens, components, theme, nav host |
 | `app/src/main/java/com/wepwawet/data/` | Steam API service, repository, models, download manager |
 | `app/src/main/java/com/wepwawet/pairing/` | JavaSteam downloader, pairing server, discovery, `.pkg`/`.mpkg` handling, ETC2 encoder |
+| `app/src/main/java/com/wepwawet/engine/` | Engine library bridge: enumerate / import / delete wallpapers |
+| `app/src/main/java/io/wallpaperengine/` | The ported official client layer (JNI ABI — names are load-bearing) |
 | `app/src/main/java/com/wepwawet/auth/` | Steam login activity |
 | `app/src/main/java/com/wepwawet/log/` | Logger, crash handler, log persistence |
 | `app/src/main/cpp/` | JNI + bundled etc2comp |
@@ -67,7 +73,7 @@ The JavaSteam fork exists because upstream skips some Wallpaper Engine workshop 
 
 ## Device requirements
 
-- **Android:** 8.0 (API 26) or higher
+- **Android:** 10 (API 29) or higher
 - **ABI:** arm64-v8a only
 - **SoC:** Snapdragon 8 Gen 2 or newer is the tested target
 - **RAM:** 6 GB+ recommended
@@ -86,7 +92,7 @@ Requirements: JDK 17 and the Android SDK with NDK + CMake.
 
 ## Disclaimer
 
-Not affiliated with Valve, Steam, or Wallpaper Engine / Kristjan Skutta. You need your own Steam account.
+Not affiliated with Valve, Steam, or Wallpaper Engine / Kristjan Skutta. You need your own Steam account. Wallpaper Engine's Android client is free; its engine binary is used here unmodified, as distributed at wallpaperengine.io/android.
 
 ## License
 

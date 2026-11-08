@@ -54,6 +54,7 @@ object WepWawetLogger {
         STEAM("WEP-STEAM"),
         WORKSHOP("WEP-WS"),
         LIFECYCLE("WEP-LIFE"),
+        ENGINE("WEP-ENG"),
         CRASH("WEP-CRASH"),
     }
 
@@ -217,6 +218,26 @@ object WepWawetLogger {
 
     fun lifecycle(message: String, vararg context: Pair<String, Any?>) =
         log(Domain.LIFECYCLE, Level.INFO, message, context.toMap(), null)
+
+    /**
+     * v0.8.1: the integrated Wallpaper Engine domain — the library grid, the
+     * live preview, the wallpaper service and every engine view lifecycle
+     * event log through these. DEBUG entries are suppressed unless the
+     * verbose-logging toggle is ON (minLevel flips TRACE <-> WARN), which is
+     * exactly the "hook it up to the verbose logging toggle" contract: key
+     * lifecycle events (INFO) and failures (WARN/ERROR) are always captured.
+     */
+    fun engine(message: String, vararg context: Pair<String, Any?>) =
+        log(Domain.ENGINE, Level.INFO, message, context.toMap(), null)
+
+    fun engineDebug(message: String, vararg context: Pair<String, Any?>) =
+        log(Domain.ENGINE, Level.DEBUG, message, context.toMap(), null)
+
+    fun engineWarn(message: String, vararg context: Pair<String, Any?>) =
+        log(Domain.ENGINE, Level.WARN, message, context.toMap(), null)
+
+    fun engineError(message: String, vararg context: Pair<String, Any?>, exception: Throwable? = null) =
+        log(Domain.ENGINE, Level.ERROR, message, context.toMap(), exception)
 
     fun crash(message: String, context: Map<String, Any?>, exception: Throwable? = null) =
         log(Domain.CRASH, Level.FATAL, message, context, exception)

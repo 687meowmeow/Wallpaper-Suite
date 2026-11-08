@@ -95,12 +95,12 @@ fun LogsScreen(onBack: () -> Unit) {
             }
         }
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("WepWawet Logs", text))
+        clipboard.setPrimaryClip(ClipData.newPlainText("WallpaperSuite Logs", text))
         Toast.makeText(context, "Copied ${events.size} log entries", Toast.LENGTH_SHORT).show()
     }
 
     /**
-     * Download the full log buffer to the public Downloads/WepWawet/
+     * Download the full log buffer to the public Downloads/WallpaperSuite/
      * directory as a timestamped .txt file. Uses MediaStore on Android 10+
      * (no permission needed). The file appears in the user's Downloads
      * folder immediately — they can attach it to bug reports or share it.
@@ -108,7 +108,7 @@ fun LogsScreen(onBack: () -> Unit) {
     fun downloadLogs() {
         if (isDownloading) return
         isDownloading = true
-        downloadStatus = "Writing ${events.size} log entries to Downloads/WepWawet/…"
+        downloadStatus = "Writing ${events.size} log entries to Downloads/WallpaperSuite/…"
         val snapshot = events.toList()
         val timestamp = ZonedDateTime.now().format(
             DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
@@ -121,7 +121,7 @@ fun LogsScreen(onBack: () -> Unit) {
                 val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
                     .withZone(ZoneId.systemDefault())
                 val sb = StringBuilder(snapshot.size * 200)  // ~200 bytes per entry estimate
-                sb.append("=== WepWawet log dump ===\n")
+                sb.append("=== WallpaperSuite log dump ===\n")
                 sb.append("Generated: ").append(ZonedDateTime.now()).append("\n")
                 sb.append("Entries: ").append(snapshot.size).append("\n")
                 sb.append("\n")
@@ -142,9 +142,9 @@ fun LogsScreen(onBack: () -> Unit) {
                 val uri = PublicDownloadsWriter.writeText(context, fileName, text)
                 withContext(Dispatchers.Main) {
                     if (uri != null) {
-                        downloadStatus = "Saved ${snapshot.size} entries to Downloads/WepWawet/$fileName"
+                        downloadStatus = "Saved ${snapshot.size} entries to Downloads/WallpaperSuite/$fileName"
                         Toast.makeText(context,
-                            "Saved to Downloads/WepWawet/$fileName",
+                            "Saved to Downloads/WallpaperSuite/$fileName",
                             Toast.LENGTH_LONG).show()
                         WepWawetLogger.appInfo("LogsScreen.downloadLogs success",
                             "file" to fileName,
@@ -182,7 +182,7 @@ fun LogsScreen(onBack: () -> Unit) {
                 title = "Logs (${events.size})",
                 onBack = onBack,
                 actions = {
-                    // Download logs to Downloads/WepWawet/
+                    // Download logs to Downloads/WallpaperSuite/
                     IconButton(
                         onClick = { downloadLogs() },
                         enabled = !isDownloading && events.isNotEmpty(),

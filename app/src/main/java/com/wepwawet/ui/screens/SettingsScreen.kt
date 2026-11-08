@@ -204,6 +204,11 @@ fun SettingsScreen(
     var testLoginResult by remember { mutableStateOf<String?>(null) }
     var testLoginInProgress by remember { mutableStateOf(false) }
 
+    // ---- v0.8.1: pairing subsystem toggle state ----
+    var pairingEnabled by remember {
+        mutableStateOf(com.wepwawet.pairing.PairingService.isPairingEnabled(context))
+    }
+
     Scaffold(
         topBar = {
             SlimTopBar(
@@ -228,6 +233,22 @@ fun SettingsScreen(
             // ===== 0. Wallpaper Engine (v0.8.0 — integrated engine) =====
             item {
                 EngineSettingsCard()
+            }
+
+            // ===== 0.5 Send to phone — the pairing subsystem toggle (v0.8.1) =====
+            // OFF by default: no pairing foreground service, no discovery
+            // broadcasts, no boot restart, no Bluetooth button in the
+            // workshop browser, no "Send to phone" button on detail pages.
+            // The Download button is the default flow. Turning this ON brings
+            // all of that back and starts the pairing service immediately.
+            item {
+                PairingToggleCard(
+                    enabled = pairingEnabled,
+                    onEnabledChange = { enabled ->
+                        pairingEnabled = enabled
+                        com.wepwawet.pairing.PairingService.setPairingEnabled(context, enabled)
+                    },
+                )
             }
 
             // ===== 1. Steam Account =====
@@ -332,6 +353,19 @@ fun SettingsScreen(
                             "settings_verbose_log_changed",
                             "enabled" to enabled,
                         )
+                        // v0.8.1: the verbose toggle now also drives the WE
+                        // engine's own log-to-file (the official client's
+                        // "Log errors to file" general setting). The wallpaper
+                        // service re-reads general settings live via
+                        // requestWallpaperApplyGeneralProperties, and every
+                        // future engine start picks the pref back up.
+                        io.wallpaperengine.weclient.WeEnginePrefs.storeBoolean(
+                            context,
+                            io.wallpaperengine.weclient.WallpaperProperties.GENERAL_PROP_LOG_ERRORS,
+                            enabled,
+                        )
+                        io.wallpaperengine.weclient.WEWallpaperService.instance
+                            ?.requestWallpaperApplyGeneralProperties()
                     },
                     pkgCacheEnabled = pkgCacheEnabled,
                     onPkgCacheChange = { enabled ->
@@ -639,6 +673,44 @@ private fun SteamWebApiCard(
  *   - Browse mode: infinite scroll (default) vs pagination, with a page-size
  *     slider shown only while pagination is on.
  */
+/**
+ * v0.8.1 — the pairing subsystem master switch. OFF by default: the app is
+ * a self-contained Wallpaper Engine client (Download button → integrated
+ * engine library). ON: the pairing foreground service starts immediately,
+ * the Bluetooth button appears in the workshop browser, "Send to phone"
+ * returns on detail pages, and the service auto-restarts after boot.
+ */
+@Composable
+private fun PairingToggleCard(
+    enabled: Boolean,
+    onEnabledChange: (Boolean) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("Send to phone", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Enable the PC-pairing subsystem to send wallpapers straight to " +
+                    "the official Wallpaper Engine app on this device over the " +
+                    "pairing protocol. While OFF, nothing pairing-related runs " +
+                    "(no service, no broadcasts, no boot restart) — the Download " +
+                    "button puts wallpapers straight into this app's engine.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Enable pairing (send to phone)")
+                Switch(checked = enabled, onCheckedChange = onEnabledChange)
+            }
+        }
+    }
+}
+
 @Composable
 private fun OthersCard(
     verboseLog: Boolean,
@@ -809,7 +881,7 @@ private fun AboutCard() {
         Column(modifier = Modifier.padding(16.dp)) {
             Text("About", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))
-            Text("WepWawet — Wallpaper Engine companion")
+            Text("WallpaperSuite — Steam Workshop wallpapers with an on-device Wallpaper Engine")
             Spacer(Modifier.height(4.dp))
             Text("Version ${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})")
             Spacer(Modifier.height(4.dp))

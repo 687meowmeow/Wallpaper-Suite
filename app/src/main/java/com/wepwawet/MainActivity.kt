@@ -44,29 +44,38 @@ class MainActivity : ComponentActivity() {
                 "intent" to (intent?.dataString ?: "null"))
         }
 
-        // Auto-start the pairing proxy on app launch.
-        // Wrapped in try-catch that catches Throwable (not just Exception) so
-        // class-loading Errors like NoClassDefFoundError don't bring down the
-        // app before we get a chance to render the UI.
+        // v0.8.1: the pairing subsystem is opt-in now (Settings → "Send to
+        // phone" toggle). When it's OFF nothing pairing-related runs at all:
+        // no foreground service, no discovery broadcasts, no boot restart.
+        // The Download button in the workshop browser is the default flow —
+        // it downloads straight into this app's integrated Wallpaper Engine.
         runCatching {
-            // v0.7.1: Set appContext FIRST so isPaired() can check SharedPreferences
-            // even before onStartCommand runs (startForegroundService is async).
-            PairingService.appContext = applicationContext
-            // v0.7.0: Use the user's saved PIN (from Settings) instead of hardcoded "1234"
-            PairingService.start(this, PairingService.getPairingPin(this))
-            // Log pairing state for debugging
-            val wasPaired = PairingService.loadPairedDevice(this)
-            WepWawetLogger.lifecycle("Auto-started pairing proxy",
-                "was_previously_paired" to (wasPaired != null),
-                "paired_device" to (wasPaired ?: "null"),
-                "isPaired_now" to PairingService.isPaired())
+            if (PairingService.isPairingEnabled(this)) {
+                // v0.7.1: Set appContext FIRST so isPaired() can check SharedPreferences
+                // even before onStartCommand runs (startForegroundService is async).
+                PairingService.appContext = applicationContext
+                // v0.7.0: Use the user's saved PIN (from Settings) instead of hardcoded "1234"
+                PairingService.start(this, PairingService.getPairingPin(this))
+                // Log pairing state for debugging
+                val wasPaired = PairingService.loadPairedDevice(this)
+                WepWawetLogger.lifecycle("Auto-started pairing proxy (toggle ON)",
+                    "was_previously_paired" to (wasPaired != null),
+                    "paired_device" to (wasPaired ?: "null"),
+                    "isPaired_now" to PairingService.isPaired())
+            } else {
+                // Defensive stop: if the service is still running (e.g. the
+                // app was updated from a pre-toggle version that always
+                // started it), shut it down now.
+                PairingService.stop(this)
+                WepWawetLogger.lifecycle("Pairing disabled — pairing service not started")
+            }
         }.onFailure { e ->
             // Log to BOTH WepWawetLogger and logcat — if the logger failed to init,
             // we still get the failure in logcat
             runCatching {
-                WepWawetLogger.lifecycle("Failed to auto-start proxy: ${e.message}")
+                WepWawetLogger.lifecycle("Failed to auto-start/stop pairing: ${e.message}")
             }
-            Log.e(TAG, "PairingService.start failed", e)
+            Log.e(TAG, "PairingService start/stop failed", e)
         }
 
         // Render the UI. Wrapped in try-catch so if Compose crashes during

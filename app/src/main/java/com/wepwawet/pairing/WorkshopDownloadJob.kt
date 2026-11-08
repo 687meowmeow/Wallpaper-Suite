@@ -236,9 +236,13 @@ object WorkshopDownloadJob {
      * (`filesDir/downloads/`) so it shows up on the main page immediately —
      * every completed workshop download is now auto-imported, no PC round-trip
      * needed. Failures are logged and never break the download flow.
+     *
+     * v0.8.1: returns whether the engine ACCEPTED the wallpaper (version
+     * check + copy). A rejected version deletes the target and returns false
+     * so the caller can surface a proper failure.
      */
-    private fun autoImportToLibrary(context: Context, mpkgFile: File, itemId: String, title: String) {
-        runCatching {
+    private fun autoImportToLibrary(context: Context, mpkgFile: File, itemId: String, title: String): Boolean {
+        return runCatching {
             val engine = com.wepwawet.engine.EngineLibrary.sceneLib(context)
             val sanitized = title.replace(Regex("[^\\w \\-()]", RegexOption.IGNORE_CASE), "")
                 .trim().take(60).ifEmpty { "wallpaper" }
@@ -250,15 +254,18 @@ object WorkshopDownloadJob {
                 WepWawetLogger.workshopWarn("autoImport: engine rejected version",
                     "file" to name)
                 target.delete()
+                false
             } else {
-                WepWawetLogger.workshop("autoImport: wallpaper added to library",
+                WepWawetLogger.engine("autoImport: wallpaper added to library",
                     "file" to name,
                     "size" to target.length())
+                true
             }
-        }.onFailure { e ->
+        }.getOrElse { e ->
             WepWawetLogger.workshopWarn("autoImport failed",
                 "exception" to e.javaClass.name,
                 "message" to (e.message ?: ""))
+            false
         }
     }
 
@@ -273,11 +280,20 @@ object WorkshopDownloadJob {
     }
 
     /**
-     * Start (or queue) the "Save .mpkg to Downloads (debug)" download.
+     * v0.8.1: THE Download button. Downloads the real .pkg via JavaSteam on
+     * the device, packs it into the .mpkg the engine plays, and imports it
+     * straight into the integrated Wallpaper Engine's library
+     * (`filesDir/downloads/`) — the wallpaper shows up on the main page ready
+     * to preview and apply. This replaces the old "send to phone" +
+     * "debug download" pair for the default (pairing-off) flow: no PC round
+     * trip, no pairing service, no public Downloads copy.
+     *
+     * Kept the historical name [launchDebugDownload] so every call site and
+     * the pending-video interplay stay untouched — only the destination
+     * changed (library import instead of a public Downloads write).
      *
      * v0.7.20: Returns `false` if THIS ITEM already has a download running
-     * (other items can download concurrently). The caller should show a
-     * "this item is already downloading" toast or just ignore the tap.
+     * (other items can download concurrently).
      *
      * @param context app/context (used for cache dir, Steam credentials)
      * @param item workshop item to download
@@ -314,7 +330,7 @@ object WorkshopDownloadJob {
         updateState(itemId) { it.copy(
             isRunning = true,
             progress = 0f,
-            status = "Downloading real .pkg via JavaSteam (debug)…",
+            status = "Downloading via Steam…",
             workshopId = itemId,
             workshopTitle = item.title,
             resultMessage = null,
@@ -333,7 +349,7 @@ object WorkshopDownloadJob {
         // Downloads screen + WallpaperCard "Downloading…" overlay populate.
         onDownloadStarted(item)
 
-        WepWawetLogger.workshop("WorkshopDownloadJob: launching debug download",
+        WepWawetLogger.workshop("WorkshopDownloadJob: launching download → library",
             "id" to itemId,
             "title" to item.title.take(80),
             "pkg_cache_path" to pkgFile.absolutePath)
@@ -568,50 +584,25 @@ object WorkshopDownloadJob {
                 return@launchSafely
             }
 
-            updateState(itemId) { s -> s.copy(status = "Saving to Downloads…", progress = 0.95f) }
-            // v0.5.32 (audit §1): mirror the "saving to Downloads" phase
-            // transition so the Downloads screen shows what's happening
-            // (otherwise it would still show "Packing content → .mpkg…"
-            // until the download completes).
+            updateState(itemId) { s -> s.copy(status = "Importing into your wallpaper library…", progress = 0.95f) }
+            // v0.5.32 (audit §1): mirror the import phase transition so the
+            // Downloads screen shows what's happening.
             onDownloadProgress(
                 itemId = item.id,
                 progress = 0.95f,
                 status = com.wepwawet.data.DownloadStatus.PACKING,
-                statusMessage = "Saving to Downloads…",
+                statusMessage = "Importing into your wallpaper library…",
             )
-            WepWawetLogger.workshop("WorkshopDownloadJob: reading mpkg bytes",
-                "file" to cacheMpkg.absolutePath,
-                "expected_size" to mpkgSize)
-            val bytes = runCatching { cacheMpkg.readBytes() }.getOrElse { e ->
-                val err = "Failed to read packed .mpkg: ${e.message}"
-                WepWawetLogger.workshopWarn("WorkshopDownloadJob: read failed",
-                    "exception" to e.javaClass.name, "message" to (e.message ?: ""))
-                updateState(itemId) { s -> s.copy(
-                    isRunning = false,
-                    status = err,
-                    errorMessage = err,
-                    endedAt = System.currentTimeMillis(),
-                ) }
-                onDownloadFailed(item, err)
-                if (downloadedPkg !== cachedPkg) runCatching { downloadedPkg.delete(); cacheMpkg.delete() }
-                return@launchSafely
-            }
-            WepWawetLogger.workshop("WorkshopDownloadJob: read mpkg bytes done",
-                "bytes_read" to bytes.size)
 
-            // v0.8.0: auto-import into the integrated engine's library.
-            autoImportToLibrary(appContext, cacheMpkg, item.id, item.title)
+            // v0.8.1: THE destination — the integrated engine's library.
+            // (v0.8.0 called this after a public-Downloads write; the public
+            // copy is gone now: the button downloads straight into the
+            // Wallpaper Engine running inside this app, exactly as asked.)
+            val sanitized = item.title.replace(Regex("[^\\w \\-()]", RegexOption.IGNORE_CASE), "")
+                .trim().take(60).ifEmpty { "wallpaper" }
+            val libraryName = "${item.id} - $sanitized.mpkg"
+            val importOk = autoImportToLibrary(appContext, cacheMpkg, item.id, item.title)
 
-            val downloadsName = "${item.id}_debug.mpkg"
-            WepWawetLogger.workshop("WorkshopDownloadJob: writing to Downloads",
-                "filename" to downloadsName,
-                "bytes" to bytes.size,
-                "target_dir" to "Download/WepWawet")
-            val uri = com.wepwawet.log.PublicDownloadsWriter.writeBytes(
-                appContext, downloadsName, bytes)
-            WepWawetLogger.workshop("WorkshopDownloadJob: PublicDownloadsWriter returned",
-                "uri_null" to (uri == null),
-                "uri" to (uri?.toString() ?: "null"))
             // v0.7.4: store the .pkg in the cache when the setting is enabled
             // (and this was a fresh scene download), then clean up the temp
             // copy — mirrors the send path.
@@ -632,24 +623,23 @@ object WorkshopDownloadJob {
             WepWawetLogger.workshop("WorkshopDownloadJob: install dir cleaned up",
                 "path" to installDir.absolutePath)
 
-            if (uri != null) {
-                val msg = "Saved ${formatBytes(bytes.size.toLong())} to Downloads/WepWawet/$downloadsName"
-                WepWawetLogger.workshop("WorkshopDownloadJob: saved to Downloads",
-                    "file" to downloadsName,
-                    "size" to bytes.size,
-                    "uri" to uri.toString())
+            if (importOk) {
+                val msg = "Added to your wallpaper library ✓ (${formatBytes(mpkgSize)}) — open it on the main page"
+                WepWawetLogger.workshop("WorkshopDownloadJob: wallpaper added to library",
+                    "file" to libraryName,
+                    "size" to mpkgSize)
                 updateState(itemId) { s -> s.copy(
                     isRunning = false,
                     progress = 1f,
                     status = msg,
                     resultMessage = msg,
                     endedAt = System.currentTimeMillis(),
-                    savedFilePath = uri.toString(),
-                    savedFileSize = bytes.size.toLong(),
+                    savedFilePath = "downloads/$libraryName",
+                    savedFileSize = mpkgSize,
                 ) }
-                onDownloadCompleted(item, bytes.size.toLong(), "Downloads")
+                onDownloadCompleted(item, mpkgSize, "Library")
             } else {
-                val err = "Failed to write .mpkg to Downloads (see logs)"
+                val err = "Failed to import into the wallpaper library (see logs)"
                 updateState(itemId) { s -> s.copy(
                     isRunning = false,
                     status = err,
