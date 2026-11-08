@@ -59,7 +59,15 @@ data class TagSection(val title: String, val tags: List<String>)
 /**
  * The canonical list of tag sections shown in the Filter sheet.
  *
- * Order matters — the layout matches WE's screenshot:
+ * v0.8.0: rebuilt to mirror the REAL steamcommunity workshop browse menu for
+ * appid 431960 (the menu WE's own UI exposes). The page's filter bar shows
+ * exactly these dropdown/checkbox groups: Type, Age Rating, Genre,
+ * Resolution, Category and Miscellaneous. The v0.7.25 "Asset Type /
+ * Asset Genre / Script Type" groups came from the declaredTags JSON's ASSET
+ * browsing context — they never appear in the wallpaper menu and filtering
+ * by them returns nothing ("the new tags do nothing"), so they are removed.
+ *
+ * Order (mobile-first, like the previous sheet):
  *
  *   1. Mobile Resolutions (Portrait SD/720x1280/1080x1920/1440x2560/2160x3840,
  *      Other resolution, Dynamic resolution) — DEFAULT ON
@@ -71,17 +79,7 @@ data class TagSection(val title: String, val tags: List<String>)
  *   7. Genre
  *   8. Miscellaneous
  *   9. Type (Scene, Video — NOT Web or Application)
- *  10. Asset Type
- *  11. Asset Genre
- *  12. Script Type (includes "No Animation")
- *  13. Category
- *
- * v0.7.25: sections 10–13 added — the Steam browse page's declaredTags for
- * appid 431960 offers Asset Type / Asset Genre / Script Type / Category as
- * filterable groups too, but the sheet never showed them ("there are tags
- * missing like no animation"). All lists verified 1:1 against the live
- * declaredTags JSON on 2026-11-08. New sections default ON (nothing
- * excluded), so existing users' results are unchanged until they toggle.
+ *  10. Category (Wallpaper, Preset, Asset)
  *
  * Tag strings are the canonical Steam Workshop strings (with " x " spacing)
  * — see [WorkshopTags.RESOLUTION_TAGS]. Web and Application type tags are
@@ -156,19 +154,7 @@ val TAG_SECTIONS: List<TagSection> = listOf(
         // and are excluded from the picker entirely.
         tags = listOf("Scene", "Video"),
     ),
-    // v0.7.25: the four Steam-declared groups that were missing from the sheet.
-    TagSection(
-        title = "Asset Type",
-        tags = WorkshopTags.ASSET_TYPE_TAGS,
-    ),
-    TagSection(
-        title = "Asset Genre",
-        tags = WorkshopTags.ASSET_GENRE_TAGS,
-    ),
-    TagSection(
-        title = "Script Type",
-        tags = WorkshopTags.SCRIPT_TYPE_TAGS,
-    ),
+    // Category IS part of the real browse menu (Wallpaper / Preset / Asset).
     TagSection(
         title = "Category",
         tags = WorkshopTags.CATEGORY_TAGS,

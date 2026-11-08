@@ -15,12 +15,15 @@ import com.wepwawet.data.SteamApiService
 import com.wepwawet.data.WorkshopRepository
 import com.wepwawet.log.WepWawetLogger
 import com.wepwawet.ui.screens.DownloadManagerScreen
+import com.wepwawet.ui.screens.LibraryScreen
 import com.wepwawet.ui.screens.FavoritesScreen
 import com.wepwawet.ui.screens.LogsScreen
+import com.wepwawet.ui.screens.PlaylistEditorScreen
 import com.wepwawet.ui.screens.PairingScreen
 import com.wepwawet.ui.screens.SettingsScreen
 import com.wepwawet.ui.screens.VideoTrimScreen
 import com.wepwawet.ui.screens.WallpaperDetailScreen
+import com.wepwawet.ui.screens.WallpaperPreviewScreen
 import com.wepwawet.ui.screens.WorkshopBrowserScreen
 
 /**
@@ -128,7 +131,36 @@ fun WepWawetNavHost() {
         }
     }
 
-    NavHost(navController = nav, startDestination = "workshop") {
+    NavHost(navController = nav, startDestination = "library") {
+
+        // v0.8.0: the library is the new main page — the device's wallpaper
+        // collection (engine-enumerated) + Browse Workshop + manual import.
+        composable("library") {
+            LibraryScreen(
+                onBrowse = { nav.navigate("workshop") },
+                onOpenSettings = { nav.navigate("settings") },
+                onOpenDownloads = { nav.navigate("downloads") },
+                onOpenWallpaper = { wallpaper ->
+                    com.wepwawet.engine.PreviewRequestHolder.set(wallpaper)
+                    nav.navigate("preview")
+                },
+            )
+        }
+
+        // v0.8.0: live-rendering preview + apply + properties + playlist.
+        composable("preview") {
+            val wallpaper = com.wepwawet.engine.PreviewRequestHolder.peek()
+                ?: io.wallpaperengine.weutil.WallpaperInfoSparse()
+            WallpaperPreviewScreen(
+                wallpaper = wallpaper,
+                onBack = { nav.popBackStack() },
+            )
+        }
+
+        // v0.8.0: playlist editor.
+        composable("playlist") {
+            PlaylistEditorScreen(onBack = { nav.popBackStack() })
+        }
 
         composable("workshop") {
             WorkshopBrowserScreen(
@@ -138,6 +170,7 @@ fun WepWawetNavHost() {
                 onOpenFavorites = { nav.navigate("favorites") },
                 onOpenPairing = { nav.navigate("pairing") },
                 onCreatorClick = { steamId -> nav.navigate("creator/$steamId") },
+                onBack = { nav.popBackStack() },
                 repo = repo,
                 gridState = workshopGridState,
             )

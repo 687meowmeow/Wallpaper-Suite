@@ -95,3 +95,19 @@
 -dontwarn io.ktor.**
 -keep class in.dragonbra.javasteam.depotdownloader.** { *; }
 -dontwarn in.dragonbra.javasteam.depotdownloader.**
+
+# v0.8.0: integrated Wallpaper Engine — the native libscenejni.so resolves
+# Java classes and members BY NAME through JNI:
+#   - Java_io_wallpaperengine_wrapper_SceneLib_* native methods must exist
+#     with their exact signatures on io.wallpaperengine.wrapper.SceneLib;
+#   - the engine constructs/reads io.wallpaperengine.weutil.WallpaperInfoSparse
+#     (fields: title, filePath, progress, type, lastModifiedDate, isLocal,
+#     isOfficial, isError) and io.wallpaperengine.weutil.VirtualFileRange
+#     (vOffset, vSize) by exact field names;
+#   - it calls static methods on io.wallpaperengine.weutil.SupportFileLoader
+#     and instance methods on io.wallpaperengine.weutil.SupportVideoPlayer
+#     by exact name.
+# Renaming or stripping ANY of these breaks rendering at runtime, so the
+# entire io.wallpaperengine tree is kept verbatim.
+-keep class io.wallpaperengine.** { *; }
+-dontwarn io.wallpaperengine.**

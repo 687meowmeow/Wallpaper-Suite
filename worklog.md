@@ -2680,3 +2680,149 @@ Reminders for future agents:
   70. WE texture semantics: texW/texH is the (possibly pow2-padded) BUFFER,
       imgW/imgH is the CONTENT, content sits at the buffer's TOP-LEFT. Any
       transcode that doesn't crop to imgW/imgH changes the sampled UVs.
+
+---
+
+## v0.8.0-alpha (build 118) — the integrated Wallpaper Engine
+
+**The big one.** The app is now a complete Wallpaper Engine client: it
+RENDERS wallpapers itself through the official native engine, instead of
+only shipping .mpkg files to the official app.
+
+### How the engine got in
+
+The official Wallpaper Engine Android client is distributed as a direct APK
+download at wallpaperengine.io/android (free app). Decompiled it with jadx
+1.5.6 (sources + resources). Key findings from the analysis:
+
+- The renderer is a single self-contained native library, `libscenejni.so`
+  (arm64-v8a 41 MB, static libc++, 16 KB-page aligned, no signature or
+  package-name checks anywhere in its strings).
+- It binds to Java through exactly five classes, resolved BY NAME via JNI:
+  `io.wallpaperengine.wrapper.SceneLib` (all `Java_io_wallpaperengine_...`
+  native methods), `weutil.WallpaperInfoSparse` (fields title/filePath/
+  progress/type/lastModifiedDate/isLocal/isOfficial/isError),
+  `weutil.VirtualFileRange` (vOffset/vSize), `weutil.SupportFileLoader`
+  (static loadBitmapFromUri / loadBitmapFromVFS / loadDataFromUri /
+  isUriValid / getUriFileExtension — called FROM native for scene textures
+  and SAF images) and `weutil.SupportVideoPlayer` (instance methods driven
+  from native for scene video textures).
+- The engine assets (fonts/materials/models/shaders/scripts/locale plus the
+  9 default wallpapers) are read straight from the APK through the shared
+  AssetManager; `SceneLib.init(filesDir, assetTime, assets)` is the only
+  initialization call, where assetTime is an epoch-seconds cache-buster.
+- Wallpapers live under filesDir: `wallpapers/` (official, extracted from
+  assets on first run) + `downloads/` (imported mpkgs). `enumerateWallpapers()`
+  returns them all as WallpaperInfoSparse.
+- Videos inside .mpkg files play through a MediaDataSource over the
+  container's byte range (`getWallpaperFileVirtualOffset`) — no extraction.
+
+### What was ported (1:1 behavior, adapted to our Compose UI)
+
+Engine layer (`io.wallpaperengine.*` packages are REQUIRED verbatim by JNI):
+- `wrapper/SceneLib` — 29 native methods + initLibrary (uses our new
+  ENGINE_ASSET_TIME buildConfigField instead of their BUILD_TIME).
+- `weutil/` — WallpaperInfoSparse, VirtualFileRange, SupportFileLoader,
+  SupportVideoPlayer, RangedInputStream, ParallaxController (gyro/scroll
+  parallax + force/gravity motion response), AudioRecorder (system-mix
+  Visualizer → 64-band FFT), FreeAlignTouchHandler (2-finger pan/zoom/
+  rotate for free alignment), GLUtil (framebuffer readback), VecUtil,
+  WallpaperSurfaceHack (SurfaceHolder delegation for in-service GL views).
+- `weviews/` — WallpaperControls, SceneWallpaperView (EGL3 GLSurfaceView +
+  Renderer with initScene→resizeScene→updateScene, FPS-cap pacing, feature
+  flags → audio/alignment/physics properties, per-wallpaper stored
+  properties), VideoWallpaperView (GL external-OES pipeline with the exact
+  official shaders incl. the HSV color-correction variant, Video/Image/GIF
+  drawables, cover/fill/free alignment math, parallax smoothing + clamp,
+  the 5-second "video stopped producing frames" watchdog, Semaphore frame
+  pacing).
+- `weclient/` — WEWallpaperService (live wallpaper service with playlist
+  state machine random/sorted/timeOfDay/dayOfWeek, power-save pause incl.
+  the Xiaomi/Huawei Settings.System hacks, WallpaperColors with the
+  enabled/disabled/hintdark/hintdarktheme/hintbright modes, touch input,
+  parallax offsets, Android 12+ Surface.setFrameRate at the video's native
+  FPS), WallpaperProperties (constants), WeEnginePrefs (the Util port —
+  same SharedPreferences keys: selectedWallpaper, playlistConfig,
+  externalWallpaperFiles, hiddenOfficialWallpapers, wp_properties_<path>,
+  general_*).
+- `wedata/` — Property/PropertyList (default property JSONs copied
+  verbatim), GeneralSettingsInfo, PlaylistData.
+
+Battery optimization (user-facing feature, exact official semantics):
+wallpaper pauses when not visible, pauses in system power-save mode when
+"Pause while saving battery" is on, scenes capped by the FPS-limit setting,
+videos run at native FPS via setFrameRate, sensors only while parallax is
+enabled, Visualizer only while an audio wallpaper is active and visible.
+
+### New UI (adapted to the app's Compose style)
+
+- **LibraryScreen** — the new main page (startDestination): grid of all
+  engine wallpapers (previews via engine's getWallpaperInfoPreviewBitmap /
+  MediaMetadataRetriever for SAF locals) with an Active badge, official-WE
+  chip, Browse Workshop + Import buttons (SAF multi-pick: video/image/gif/
+  application), long-press delete, and staged ACTION_VIEW imports from file
+  managers (mpkg/bin intent filters added to MainActivity, singleTop).
+- **WallpaperPreviewScreen** — live-rendering preview (Scene through the
+  native engine, Video/Image/GIF through the ported GL view), Apply
+  (hot-reload when our wallpaper is active, else the system
+  CHANGE_LIVE_WALLPAPER picker), details (type/resolution/FPS), playlist
+  add, per-wallpaper Properties sheet (bool/slider/combo/color with the
+  official condition visibility rules) that stores to
+  wp_properties_<path> and applies live.
+- **PlaylistEditorScreen** — mode, change interval, item order, per-item
+  time-of-day durations.
+- **SettingsScreen** — new "Wallpaper Engine" card: FPS limit
+  (10..max(30, refresh rate)), Pause while saving battery, Wallpaper touch
+  input, Wallpaper Colors integration, Restore official wallpapers.
+
+### Workshop → library bridge
+
+Every completed workshop download now auto-imports: the finished .mpkg is
+copied to filesDir/downloads (all three completion paths — debug save,
+send-to-device queue, continueVideoSend) with engine version validation.
+The send-to-official-app flows are untouched.
+
+### Tags (the v0.7.25 miss, root-caused)
+
+"The new tags do nothing and they're not in Wallpaper Engine" — correct:
+the Asset Type / Asset Genre / Script Type groups (where "No Animation"
+lives) belong to Steam's ASSET-browsing context. They never appear in the
+wallpaper browse menu, and QueryFiles with them matches nothing. The
+official WE Android app has no tag menu at all (local list + 4 sort modes
+only). The Filter sheet now mirrors the real steamcommunity wallpaper menu
+exactly: Type / Age Rating / Genre (25) / Resolution (25) / Category /
+Miscellaneous (10) — verified against the live browse page HTML.
+
+### Build/config
+
+- minSdk 26 → 29 (the engine matches the official client's floor).
+- versionCode 118, versionName 0.8.0-alpha.
+- jniLibs/arm64-v8a/libscenejni.so + assets/fonts|html|locale|materials|
+  models|scripts|shaders|wallpapers (75 MB) — APK now ~207 MB debug.
+- ProGuard: `-keep class io.wallpaperengine.** { *; }` (JNI name-binding).
+- Manifest: WEWallpaperService with BIND_WALLPAPER + @xml/we_wallpaper
+  meta-data; RECORD_AUDIO/MODIFY_AUDIO_SETTINGS/SET_WALLPAPER/
+  HIGH_SAMPLING_RATE_SENSORS; GLES 3.0 feature; mpkg/bin VIEW filters.
+
+### Local verification
+
+:app:compileDebugKotlin + :app:testDebugUnitTest (81/81) + :app:assembleDebug
+all green (SDK 35 + NDK 27.0.12077973 + JDK 21, sandbox JDK/SDK re-provisioned
+this session; assemble needs -Xmx2048m on the 4 GB sandbox).
+
+### Not ported (deliberate, for a follow-up)
+
+The official app's PC-pairing RECEIVER subsystem (TransferService,
+DiscoverService, TcpClient — the PC client pushing wallpapers TO the phone)
+overlaps with our own pairing stack and is superseded by direct workshop
+downloads; noted for a future addition. The 3,330-string shared-PC locale
+is used by the engine from assets/locale as-is (UI strings are ours).
+
+Reminders for future agents:
+  71. `io.wallpaperengine.**` class/member names are a JNI ABI — renaming
+      ANY of them breaks the native engine at runtime. ProGuard keeps are
+      load-bearing.
+  72. Kotlin NESTED (non-inner) classes are prohibited inside INNER classes
+      ("'Class' is prohibited here") — hoist data holders out a level.
+  73. Kotlin block comments NEST — "application/*" inside a KDoc eats the
+      rest of the file (bit us again, 3 sessions in a row now).

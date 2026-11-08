@@ -57,4 +57,46 @@
     <string name="err_steam_login_failed">Steam login failed. Check credentials and try again.</string>
     <string name="err_workshop_download_failed">Workshop download failed for %1$s.</string>
     <string name="err_mpkg_not_ready">Wallpaper is still being prepared. Try again in a moment.</string>
+
+    <!-- v0.8.0: integrated Wallpaper Engine -->
+    <string name="we_wallpaper_description">Wallpaper Engine wallpapers on your home screen — scenes, videos, images and GIFs.</string>
+    <string name="library_title">Wallpapers</string>
+    <string name="library_empty_title">No wallpapers yet</string>
+    <string name="library_empty_body">Browse the workshop or import .mpkg / video / image files from your device.</string>
+    <string name="library_browse_button">Browse Workshop</string>
+    <string name="library_import_button">Import</string>
+    <string name="library_active_badge">Active</string>
+    <string name="library_delete_confirm_title">Remove wallpaper?</string>
+    <string name="library_delete_confirm_body">%1$s will be removed from your library.</string>
+    <string name="library_import_failed">Import failed: %1$s</string>
+    <string name="library_import_wrong_version">was made with a newer Wallpaper Engine version.</string>
+    <string name="preview_apply">Set as wallpaper</string>
+    <string name="preview_applied">Wallpaper applied</string>
+    <string name="preview_properties">Properties</string>
+    <string name="preview_playlist_add">Add to playlist</string>
+    <string name="preview_details_type">Type</string>
+    <string name="preview_details_resolution">Resolution</string>
+    <string name="preview_details_fps">FPS</string>
+    <string name="settings_engine_category">Wallpaper Engine</string>
+    <string name="settings_engine_fps">FPS limit</string>
+    <string name="settings_engine_power_save">Pause while saving battery</string>
+    <string name="settings_engine_touch">Wallpaper touch input</string>
+    <string name="settings_engine_colors">Wallpaper Colors integration</string>
+    <string name="settings_engine_colors_enabled">Enabled</string>
+    <string name="settings_engine_colors_disabled">Disabled</string>
+    <string name="settings_engine_colors_hintdark">Dark hint</string>
+    <string name="settings_engine_colors_hintdarktheme">Dark theme hint</string>
+    <string name="settings_engine_colors_hintbright">Bright hint</string>
+    <string name="settings_engine_restore_official">Restore official wallpapers</string>
+    <string name="settings_engine_restore_confirm">Restore all official wallpapers?</string>
+    <string name="settings_playlist_title">Playlist</string>
+    <string name="settings_playlist_mode">Mode</string>
+    <string name="settings_playlist_mode_random">Random</string>
+    <string name="settings_playlist_mode_sorted">Sorted</string>
+    <string name="settings_playlist_mode_timeofday">Time of day</string>
+    <string name="settings_playlist_mode_dayofweek">Day of week</string>
+    <string name="settings_playlist_duration">Change interval (minutes)</string>
+    <string name="playlist_editor_title">Playlist editor</string>
+    <string name="playlist_empty">Add wallpapers from their preview screen.</string>
+    <string name="audio_permission_rationale">This wallpaper reacts to audio. Grant microphone access to enable audio visualization.</string>
 </resources>

@@ -1,10 +1,10 @@
 # WepWawet
 
-> Steam Workshop browser & downloader for Android. Browse 3M+ Wallpaper Engine workshop items, log in with your own Steam account, and download wallpaper packs straight to your phone. **No PC required.**
+> A complete personal Wallpaper Engine for Android: browse 3M+ Steam Workshop items, download them with your own Steam account, **and render them as live wallpapers directly on your phone** — powered by the official WE engine. **No PC required.**
 
-**Status: v0.7.x-alpha — functional alpha.** Browse → login → download works end-to-end on-device. A pairing proxy is included for the official Wallpaper Engine Android app.
+**Status: v0.8.0-alpha.** The app now integrates the official Wallpaper Engine renderer (scenes, videos, images, GIFs) as a live wallpaper service, with a wallpaper library as the home screen, manual import, playlists, per-wallpaper properties and battery-aware playback. The workshop browser, mpkg packer and pairing proxy from earlier versions are all still here.
 
-[![Build APK](https://github.com/687meowmeow/WE-bridge/actions/workflows/build.yml/badge.svg)](https://github.com/687meowmeow/WE-bridge/actions/workflows/build.yml)
+[![Build APK](https://github.com/687meowmeow/Wallpaper-Suite/actions/workflows/build.yml/badge.svg)](https://github.com/687meowmeow/Wallpaper-Suite/actions/workflows/build.yml)
 
 ---
 
@@ -20,7 +20,7 @@ Because I'm too lazy to turn my PC on.
 
 ## What this is
 
-WepWawet is an Android app (Kotlin + Jetpack Compose, min Android 8.0 / API 26, target SDK 35) that lets you browse the Steam Workshop for Wallpaper Engine (app 431960), inspect items, and download the actual wallpaper packs to your device.
+WepWawet is an Android app (Kotlin + Jetpack Compose, min Android 10 / API 29, target SDK 35) that lets you browse the Steam Workshop for Wallpaper Engine (app 431960), inspect items, and download the actual wallpaper packs to your device.
 
 Downloads run through **on-device JavaSteam**. Your Steam credentials stay on your phone and JavaSteam talks directly to Steam's auth and content servers. No PC, no server, no third-party service. Steam Guard 2FA is supported, and refresh tokens are saved so you can skip 2FA on later sessions.
 

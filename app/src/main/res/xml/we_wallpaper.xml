@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Live wallpaper service descriptor (equivalent of the official client's
+    res/xml resource referenced by the android.service.wallpaper meta-data).
+-->
+<wallpaper xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/we_wallpaper_description"
+    android:thumbnail="@drawable/we_wallpaper_thumbnail" />

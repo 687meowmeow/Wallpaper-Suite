@@ -56,9 +56,22 @@
     <!-- Root detection: query SU binary — no permission needed but uses Runtime.exec -->
     <!-- (no manifest declaration required) -->
 
+    <!-- ====== v0.8.0: integrated Wallpaper Engine (live wallpaper) ====== -->
+    <!-- Set/inspect the live wallpaper -->
+    <uses-permission android:name="android.permission.SET_WALLPAPER" />
+    <!-- Audio-responsive wallpapers: system-mix Visualizer (runtime-requested) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Gyroscope parallax at >200Hz (official client declares this too) -->
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
+
     <!-- ====== Hardware/features — declare so Play filters work (though we sideload) ====== -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="true" />
+    <!-- v0.8.0: the WE engine renders through OpenGL ES 3.0 -->
+    <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+    <!-- Live wallpaper support is optional (the workshop browser + import still work without it) -->
+    <uses-feature android:name="android.software.live_wallpaper" android:required="false" />
     <!-- Vulkan 1.3 required (Adreno 740+ on SD8Gen2) — use android:version, NOT glEsVersion -->
     <uses-feature android:name="android.hardware.vulkan.level" android:required="true" />
     <uses-feature android:name="android.hardware.vulkan.version" android:version="131072" android:required="true" />
@@ -90,12 +103,49 @@
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
+            android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode|density"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.WepWawet">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- v0.8.0: manual import — open .mpkg / .bin wallpaper packages from
+                 file managers (same filter set as the official WE client). -->
+            <intent-filter android:label="@string/app_name">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/vnd.mpkg" />
+                <data android:mimeType="application/prs.mpkg" />
+                <data android:mimeType="application/mpkg" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
+            <intent-filter android:label="@string/app_name">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <data android:pathPattern=".*\\.mpkg" />
+                <data android:pathPattern=".*\\..*\\.mpkg" />
+                <data android:pathPattern=".*\\..*\\..*\\.mpkg" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.mpkg" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.mpkg" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\..*\\.mpkg" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\..*\\..*\\.mpkg" />
+                <data android:pathPattern=".*\\.bin" />
+                <data android:pathPattern=".*\\..*\\.bin" />
+                <data android:pathPattern=".*\\..*\\..*\\.bin" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.bin" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.bin" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\..*\\.bin" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\..*\\..*\\.bin" />
             </intent-filter>
         </activity>
 
@@ -169,6 +219,28 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!-- ====== v0.8.0: the integrated Wallpaper Engine live wallpaper service ====== -->
+        <!--
+            Full port of the official client's WEWallpaperService: renders Scene
+            wallpapers through libscenejni.so and Video/Image/GIF wallpapers
+            through the ported GL pipeline, with playlist support, power-saving
+            pause and per-wallpaper properties. Registered exactly like the
+            official service (BIND_WALLPAPER + wallpaper meta-data resource).
+        -->
+        <service
+            android:name="io.wallpaperengine.weclient.WEWallpaperService"
+            android:permission="android.permission.BIND_WALLPAPER"
+            android:enabled="true"
+            android:exported="true"
+            android:stopWithTask="false">
+            <intent-filter>
+                <action android:name="android.service.wallpaper.WallpaperService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.wallpaper"
+                android:resource="@xml/we_wallpaper" />
+        </service>
 
         <!-- ====== FileProvider — expose the .mpkg outbox so the official WE app could read it if it needs to ====== -->
         <provider

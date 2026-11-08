@@ -231,6 +231,37 @@ object WorkshopDownloadJob {
         com.wepwawet.data.DownloadManager.completeDownload(item.id, fileSizeBytes, deviceName)
     }
 
+    /**
+     * v0.8.0: copies a finished .mpkg into the integrated engine's library
+     * (`filesDir/downloads/`) so it shows up on the main page immediately —
+     * every completed workshop download is now auto-imported, no PC round-trip
+     * needed. Failures are logged and never break the download flow.
+     */
+    private fun autoImportToLibrary(context: Context, mpkgFile: File, itemId: String, title: String) {
+        runCatching {
+            val engine = com.wepwawet.engine.EngineLibrary.sceneLib(context)
+            val sanitized = title.replace(Regex("[^\\w \\-()]", RegexOption.IGNORE_CASE), "")
+                .trim().take(60).ifEmpty { "wallpaper" }
+            val name = "${itemId} - $sanitized.mpkg"
+            val target = File(context.filesDir, "downloads/$name")
+            target.parentFile?.mkdirs()
+            mpkgFile.copyTo(target, overwrite = true)
+            if (!engine.isWallpaperVersionValid("downloads/$name")) {
+                WepWawetLogger.workshopWarn("autoImport: engine rejected version",
+                    "file" to name)
+                target.delete()
+            } else {
+                WepWawetLogger.workshop("autoImport: wallpaper added to library",
+                    "file" to name,
+                    "size" to target.length())
+            }
+        }.onFailure { e ->
+            WepWawetLogger.workshopWarn("autoImport failed",
+                "exception" to e.javaClass.name,
+                "message" to (e.message ?: ""))
+        }
+    }
+
     private fun onDownloadFailed(item: WorkshopItemTyped, errorMessage: String) {
         com.wepwawet.data.DownloadManager.failDownload(item.id, errorMessage)
     }
@@ -567,6 +598,9 @@ object WorkshopDownloadJob {
             }
             WepWawetLogger.workshop("WorkshopDownloadJob: read mpkg bytes done",
                 "bytes_read" to bytes.size)
+
+            // v0.8.0: auto-import into the integrated engine's library.
+            autoImportToLibrary(appContext, cacheMpkg, item.id, item.title)
 
             val downloadsName = "${item.id}_debug.mpkg"
             WepWawetLogger.workshop("WorkshopDownloadJob: writing to Downloads",
@@ -1077,6 +1111,9 @@ object WorkshopDownloadJob {
                     savedFileSize = cacheMpkg.length(),
                 ) }
                 onDownloadCompleted(item, cacheMpkg.length(), deviceName)
+                // v0.8.0: auto-import into the integrated engine's library
+                // (copy — the queued transfer still owns the cache file).
+                autoImportToLibrary(appContext, cacheMpkg, item.id, item.title)
             } finally {
                 // === CRITICAL (v0.4.7): ALWAYS call cleanup() on the WorkshopDownloader,
                 // even on success — otherwise the SteamClient's TCP connection to Steam
@@ -1195,6 +1232,8 @@ object WorkshopDownloadJob {
                     savedFileSize = cacheMpkg.length(),
                 ) }
                 onDownloadCompleted(pendingItem, cacheMpkg.length(), deviceName)
+                // v0.8.0: auto-import into the integrated engine's library.
+                autoImportToLibrary(appContext, cacheMpkg, pendingItem.id, pendingItem.title)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // v0.7.21 BUG FIX: re-throw CancellationException — was swallowed
                 // by catch (e: Exception) which broke structured concurrency.

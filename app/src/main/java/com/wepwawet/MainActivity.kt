@@ -1,6 +1,7 @@
 package com.wepwawet
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -30,6 +31,11 @@ class MainActivity : ComponentActivity() {
         // Log to logcat FIRST — even if WepWawetLogger.init failed in Application.onCreate,
         // we still want a breadcrumb in logcat.
         Log.i(TAG, "MainActivity.onCreate intent=${intent?.dataString ?: "null"}")
+
+        // v0.8.0: opened from a file manager (ACTION_VIEW on an .mpkg/.bin) —
+        // stage the import; ImportRequestHandler feeds it into the Library
+        // screen when the UI mounts (and re-fires on onNewIntent while running).
+        handleViewIntent(intent)
 
         // Best-effort log to WepWawetLogger if it initialized. If it didn't, this
         // call no-ops (initialized=false guard inside the logger).
@@ -99,6 +105,26 @@ class MainActivity : ComponentActivity() {
             // dialog. The CrashHandler has already captured the exception via
             // the runCatching block above (it logs via WepWawetLogger.crash
             // through appError, which goes into the ring buffer + logcat).
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // singleTop launchMode — a file-manager VIEW while we're running lands here.
+        handleViewIntent(intent)
+    }
+
+    /**
+     * Stages an ACTION_VIEW import (.mpkg / .bin wallpaper package) for the
+     * Library screen — the manual-import entry point from file managers,
+     * matching the official client's BrowseActivity VIEW handling.
+     */
+    private fun handleViewIntent(intent: android.content.Intent?) {
+        if (intent == null || intent.action != android.content.Intent.ACTION_VIEW) return
+        val uri = intent.data ?: return
+        com.wepwawet.engine.ImportRequestHandler.stage(uri)
+        runCatching {
+            WepWawetLogger.lifecycle("VIEW import staged", "uri" to uri.toString())
         }
     }
 

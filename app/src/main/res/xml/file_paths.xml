@@ -22,4 +22,13 @@
     <cache-path
         name="workshop-downloads"
         path="workshop_downloads/" />
+
+    <!-- v0.8.0: integrated WE engine — imported wallpapers + engine logs
+         (same paths the official client exposes through its FileProvider). -->
+    <files-path
+        name="wallpapers"
+        path="downloads/" />
+    <files-path
+        name="engine-logs"
+        path="logs/" />
 </paths>

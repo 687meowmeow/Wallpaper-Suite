@@ -16,8 +16,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -27,6 +29,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -48,6 +51,7 @@ import com.wepwawet.pairing.WorkshopBrowseSession
 import com.wepwawet.pairing.WorkshopDownloader
 import com.wepwawet.ui.components.SlimTopBar
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
@@ -221,6 +225,11 @@ fun SettingsScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            // ===== 0. Wallpaper Engine (v0.8.0 — integrated engine) =====
+            item {
+                EngineSettingsCard()
+            }
+
             // ===== 1. Steam Account =====
             item {
                 SteamAccountCard(
@@ -943,5 +952,195 @@ private fun formatCacheSize(bytes: Long): String {
         mb >= 1 -> "%.1f MB".format(mb)
         kb >= 1 -> "%.0f KB".format(kb)
         else -> "$bytes B"
+    }
+}
+
+/**
+ * v0.8.0 — the integrated Wallpaper Engine settings card: FPS limit,
+ * battery-saving pause, touch input, Wallpaper Colors integration and
+ * official-wallpaper restore. Values use the SAME SharedPreferences keys
+ * the official client uses.
+ */
+@Composable
+private fun EngineSettingsCard() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var maxFps by remember {
+        mutableStateOf(
+            io.wallpaperengine.weclient.WeEnginePrefs.getStoredInt(
+                context, io.wallpaperengine.weclient.WallpaperProperties.GENERAL_PROP_FPS, 30,
+            )
+        )
+    }
+    var powerSave by remember {
+        mutableStateOf(
+            io.wallpaperengine.weclient.WeEnginePrefs.getStoredBoolean(
+                context, io.wallpaperengine.weclient.WallpaperProperties.GENERAL_PROP_POWER_SAVE, true,
+            )
+        )
+    }
+    var touchInput by remember {
+        mutableStateOf(
+            io.wallpaperengine.weclient.WeEnginePrefs.getStoredBoolean(
+                context, io.wallpaperengine.weclient.WallpaperProperties.GENERAL_PROP_TOUCH_INPUT, true,
+            )
+        )
+    }
+    var colorsApi by remember {
+        mutableStateOf(
+            io.wallpaperengine.weclient.WeEnginePrefs.getStoredString(
+                context, io.wallpaperengine.weclient.WallpaperProperties.GENERAL_PROP_COLORS_API,
+            ) ?: "enabled"
+        )
+    }
+    var restoreConfirm by remember { mutableStateOf(false) }
+    var playlistSummary by remember { mutableStateOf("") }
+
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            val playlist = io.wallpaperengine.weclient.WeEnginePrefs.readPlaylist(context)
+            val mode = io.wallpaperengine.weclient.WeEnginePrefs.getStoredString(
+                context, io.wallpaperengine.weclient.WallpaperProperties.PLAYLIST_MODE
+            ) ?: "random"
+            playlistSummary = "${playlist.wallpapers.size} wallpapers · $mode"
+        }
+    }
+
+    // Cap the FPS slider at the display refresh rate (official behavior).
+    val refreshRate = remember {
+        try {
+            @Suppress("DEPRECATION")
+            (context.getSystemService(android.content.Context.WINDOW_SERVICE)
+                    as android.view.WindowManager).defaultDisplay?.refreshRate?.toInt() ?: 60
+        } catch (t: Throwable) {
+            60
+        }
+    }
+    val fpsUpper = maxOf(30, refreshRate)
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("Wallpaper Engine", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "FPS limit: $maxFps",
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            Slider(
+                value = maxFps.toFloat(),
+                onValueChange = { maxFps = it.toInt() },
+                onValueChangeFinished = {
+                    io.wallpaperengine.weclient.WeEnginePrefs.storeInt(
+                        context,
+                        io.wallpaperengine.weclient.WallpaperProperties.GENERAL_PROP_FPS,
+                        maxFps,
+                    )
+                    io.wallpaperengine.weclient.WEWallpaperService.instance
+                        ?.requestWallpaperApplyGeneralProperties()
+                },
+                valueRange = 10f..fpsUpper.toFloat(),
+            )
+
+            SettingToggleRow(
+                label = "Pause while saving battery",
+                checked = powerSave,
+            ) { checked ->
+                powerSave = checked
+                io.wallpaperengine.weclient.WeEnginePrefs.storeBoolean(
+                    context,
+                    io.wallpaperengine.weclient.WallpaperProperties.GENERAL_PROP_POWER_SAVE,
+                    checked,
+                )
+                io.wallpaperengine.weclient.WEWallpaperService.instance
+                    ?.requestWallpaperApplyGeneralProperties()
+            }
+
+            SettingToggleRow(
+                label = "Wallpaper touch input",
+                checked = touchInput,
+            ) { checked ->
+                touchInput = checked
+                io.wallpaperengine.weclient.WeEnginePrefs.storeBoolean(
+                    context,
+                    io.wallpaperengine.weclient.WallpaperProperties.GENERAL_PROP_TOUCH_INPUT,
+                    checked,
+                )
+                io.wallpaperengine.weclient.WEWallpaperService.instance
+                    ?.requestWallpaperApplyGeneralProperties()
+            }
+
+            Text(
+                "Wallpaper Colors integration",
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(
+                    "Enabled" to "enabled",
+                    "Disabled" to "disabled",
+                    "Dark hint" to "hintdark",
+                ).forEach { (label, value) ->
+                    FilterChip(
+                        selected = colorsApi == value,
+                        onClick = {
+                            colorsApi = value
+                            io.wallpaperengine.weclient.WeEnginePrefs.storeString(
+                                context,
+                                io.wallpaperengine.weclient.WallpaperProperties.GENERAL_PROP_COLORS_API,
+                                value,
+                            )
+                            io.wallpaperengine.weclient.WEWallpaperService.instance
+                                ?.requestWallpaperApplyGeneralProperties()
+                        },
+                        label = { Text(label) },
+                    )
+                }
+            }
+
+            OutlinedButton(
+                onClick = { restoreConfirm = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Restore official wallpapers")
+            }
+
+            if (restoreConfirm) {
+                AlertDialog(
+                    onDismissRequest = { restoreConfirm = false },
+                    title = { Text("Restore official wallpapers?") },
+                    text = { Text("The bundled wallpapers will be re-extracted on the next app restart.") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            restoreConfirm = false
+                            scope.launch {
+                                com.wepwawet.engine.EngineLibrary.restoreOfficialWallpapers(context)
+                            }
+                        }) { Text("Restore") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { restoreConfirm = false }) { Text("Cancel") }
+                    },
+                )
+            }
+        }
+    }
+}
+
+/** Simple labeled switch row used by the engine settings card. */
+@Composable
+private fun SettingToggleRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyLarge)
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }

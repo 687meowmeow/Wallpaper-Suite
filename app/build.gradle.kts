@@ -15,7 +15,9 @@ android {
 
     defaultConfig {
         applicationId = "com.wepwawet"
-        minSdk = 26  // Android 8.0 — required for the WE pairing protocol + ImageDecoderDecoder GIF path
+        minSdk = 29  // v0.8.0: Android 10 — the integrated WE engine (libscenejni.so)
+                     // matches the official client's minSdk; Visualizer/MediaDataSource
+                     // fast paths and the GLES3 surface pipeline assume it.
         targetSdk = 35
         // v0.7.1-alpha: UI cleanup pass — swap Settings card order, .pkg cache toggle,
         // square wallpaper preview, smaller favorite heart, favorites route placeholder,
@@ -597,8 +599,8 @@ android {
         //     hardcoded "Android 13" user-agent; M-U7 favorites LazyColumn
         //     keys; M-U12 10Hz recomposition storm while paused; M-A10 dead
         //     ic_launcher_background color (now referenced by the new icon).
-        versionCode = 117
-        versionName = "0.7.25-alpha"
+        versionCode = 118
+        versionName = "0.8.0-alpha"
         // Native ABI filter — only build for arm64-v8a (WE app targets Snapdragon 8 Gen 2+)
         ndk {
             abiFilters += "arm64-v8a"
@@ -617,6 +619,9 @@ android {
         // Custom Application ID field so we can carry version metadata into the APK
         buildConfigField("String", "GIT_SHA", "\"${getGitSha()}\"")
         buildConfigField("String", "BUILD_TIME", "\"${getBuildTime()}\"")
+        // Epoch-seconds string handed to the WE engine (SceneLib.initLibrary) for
+        // asset-cache invalidation — the official client passes BUILD_TIME/1000.
+        buildConfigField("String", "ENGINE_ASSET_TIME", "\"${System.currentTimeMillis() / 1000L}\"")
         // Multidex not needed since we don't have 65k+ methods, but explicit
         multiDexEnabled = true
         // Required for very large APKs that include assets > 200 MB

@@ -85,3 +85,4 @@ download/
 # Worklog (kept locally for agent reminders; CI doesn't need it)
 # (We DO commit worklog.md so future agents can read it.)
 
+.kotlin/

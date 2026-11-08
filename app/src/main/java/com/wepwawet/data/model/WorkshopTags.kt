@@ -91,28 +91,18 @@ object WorkshopTags {
     val EXCLUDED_TYPE_TAGS = listOf("Web", "Application")
 
     // ==================== MISCELLANEOUS (multi-select) ====================
+    // Steam's browse-menu "Miscellaneous" checkbox group (1:1).
     val MISC_TAGS = listOf(
         "Approved", "Audio responsive", "3D", "Customizable", "Puppet Warp",
         "HDR", "Media Integration", "User Shortcut", "Video Texture", "Asset Pack",
     )
 
-    // ==================== ASSET TYPE (single-select) ====================
-    val ASSET_TYPE_TAGS = listOf(
-        "Particle", "Image", "Sound", "Model", "Text", "Sprite",
-        "Fullscreen", "Composite", "Script", "Effect", "Scripted Layer",
-    )
-
-    // ==================== ASSET GENRE (single-select) ====================
-    val ASSET_GENRE_TAGS = listOf(
-        "Audio Visualizer", "Background", "Character", "Clock", "Fire",
-        "Interactive", "Magic", "Post Processing", "Smoke", "Space",
-    )
-
-    // ==================== SCRIPT TYPE (single-select) ====================
-    val SCRIPT_TYPE_TAGS = listOf(
-        "Boolean", "Number", "Vec2", "Vec3", "Vec4", "String",
-        "No Animation", "Oversized",
-    )
+    // v0.8.0: the "Asset Type" / "Asset Genre" / "Script Type" groups (incl.
+    // "No Animation") were REMOVED — they belong to Steam's ASSET-browsing
+    // context, never show up in the wallpaper browse menu, and filtering the
+    // workshop by them returns nothing. The visible sheet now mirrors the real
+    // menu exactly (Type / Age Rating / Genre / Resolution / Category /
+    // Miscellaneous) — see TagPickerSheet.TAG_SECTIONS.
 
     // ==================== HIDDEN/ADMIN (multi-select) ====================
     val HIDDEN_TAGS = listOf(
@@ -146,12 +136,6 @@ object WorkshopTags {
         addAll(MISC_TAGS)
         // Category
         addAll(CATEGORY_TAGS)
-        // v0.7.25: the Steam-declared groups that were missing here — the
-        // browse page's declaredTags offers all of these as filters (this is
-        // where "No Animation" lives, in SCRIPT_TYPE_TAGS).
-        addAll(ASSET_TYPE_TAGS)
-        addAll(ASSET_GENRE_TAGS)
-        addAll(SCRIPT_TYPE_TAGS)
         // Hidden/admin
         addAll(HIDDEN_TAGS)
     }.distinct()
@@ -159,8 +143,7 @@ object WorkshopTags {
     /** All tags flattened (for search/autocomplete). */
     val ALL_TAGS: List<String> = (
         TYPE_TAGS + CATEGORY_TAGS + AGE_RATING_TAGS + GENRE_TAGS +
-        RESOLUTION_TAGS + MISC_TAGS + ASSET_TYPE_TAGS + ASSET_GENRE_TAGS +
-        SCRIPT_TYPE_TAGS + HIDDEN_TAGS
+        RESOLUTION_TAGS + MISC_TAGS + HIDDEN_TAGS
     ).distinct()
 
     /**
