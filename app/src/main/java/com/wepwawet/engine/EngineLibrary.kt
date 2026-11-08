@@ -73,6 +73,19 @@ object EngineLibrary {
                             "file" to wallpaper.filePath)
                         wallpaper.title = "(corrupt)"
                     }
+                    // v0.8.2: the native enumerateWallpapers() never populates
+                    // the `type` field (verified against libscenejni.so — it
+                    // only sets title/filePath/flags; the official client also
+                    // calls getWallpaperType() separately). Fill it in here so
+                    // the library grid and preview show the real type
+                    // (Scene/Video) instead of a blank subtitle.
+                    if (wallpaper.type.isEmpty() && !wallpaper.isLocal) {
+                        wallpaper.type = try {
+                            engine.getWallpaperType(wallpaper.filePath) ?: ""
+                        } catch (t: Throwable) {
+                            ""
+                        }
+                    }
                     if (wallpaper.isOfficial) officials++ else downloads++
                     result.add(wallpaper)
                 }

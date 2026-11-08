@@ -77,6 +77,12 @@ research-1b/
 research-cache/
 scripts/
 skills/
+# v0.8.2: the engine's JS script runtime (assets/scripts/) is SHIPPED in the
+# APK — the bare `scripts/` pattern above silently ignored it, exactly like
+# the *.so/*.mpkg incident that shipped an engine-less release once before.
+# The DIRECTORY itself must be re-included before git will look inside it.
+!app/src/main/assets/scripts/
+!app/src/main/assets/scripts/**
 node_modules/
 .next/
 next-env.d.ts

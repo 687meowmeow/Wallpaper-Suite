@@ -179,8 +179,17 @@ class WEWallpaperService : WallpaperService() {
             }
             lib.initLibrary(this@WEWallpaperService)
             lib.setLogToFileEnabled(generalSettings.logToFileEnabled)
+            // v0.8.2 CRITICAL FIX: do NOT call isPreview() here. The framework's
+            // WallpaperService.Engine.isPreview() reads mIWallpaperEngine, which
+            // is only assigned by attach() AFTER onCreateEngine() returns
+            // (AOSP WallpaperService$IWallpaperEngineWrapper.doAttachEngine:
+            // onCreateEngine() runs first, engine.attach(this) after). Calling
+            // it from the constructor is a guaranteed NullPointerException —
+            // this exact NPE crashed the engine whenever the system wallpaper
+            // picker opened (crash-1794175014068). The official client never
+            // calls isPreview() in its constructor; it first uses it in
+            // onCreate(SurfaceHolder), where the wrapper is attached.
             WepWawetLogger.engine("WEWallpaperService: engine created",
-                "is_preview" to isPreview,
                 "touch_input" to generalSettings.touchInputEnabled,
                 "max_fps" to generalSettings.maxFps,
                 "power_save" to generalSettings.powerSavingEnabled,
@@ -644,6 +653,10 @@ class WEWallpaperService : WallpaperService() {
 
         override fun onCreate(surfaceHolder: android.view.SurfaceHolder?) {
             super.onCreate(surfaceHolder)
+            // Safe here: the engine wrapper is attached before onCreate callbacks
+            // fire (the official client also reads isPreview() in onCreate).
+            WepWawetLogger.engine("WEWallpaperService: engine onCreate",
+                "is_preview" to isPreview)
             if (!isPreview) {
                 synchronized(Companion) {
                     instance = this@WEWallpaperService

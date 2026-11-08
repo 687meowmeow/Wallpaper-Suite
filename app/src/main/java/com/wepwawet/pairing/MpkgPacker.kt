@@ -889,6 +889,16 @@ object MpkgPacker {
                         entries[i] = name to rewritten
                         WepWawetLogger.proxy("MpkgPacker.packFromPkg: added workshopurl to project.json (PC textual format)",
                             "original_size" to blob.size, "rewritten_size" to rewritten.size)
+                    } else {
+                        // v0.8.2: this branch means either the project.json
+                        // already carries a workshopurl (fine — the PC keeps
+                        // the existing one too) or the textual rewrite failed
+                        // to find the trailing brace (would be a bug — surface
+                        // it at WARN so the in-app preview's "no workshop page"
+                        // log can be cross-checked against the pack side).
+                        WepWawetLogger.proxyWarn("MpkgPacker.packFromPkg: workshopurl NOT written to project.json",
+                            "already_present" to jsonText.contains("\"workshopurl\""),
+                            "json_length" to jsonText.length)
                     }
                 } catch (e: Exception) {
                     WepWawetLogger.proxyWarn("MpkgPacker.packFromPkg: failed to add workshopurl",
@@ -896,6 +906,14 @@ object MpkgPacker {
                 }
                 break
             }
+        }
+        // v0.8.2: if the loop finished without ever finding a project.json
+        // entry, say so — the phone-side engine needs it (type detection via
+        // the "file" key, title, and the workshop page button all read it).
+        if (entries.none { it.first == "project.json" }) {
+            WepWawetLogger.proxyWarn("MpkgPacker.packFromPkg: NO project.json in the package entries",
+                "entry_count" to entries.size,
+                "note" to "the engine will not be able to detect this wallpaper's type")
         }
 
         // v0.7.16: drop sounds — the PC deletes every file under a "sounds"

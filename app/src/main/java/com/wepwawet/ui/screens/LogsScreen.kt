@@ -138,6 +138,31 @@ fun LogsScreen(onBack: () -> Unit) {
                     }
                     sb.append("\n")
                 }
+                // v0.8.2: append the native engine's own log tail
+                // (filesDir/logs/applog.txt) — scene-load failures and shader
+                // compile errors live there, not in the app log.
+                runCatching {
+                    val engineLog = java.io.File(context.filesDir, "logs/applog.txt")
+                    if (engineLog.exists() && engineLog.length() > 0L) {
+                        val maxBytes = 96 * 1024
+                        val len = engineLog.length()
+                        val text = if (len > maxBytes) {
+                            java.io.RandomAccessFile(engineLog, "r").use { raf ->
+                                raf.seek(len - maxBytes)
+                                val buf = ByteArray(maxBytes)
+                                raf.readFully(buf)
+                                String(buf, Charsets.UTF_8)
+                            }
+                        } else {
+                            engineLog.readText()
+                        }
+                        sb.append("\n=== Engine log (tail of ")
+                            .append(engineLog.absolutePath)
+                            .append(") ===\n")
+                        sb.append(text)
+                        sb.append("\n=== end of engine log ===\n")
+                    }
+                }
                 val text = sb.toString()
                 val uri = PublicDownloadsWriter.writeText(context, fileName, text)
                 withContext(Dispatchers.Main) {

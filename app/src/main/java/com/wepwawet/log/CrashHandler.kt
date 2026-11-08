@@ -171,6 +171,13 @@ class CrashHandler private constructor(
         sb.append("\n--- Thread dump (via /proc/self/task) ---\n")
         runCatching { dumpTopThreads(sb) }
 
+        // v0.8.2: the native engine (libscenejni.so) writes its own log to
+        // filesDir/logs/applog.txt when log-to-file is enabled — scene load
+        // failures (missing script assets, shader compile errors, texture
+        // problems) are only visible there. Append its tail so every crash
+        // report carries the engine's side of the story.
+        runCatching { appendEngineLogTail(sb) }
+
         sb.append("\n--- /proc/self/maps (first 50 lines) ---\n")
         runCatching {
             val maps = java.io.File("/proc/self/maps").readLines()
@@ -300,6 +307,37 @@ class CrashHandler private constructor(
             val commFile = java.io.File("/proc/self/task/${tid.name}/comm")
             val comm = if (commFile.exists()) commFile.readText().trim() else "?"
             sb.append("  tid=").append(tid.name).append(" name=").append(comm).append("\n")
+        }
+    }
+
+    /**
+     * Appends the tail of the native engine's own log file
+     * (filesDir/logs/applog.txt — the official client's LOG_RELATIVE_PATH)
+     * to the crash report. The engine only writes it while its log-to-file
+     * setting is on; when the file is absent we note that and move on.
+     */
+    private fun appendEngineLogTail(sb: StringBuilder) {
+        val engineLog = java.io.File(appContext.filesDir, "logs/applog.txt")
+        if (!engineLog.exists() || engineLog.length() == 0L) {
+            sb.append("\n--- Engine log ---\n(not present — engine log-to-file is off or nothing was logged)\n")
+            return
+        }
+        // Read at most the last 96 KB, keep the last 300 lines.
+        val maxBytes = 96 * 1024
+        val bytes = engineLog.length()
+        val readFrom = if (bytes > maxBytes) bytes - maxBytes else 0L
+        val lines = ArrayList<String>()
+        java.io.RandomAccessFile(engineLog, "r").use { raf ->
+            raf.seek(readFrom)
+            val buf = ByteArray((bytes - readFrom).toInt())
+            raf.readFully(buf)
+            String(buf, Charsets.UTF_8).split('\n').forEach { line ->
+                if (line.isNotBlank()) lines.add(line)
+            }
+        }
+        sb.append("\n--- Engine log (last ${minOf(300, lines.size)} of ${lines.size} lines) ---\n")
+        for (line in lines.takeLast(300)) {
+            sb.append(line).append("\n")
         }
     }
 

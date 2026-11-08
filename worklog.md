@@ -2935,3 +2935,139 @@ Reminders for future agents:
       it fast and fails otherwise-green runs. The release is now created
       DIRECTLY from the build job via softprops (release assets don't count
       against that quota); there is no artifact handoff anymore.
+
+---
+
+## v0.8.2-alpha (build 120) — the black-screen deep fix (scripts/ + crash + preview teardown)
+
+**User report:** "It is still black and this time it crashed" (crash-1794175014068:
+NPE `WallpaperService$Engine.isPreview()` from `WEWallpaperService$GLWallpaperEngine.<init>`).
+Everything below was root-caused against a FRESH jadx 1.5.6 decompile of the
+current official APK (wallpaperengine.io/android — libscenejni.so md5
+5ff85205fd17f8a5c81101de51697557, IDENTICAL to ours) plus the AOSP
+framework sources for WallpaperService/SurfaceView/BaseSurfaceHolder.
+
+### The crash (exact framework semantics, AOSP-verified)
+
+`WallpaperService$IWallpaperEngineWrapper.doAttachEngine()` calls
+`onCreateEngine()` FIRST and `engine.attach(this)` (which assigns
+`mIWallpaperEngine`) only AFTER it returns. `Engine.isPreview()` reads
+`mIWallpaperEngine.mIsPreview` — so ANY isPreview() call from the engine
+constructor is a guaranteed NPE. The v0.8.1 "engine logging" feature added
+`"is_preview" to isPreview` to the GLWallpaperEngine init-block log — the
+app crashed the moment the system wallpaper picker created its preview
+engine. Fix: constructor log no longer reads isPreview; the preview state
+is logged in `onCreate(SurfaceHolder)` (where the official client itself
+first reads it). The official constructor never calls isPreview — verified
+line-by-line in the decompile.
+
+### The blank preview (8 ms after creation)
+
+The preview's renderer teardown was `DisposableEffect(view)` — but the
+AndroidView factory assigns `view` AFTER the first composition, so the
+null→view key change fired `onDispose` 8 ms after creation:
+"Preview: leaving — stopping renderer" in the user's log at
+15:56:52.038, one millisecond after "surface not valid yet". The teardown
+ran `onStopWallpaper()` + `onDestroyWallpaper()` — the latter calls
+`onDetachedFromWindow()` on the still-attached GLSurfaceView, killing the
+GL thread before the surface ever became valid → permanently blank preview
+for EVERY wallpaper since v0.8.0 (the v0.8.1 "double-destroy cleanup"
+removed onRelease but kept the bad key). Fix: `DisposableEffect(wallpaper.filePath)`.
+PLUS official PreviewActivity lifecycle parity via a lifecycle observer:
+onPause → onPauseWallpaper, onResume → onResumeWallpaper, onStop →
+onStopWallpaper (+flag), onStart-after-stop → reload (the official stops
+the scene in onStop and re-loads it in onRestart's fadeIntoCurrentScene).
+Without this the GL thread kept rendering while the screen was backgrounded.
+
+### The black wallpaper (THE missing engine scripts)
+
+Full asset-parity diff against the official APK (750 engine-asset files,
+md5 per file) found our APK was missing `assets/scripts/` ENTIRELY:
+jsclasses/baseclasses.js (38 KB of Vec2/Vec3/Color/... engine base classes)
+and jsmodules/{wecolor,wemath,wevector}.js. The engine injects these into
+every script context — scene wallpapers with script-driven effects (the
+user's X-ray Genshin scene is exactly that) fail to load or render without
+them. Root cause of the absence: `.gitignore`'s bare `scripts/` pattern
+(added for agent scratch dirs) matched `app/src/main/assets/scripts/` —
+the SAME failure class as the v0.8.0 engine-less release (*.so/*.mpkg).
+The previous session's extraction never made it into a commit and was lost
+with the sandbox. Fix: files copied from the official APK + scoped
+negations (`!app/src/main/assets/scripts/` + `!app/src/main/assets/scripts/**`
+— the DIRECTORY itself must be re-included before git will look inside).
+Everything else matches the official APK byte-for-byte (746/746 files,
+libscenejni.so md5-identical). Reminder 78-bis: after ANY asset or lib
+change, verify the SHIPPED artifact, not the working tree.
+
+### The never-showing Workshop-page button
+
+`getWallpaperProjectString(filePath, "workshopurl")` returned null for the
+user's download. Native disassembly (capstone xref scan of the JNI
+exports): the function opens project.json from the package VFS and returns
+the requested string key — generic getter, no special cases. The packer
+(MpkgPacker Step 3e → PcPacking.addWorkshopUrl, unchanged since the
+known-good v0.7.25 send whose mpkg DID carry the URL) should have written
+it; the failure is not reproducible offline (the phone's mpkg isn't
+available here). Fixes, layered:
+  1. Preview now falls back to the import filename — autoImportToLibrary
+     names every workshop download `downloads/<itemId> - <title>.mpkg`, so
+     `Regex("^downloads/(\\d{6,}) - ")` resolves the item id regardless of
+     project.json state. The button now works for every workshop download.
+  2. Step 3e logs a WARN when the rewrite is a no-op AND when no
+     project.json entry exists at all (both were silent before).
+  3. autoImportToLibrary verifies the workshopurl is engine-readable at
+     import time and logs which side is doing the work.
+
+### type=(unknown) — not a bug, now populated anyway
+
+The native enumerateWallpapers()/getWallpaperInfoSparse() NEVER set the
+`type` field (verified by disassembly: they only set title/filePath/
+lastModifiedDate/isOfficial/isError/progress; getWallpaperType is a
+separate call that reads project.json's "file" key and maps .json→Scene /
+video-extension→Video). The official app always calls getWallpaperType()
+separately. Our Library grid subtitle showed "Wallpaper" for everything.
+Fix: EngineLibrary.enumerateWallpapers() fills `type` via
+getWallpaperType() for every non-local entry (IO dispatcher, one VFS read
+each) — the grid and preview now show Scene/Video like the official list.
+
+### Engine diagnostics (so black-screen causes never hide again)
+
+The native engine writes its own log to `filesDir/logs/applog.txt`
+(official Util.LOG_RELATIVE_PATH) when log-to-file is on — scene load
+failures, shader compile errors and texture problems land THERE, not in
+our logger. v0.8.2: crash reports append the last 300 lines (96 KB cap)
+and the Logs screen's export appends the tail — every future "black
+wallpaper" report now carries the engine's own explanation.
+
+### Also verified this session (no change needed)
+
+- WEWallpaperService.loadWallpaper / onSurfaceCreated / surface-replay:
+  ported line-for-line from the decompile; the framework dispatches
+  holder callbacks AFTER onSurfaceCreated returns (WallpaperService.java
+  updateSurface → getCallbacks() re-read post-callback), so a view created
+  inside onSurfaceCreated DOES receive surfaceCreated/surfaceChanged —
+  first-load works exactly like the official app.
+- Engine's BaseSurfaceHolder is com.android.internal.view.BaseSurfaceHolder
+  (no addCallback replay — but the WallpaperService dispatch above covers it).
+- SceneWallpaperView/VideoWallpaperView constructors, EGL config
+  (8,8,8,0,16,0), setLib usage, stop/pause/resume semantics: all match.
+- applySceneProperties/updateScene/feature-flags flow: matches.
+
+### Version
+
+versionCode 120, versionName 0.8.2-alpha. ENGINE_ASSET_TIME auto-bumps
+(build-time epoch seconds) so the engine re-extracts bundled wallpapers.
+
+Reminders for future agents:
+  79. NEVER call WallpaperService.Engine.isPreview() (or any engine-wrapper
+      state) from an Engine subclass CONSTRUCTOR — attach() runs after
+      onCreateEngine() returns. First safe point: onCreate(SurfaceHolder).
+  80. Compose AndroidView + DisposableEffect: keying a teardown effect on a
+      state that the FACTORY assigns guarantees a spurious dispose one
+      recomposition after creation. Key teardown on stable identity
+      (the screen's subject), never on view/controls handles.
+  81. .gitignore bare directory patterns (`scripts/`) match at ANY depth —
+      including app/src/main/assets/. After adding shipped assets, ALWAYS
+      `git check-ignore -v <path>` AND check the committed tree/release zip.
+  82. The engine reads assets/fonts|html|locale|materials|models|scripts|
+      shaders|wallpapers from the APK — the full parity checklist lives in
+      scripts/asset_parity.py (official APK = ground truth, md5 per file).

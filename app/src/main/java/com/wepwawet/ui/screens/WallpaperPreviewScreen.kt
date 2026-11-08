@@ -105,7 +105,6 @@ fun WallpaperPreviewScreen(
     // The live renderer: Scene through the native engine, everything else
     // (Video/Image/GIF) through the ported GL video pipeline.
     var controls by remember { mutableStateOf<WallpaperControls?>(null) }
-    var view by remember { mutableStateOf<View?>(null) }
     var propertiesRevision by remember { mutableStateOf(0) }
 
     WepWawetLogger.engine("Preview: opened wallpaper",
@@ -212,7 +211,6 @@ fun WallpaperPreviewScreen(
                                 controls = videoView
                             }
                         }
-                        view = created
                         created
                     },
                     update = { _ -> },
@@ -220,7 +218,7 @@ fun WallpaperPreviewScreen(
                 )
             }
 
-            LaunchedEffect(controls) {
+            LaunchedEffect(controls, wallpaper.filePath) {
                 val c = controls ?: return@LaunchedEffect
                 c.setGeneralSettings(WeEnginePrefs.readGeneralSettings(context))
                 c.setLoadCallback { onLoaded() }
@@ -231,22 +229,34 @@ fun WallpaperPreviewScreen(
                     val type = WeEnginePrefs.getWallpaperType(context, lib, wallpaper) ?: "—"
                     val resolution = WeEnginePrefs.getWallpaperResolution(context, lib, wallpaper)
                     val fps = WeEnginePrefs.getWallpaperFPS(context, lib, wallpaper.filePath)
-                    // v0.8.1: resolve the workshop page (only exists for
-                    // wallpapers that carry a workshopurl in project.json —
-                    // every workshop download through this app does).
+                    // v0.8.2: resolve the workshop page with a layered fallback
+                    // so the button shows for every workshop download:
+                    //   1. project.json "workshopurl" (written by our packer,
+                    //      PC textual format) via the engine's own getter;
+                    //   2. the item id embedded in the import filename —
+                    //      autoImportToLibrary names every workshop download
+                    //      "downloads/<itemId> - <title>.mpkg".
                     val workshopUrl = runCatching {
                         if (!wallpaper.isLocal) {
                             lib.getWallpaperProjectString(wallpaper.filePath, "workshopurl")
                         } else null
                     }.getOrNull()
-                    workshopId = workshopUrl?.let { url ->
+                    val resolvedId = workshopUrl?.let { url ->
                         Regex("[?&]id=(\\d+)").find(url)?.groupValues?.get(1)
-                    }
-                    if (workshopId == null) {
-                        WepWawetLogger.engineDebug("Preview: no workshop url for this wallpaper")
+                    } ?: Regex("^downloads/(\\d{6,}) - ").find(wallpaper.filePath)?.groupValues?.get(1)
+                    workshopId = resolvedId
+                    if (resolvedId == null) {
+                        WepWawetLogger.engine(
+                            "Preview: no workshop page for this wallpaper",
+                            "file" to wallpaper.filePath,
+                            "reason" to "no workshopurl in project.json and no item id in the filename")
+                    } else if (workshopUrl == null) {
+                        WepWawetLogger.engine(
+                            "Preview: workshop page resolved from import filename",
+                            "item_id" to resolvedId)
                     } else {
                         WepWawetLogger.engine("Preview: workshop page available",
-                            "item_id" to workshopId!!)
+                            "item_id" to resolvedId)
                     }
                     Triple(
                         type,
@@ -256,12 +266,58 @@ fun WallpaperPreviewScreen(
                 }
             }
 
-            DisposableEffect(view) {
+            // v0.8.2 CRITICAL FIX (the blank preview): this teardown effect was
+            // previously keyed on `view` — but the AndroidView factory assigns
+            // `view` AFTER the first composition, so the null→view key change
+            // fired onDispose ~8 ms after creation, destroying the
+            // freshly-created renderer (onDestroyWallpaper → onDetachedFromWindow
+            // kills the GL thread) and leaving the preview permanently blank.
+            // Keyed on the wallpaper identity instead: teardown now runs only
+            // when the screen actually leaves composition.
+            DisposableEffect(wallpaper.filePath) {
                 onDispose {
-                    WepWawetLogger.engine("Preview: leaving — stopping renderer")
+                    WepWawetLogger.engine("Preview: leaving — stopping renderer",
+                        "file" to wallpaper.filePath)
                     controls?.onStopWallpaper()
                     controls?.onDestroyWallpaper()
                 }
+            }
+
+            // v0.8.2: official PreviewActivity lifecycle parity — the official
+            // pauses the renderer in onPause, stops (shuts down) the scene in
+            // onStop and re-loads it when the activity restarts, and destroys
+            // in onDestroy. Without this the GL thread kept rendering while
+            // the screen was backgrounded.
+            val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+            var stoppedAfterLoad by remember { mutableStateOf(false) }
+            androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+                val observer = object : androidx.lifecycle.DefaultLifecycleObserver {
+                    override fun onPause(owner: androidx.lifecycle.LifecycleOwner) {
+                        controls?.onPauseWallpaper()
+                    }
+
+                    override fun onResume(owner: androidx.lifecycle.LifecycleOwner) {
+                        controls?.onResumeWallpaper()
+                    }
+
+                    override fun onStop(owner: androidx.lifecycle.LifecycleOwner) {
+                        if (controls != null) {
+                            stoppedAfterLoad = true
+                            WepWawetLogger.engine("Preview: stopping renderer (screen hidden)")
+                            controls?.onStopWallpaper()
+                        }
+                    }
+
+                    override fun onStart(owner: androidx.lifecycle.LifecycleOwner) {
+                        if (stoppedAfterLoad && controls != null) {
+                            stoppedAfterLoad = false
+                            WepWawetLogger.engine("Preview: returning — reloading renderer")
+                            controls?.loadWallpaper(wallpaper.filePath)
+                        }
+                    }
+                }
+                lifecycleOwner.lifecycle.addObserver(observer)
+                onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
             }
 
             details?.let { (type, resolution, fps) ->

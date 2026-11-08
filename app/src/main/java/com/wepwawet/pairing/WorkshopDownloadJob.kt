@@ -259,6 +259,24 @@ object WorkshopDownloadJob {
                 WepWawetLogger.engine("autoImport: wallpaper added to library",
                     "file" to name,
                     "size" to target.length())
+                // v0.8.2: post-import verification — the preview screen's
+                // "Workshop page" button reads the project.json workshopurl
+                // through the engine. Verify it resolves right here so a pack
+                // failure is visible in the logs at import time (the preview
+                // also has a filename fallback, but this tells us whether the
+                // packer or the fallback is doing the work).
+                runCatching {
+                    val url = engine.getWallpaperProjectString("downloads/$name", "workshopurl")
+                    if (url == null) {
+                        WepWawetLogger.engineWarn("autoImport: workshopurl not readable from the package",
+                            "file" to name,
+                            "fallback" to "preview will use the item id from the import filename")
+                    } else {
+                        WepWawetLogger.engine("autoImport: workshopurl verified",
+                            "file" to name,
+                            "url" to url)
+                    }
+                }
                 true
             }
         }.getOrElse { e ->
