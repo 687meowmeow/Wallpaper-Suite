@@ -2930,3 +2930,8 @@ Reminders for future agents:
       (scripts/kotlin_lex.py false-positives on `"${a.b}"`).
   76. `autoImportToLibrary` returns whether the engine ACCEPTED the
       package — never treat a version-rejected import as success.
+  77. GitHub Actions free artifact storage (500 MB) recalculates only every
+      6-12h — uploading the 150 MB APK artifact per branch build exhausts
+      it fast and fails otherwise-green runs. The release is now created
+      DIRECTLY from the build job via softprops (release assets don't count
+      against that quota); there is no artifact handoff anymore.
