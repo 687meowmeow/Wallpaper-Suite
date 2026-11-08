@@ -2826,3 +2826,14 @@ Reminders for future agents:
       ("'Class' is prohibited here") — hoist data holders out a level.
   73. Kotlin block comments NEST — "application/*" inside a KDoc eats the
       rest of the file (bit us again, 3 sessions in a row now).
+
+**v0.8.0 post-script (build 118, take 2):** the first v0.8.0-alpha release
+APK was silently engine-less. `.gitignore`'s global `*.so` (a CMake-output
+guard) and `*.mpkg` (a local-test guard) matched the new prebuilt
+`jniLibs/arm64-v8a/libscenejni.so` and `assets/wallpapers/*.mpkg`, so they
+were never committed — local builds had them (files on disk), CI builds
+didn't, and nothing failed at build time because the library is only
+System.loadLibrary'd at runtime. Caught by diffing the actual release APK
+(R8 kept the JNI classes but the zip had no engine). Fixed with scoped
+negations; the release was deleted and re-cut. Always verify the SHIPPED
+artifact, not the local one.
