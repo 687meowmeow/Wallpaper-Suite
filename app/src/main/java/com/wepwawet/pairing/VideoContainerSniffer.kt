@@ -166,7 +166,13 @@ object VideoContainerSniffer {
             header[0] == 0x89.toByte() && header[1] == 0x50.toByte() &&
             header[2] == 0x4E.toByte() && header[3] == 0x47.toByte()
         ) return Kind.PNG
-        if (valid >= 2 && ascii(0, 2) == "BM") return Kind.BMP
+        if (valid >= 2 && ascii(0, 2) == "BM" &&
+            // v0.7.25 (audit M-V6): require the BMP reserved bytes (offsets
+            // 6–7) to be zero — every real BMP writer leaves them 0, while
+            // random binaries starting with "BM" almost never do. Prevents
+            // false-positive BMP classification of non-image files.
+            valid >= 8 && header[6] == 0.toByte() && header[7] == 0.toByte()
+        ) return Kind.BMP
 
         // --- MPEG-TS: 0x47 sync byte every 188 bytes (0, 188, 376) ---
         if (valid >= 376 + 1 && fileSize > 1880 &&

@@ -194,7 +194,13 @@ fun FavoritesScreen(
             ) {
                 // Sort so the order is stable across recompositions
                 // (SharedPreferences StringSet iteration order is undefined).
-                items(savedCreators.toSortedSet().toList()) { steamId ->
+                items(
+                    savedCreators.toSortedSet().toList(),
+                    // v0.7.25 (audit M-U7): stable key per creator — without
+                    // it, item addition/removal animates/scrolls incorrectly
+                    // and LazyColumn re-composes every row.
+                    key = { it },
+                ) { steamId ->
                     FavoritesRow(
                         steamId = steamId,
                         resolvedName = resolvedNames[steamId],

@@ -560,8 +560,45 @@ android {
         //   Filmstrip (user request): rotation-corrected aspect ratio, contiguous
         //     frames (no 1dp gaps), duration-based frame count (1 per 2s,
         //     48..120), null-frame reuse, always-rendered background.
-        versionCode = 116
-        versionName = "0.7.24-alpha"
+        //
+        // v0.7.25-alpha build 117 — PC PARITY (the frozen square) + VideoTrim
+        //   UX + new icon + missing tags + audit sweep:
+        //   PARITY (ground truth: the user's real PC-produced .mpkg of workshop
+        //     1572670027, byte-diffed against our send): textures are now CROPPED
+        //     to the TEXI imgW/imgH content dims — a pow2-padded buffer
+        //     (texW/texH 1024x1024 holding a 600x960 mask) used to ship at the
+        //     BUFFER dims, squeezing the image into the top-left of the UV space
+        //     so masked effects (shake/waterflow) froze a whole region of the
+        //     screen. materials/ + materials/masks/ textures are now force-
+        //     compressed to ETC2 exactly like the PC's "-c force" (deeper paths
+        //     like materials/effects stay RGBA — verified against the same
+        //     ground truth). CONVERTER_VERSION bumped to 3 so stale v2 texture
+        //     caches on devices are not reused. ShaderEsslSafety's FIRST_ARG_RET
+        //     typing now follows the first VECTOR argument (fxc broadcast), so
+        //     `step(0.0, vec4)` types as vec4 and the pass no longer wraps it in
+        //     a redundant vec4(...) — shake.frag ships byte-identical to the PC.
+        //   VideoTrim (user request): tap a filmstrip frame to jump the video +
+        //     playhead; auto-scroll when dragging any handle into the edge zone
+        //     (the handle rides along, extending the clip); tappable start/end
+        //     time labels with a manual entry dialog (seconds or m:ss, clamped
+        //     to bounds); frame aspect from the first DECODED frame (metadata
+        //     rotation is device-inconsistent); 60..144 frames (one per ~1.6s)
+        //     decoded via getScaledFrameAtTime at target size.
+        //   Icon (user request): the user's artwork is now the launcher icon —
+        //     adaptive foreground + monochrome silhouette at every density,
+        //     white background layer (was the violet wolf-head placeholder).
+        //   Tags (user request): the Filter sheet now shows Steam's full
+        //     declared set for appid 431960 — Asset Type, Asset Genre, Script
+        //     Type (where "No Animation" lives) and Category sections were
+        //     missing from the picker entirely (verified 1:1 against the live
+        //     declaredTags JSON).
+        //   Audit (M/L sweep): M-D9 orphaned continueVideoSend job; M-V5
+        //     double extractor release; M-V6 BMP sniff false positives; M-A4
+        //     hardcoded "Android 13" user-agent; M-U7 favorites LazyColumn
+        //     keys; M-U12 10Hz recomposition storm while paused; M-A10 dead
+        //     ic_launcher_background color (now referenced by the new icon).
+        versionCode = 117
+        versionName = "0.7.25-alpha"
         // Native ABI filter — only build for arm64-v8a (WE app targets Snapdragon 8 Gen 2+)
         ndk {
             abiFilters += "arm64-v8a"

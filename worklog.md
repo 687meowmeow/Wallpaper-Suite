@@ -2588,3 +2588,95 @@ Reminders for future agents:
       it backgrounds itself with no pending downloads (onUnbind →
       terminateService). That line alone is normal lifecycle — only its
       FREQUENCY (fixed by the echo) was a real defect.
+
+## v0.7.25-alpha (build 117) — PC parity for masked-effect scenes + VideoTrim UX + icon + tags
+
+**The frozen square (PC parity, ground-truthed):** the user shipped two .mpkg
+files of workshop 1572670027 — their app's send vs a real PC-produced WORKING
+reference. A full binary diff (container parsed entry-by-entry) showed the
+ONLY differences were the textures and one shader line, and the textures told
+the whole story: every mask shipped as RGBA8888 at 1024×1024 with the actual
+600×960 image sitting in the top-left (verified pixel-identical to the
+reference's ETC2 mask after channel-swap correction — corr 0.994), while the
+reference ships ETC2 at exactly 600×960. Root causes fixed:
+
+1. **Crop to TEXI imgW/imgH.** WE stores some textures (effect masks!) on a
+   pow2 BUFFER canvas with the content at the top-left. The scene's UVs span
+   the IMAGE, not the buffer — shipping the buffer dims squeezed the mask
+   into the top-left of UV space, so shake/waterflow sampled zero outside it
+   and a big region of the wallpaper NEVER MOVED. All three decode paths
+   (raw RGBA body, PNG/JPEG body, DXT) now crop to imgW/imgH before shrink /
+   encode, guarded (no crop when img dims are garbage or ≥ the buffer, or
+   when the body is short — falls back to the old behavior exactly).
+2. **Per-path `-c force`.** The PC force-compresses only textures whose
+   PARENT dir is `materials` or `materials\masks` (waterflowphase.tex in
+   `materials/effects` stays RGBA in the SAME reference package — three
+   ground-truth data points). forceEtc2Compression now defaults to true
+   (the PC's missing-key ⇒ forced behavior, and this device's evident
+   setting) and is applied per-entry via pcForcesEtc2().
+3. **CONVERTER_VERSION 2→3** so stale v2 texture-cache entries (wrong dims +
+   RGBA + stripped flag bits) are never reused on devices.
+4. **step() typing.** FIRST_ARG_RET followed arg 1 literally; ESSL's
+   scalar-edge overload `step(float, genType)` returns genType, so the typer
+   now follows the first VECTOR argument (fxc broadcast). The assignment pass
+   no longer wraps `step(0.0, csines)` in a redundant vec4(...) — shake.frag
+   now ships byte-identical to the reference. Regression test added.
+
+**VideoTrim (user requests):** tap any filmstrip frame → video + playhead
+jump to that frame's timestamp; dragging any handle into the last/first 56dp
+of the viewport auto-scrolls the strip with the handle riding along (clip
+keeps extending while held at the edge, speed ramps with depth); the
+start/end time labels are tappable → dialog accepts seconds ("12.5") or
+m:ss / h:mm:ss ("1:23"), clamped to [0, end−500ms] / [start+500ms, duration]
+(the same bounds the drag enforces); frame aspect is now derived from the
+first DECODED frame (always rotation-applied — metadata WIDTH/HEIGHT is
+device-inconsistent) so preview + frame boxes always match the real pixels;
+60..144 frames (one per ~1.6s, was 40) decoded via getScaledFrameAtTime
+directly at target size on API 28+ (fast), full-decode fallback on 26/27.
+
+**Icon (user request):** the user's artwork replaces the violet wolf-head
+placeholder — adaptive foreground at all five densities (subject flood-fill
+masked, centered, 60% canvas height so it clears the 61% safe zone on every
+mask shape), white background layer, and a monochrome silhouette for
+Android 13 themed icons.
+
+**Tags (user request):** "No Animation" existed in WorkshopTags but the
+Filter sheet's TAG_SECTIONS never rendered the Script Type / Asset Type /
+Asset Genre / Category groups. Verified the full live declaredTags JSON from
+steamcommunity.com/workshop/browse/?appid=431960 — the app's tag STRINGS
+were already 1:1 complete, so the four sections were added to the sheet
+(defaults ON; nothing excluded until the user toggles).
+
+**Audit M/L sweep (verified-then-fixed; the rest are documented-intentional
+or deferred):** M-D9 continueVideoSend orphaned a running jobs[itemId] on
+re-tap; M-V5 double extractor.release() in getDurationMs; M-V6 BMP sniff
+false-positives (reserved-bytes check added); M-A4 "Android 13" hardcoded
+in the WebView user-agent (now Build.VERSION.RELEASE); M-U7 FavoritesScreen
+LazyColumn had no keys; M-U12 the 10Hz position poll recomposed the screen
+forever while paused; M-A10 the unreferenced ic_launcher_background color
+is now the icon's background layer. Already-fixed-in-v0.7.24 finds that the
+audit still listed: M-U8, M-P4/P5, M-U18, M-D15, M-D16, M-B1. Skipped as
+intentional: M-S8 (INT_TO_FLOAT regex is byte-PC-exact by design), M-D14
+(documented Image-type packing policy), M-D2 (locale-correct digit
+rendering), and the native/perf/refactor items that cannot be safely
+changed without device testing.
+
+**Verification:** :app:compileDebugKotlin + :app:testDebugUnitTest (35/35
+ShaderEsslSafety incl. the new shake.frag regression) + :app:assembleDebug
+all green locally (Gradle 8.10.2, AGP 8.7.0, Kotlin 2.2.0, JDK 21, SDK 35
++ NDK 27). The crop semantics themselves were validated against the ground
+truth offline: send-mask top-left 600×960 == reference mask (channel-swap
+corrected, mean |Δ| 0.93).
+
+Reminders for future agents:
+  68. The mpkg container is [u32 marker=8][8B magic][u32 count][entries:
+      nameLen, name, offset, size][data pool] — offsets are RELATIVE TO THE
+      DATA SECTION START and sequential in entry order. scripts/
+      mpkg_diff.py + mpkg_extract.py + tex_headers.py + tex_decode.py parse
+      and diff them offline against any ground-truth file.
+  69. Kotlin block comments NEST — never write a glob like "materials/
+      *.tex" inside /** */ (the /* opens a REAL nested comment and eats the
+      rest of the file; that broke CI once at v0.7.25).
+  70. WE texture semantics: texW/texH is the (possibly pow2-padded) BUFFER,
+      imgW/imgH is the CONTENT, content sits at the buffer's TOP-LEFT. Any
+      transcode that doesn't crop to imgW/imgH changes the sampled UVs.

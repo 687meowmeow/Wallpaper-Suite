@@ -112,15 +112,38 @@ object MpkgPacker {
     // "compression" setting != "high_quality" (FUN_140019b80:
     // `*out = (value != "high_quality")`, missing key ⇒ "" ⇒ forced).
     //
-    // WepWawet defaults to the device-equivalent of "high_quality" (false) —
-    // the setting that produced the byte-verified reference .mpkg: DXT/BC
-    // sources still become ETC2, but PNG/RGBA sources keep lossless RGBA8888
-    // (exactly what the PC shipped for those textures). Enabling it mirrors
-    // the PC's "compressed" device option: every materials texture is forced
-    // to ETC2_RGBA8.
+    // v0.7.25: the flag now defaults to FORCED. Ground truth — a real
+    // PC-produced .mpkg of workshop 1572670027 ships materials/47566819_p0
+    // .tex and every materials/masks/*.tex as ETC2_RGBA8, while
+    // materials/effects/waterflowphase.tex (a DIFFERENT parent path) stays
+    // RGBA8888 — i.e. the user's device runs with compression !=
+    // "high_quality", which is also the PC's behavior when the key is
+    // missing entirely ("" != "high_quality" ⇒ forced). The per-path gate
+    // itself is [pcForcesEtc2]; this field is only the device-level half.
     // ══════════════════════════════════════════════════════════════════════
     @Volatile
-    var forceEtc2Compression: Boolean = false
+    var forceEtc2Compression: Boolean = true
+
+    /**
+     * v0.7.25 (PC parity): the per-TEXTURE half of the `-c force` gate.
+     * wallpaperui 0x14003f884–0x14003f95d appends "-c force" only when the
+     * .tex's PARENT directory is exactly `materials` or `materials\masks` —
+     * not any deeper path. Verified against the real PC .mpkg of workshop
+     * 1572670027: the .tex files directly under `materials` and under
+     * `materials\masks` are ETC2_RGBA8 while
+     * `materials\effects\waterflowphase.tex` (a deeper parent) ships as
+     * lossless RGBA8888 in the very same package.
+     *
+     * (Note: never write glob patterns like "materials-slash-star.tex"
+     * inside a block comment — Kotlin block comments NEST, so a slash-star
+     * sequence in the text would open a real nested comment.)
+     */
+    fun pcForcesEtc2(entryPath: String): Boolean {
+        if (!forceEtc2Compression) return false
+        val norm = entryPath.replace('\\', '/')
+        val parent = norm.substringBeforeLast('/', "")
+        return parent == "materials" || parent == "materials/masks"
+    }
 
     // ══════════════════════════════════════════════════════════════════════
     // v0.7.4 (parity G9): video wallpaper alignment position. The PC writes
@@ -185,8 +208,15 @@ object MpkgPacker {
      * v2: fix-dxt-decoder.patch (3-bit DXT5/BC4/BC5 indices + forceFourColor
      *     for DXT3/DXT5 color blocks) + size-based effort (10/25/40) + more
      *     jobs (oversubscribed) + NDEBUG.
+     * v3: v0.7.25 — outputs are now cropped to the TEXI imgW/imgH content
+     *     dims (a padded pow2 buffer used to ship its full canvas, which
+     *     squeezed the image into the top-left of the texture's UV space —
+     *     the "frozen square" on masked-effect wallpapers) and materials/
+     *     + materials/masks/ textures are force-compressed to ETC2 like the
+     *     PC. Cached v2 entries carry the wrong dims/format and MUST not be
+     *     reused.
      */
-    const val CONVERTER_VERSION = 2
+    const val CONVERTER_VERSION = 3
 
     /** PNG magic bytes — used to detect PNG data inside .tex files. */
     private val PNG_MAGIC = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47) // \x89PNG
@@ -562,11 +592,15 @@ object MpkgPacker {
             val texiFormat = texInfo?.texiFormat ?: -1
 
             // ---- The verbatim-passthrough rules ----
+            // v0.7.25: the format-1 (RGB888) gate uses the PER-TEXTURE force
+            // flag (materials/ + materials/masks/ only) — the PC appends
+            // "-c force" per file, so an RGB888 mask in materials/masks is
+            // transcoded while one elsewhere copies through.
             val pcCopyThrough = texInfo == null ||
                 texiFormat == 8 || texiFormat == 9 ||
                 (texInfo.imageCount > 1) ||
                 (texInfo.flags and 0x20) != 0 ||
-                (texiFormat == 1 && !forceEtc2Compression)
+                (texiFormat == 1 && !pcForcesEtc2(name))
 
             // ---- The formats the PC tool errors on (original bytes ship) ----
             val pcErrorsOnIt = !pcCopyThrough &&
@@ -2424,7 +2458,7 @@ object MpkgPacker {
                 "first_pixel_rgba" to
                     "(${rgbaBytes[0].toInt() and 0xFF},${rgbaBytes[1].toInt() and 0xFF},${rgbaBytes[2].toInt() and 0xFF},${rgbaBytes[3].toInt() and 0xFF})")
 
-            // ---- Step 5 (v0.7.18, PC-exact): decode → shrink → etcpack ETC2 ----
+            // ---- Step 5 (v0.7.18, PC-exact): decode → crop → shrink → etcpack ETC2 ----
             // For DXT1: the .tex flags bit 3 (0x08) selects DXT1a (1-bit alpha)
             // vs plain DXT1 (4-color opaque) for the DECODER only.
             val hasAlphaFlag = (origFlags and 0x08) != 0
@@ -2438,11 +2472,23 @@ object MpkgPacker {
                 rgbaBytes
             }
 
+            // v0.7.25: DXT blocks cover the BUFFER canvas (texW×texH); the
+            // image content is the top-left imgW×imgH region of that buffer.
+            // Crop to the TEXI image dims before shrink/encode — the PC's
+            // ETC2 output carries pad4(imgW/imgH), never the padded buffer
+            // canvas (ground truth: workshop 1572670027's 1024×1024-buffered
+            // masks ship as ETC2 600×960 in the real PC .mpkg).
+            val imgWidth = readU32Le(texData, 34).toInt()
+            val imgHeight = readU32Le(texData, 38).toInt()
+            val croppedDxt = cropRgbaToImageDims(
+                rgbaBytesFinal, texWidth, texHeight, imgWidth, imgHeight, name)
+            val (cropRgba, cropW, cropH) = croppedDxt
+
             // -shrink (PC rule: only when BOTH dims > 128, factor 1..8)
-            val shrunkDxt = maybeShrinkRgba(rgbaBytesFinal, texWidth, texHeight, name)
-            val encodeW = shrunkDxt?.second ?: texWidth
-            val encodeH = shrunkDxt?.third ?: texHeight
-            val encodeRgba = shrunkDxt?.first ?: rgbaBytesFinal
+            val shrunkDxt = maybeShrinkRgba(cropRgba, cropW, cropH, name)
+            val encodeW = shrunkDxt?.second ?: cropW
+            val encodeH = shrunkDxt?.third ?: cropH
+            val encodeRgba = shrunkDxt?.first ?: cropRgba
 
             // The unified PC pipeline: DXT/BC sources always become ETC2
             // (resourcecompiler64's re-decision logic), the ETC2 encoder is
@@ -2452,7 +2498,7 @@ object MpkgPacker {
             // 0x08 for raw bodies).
             val etc2EncodeStartMs = System.currentTimeMillis()
             val built = PcTexTranscoder.transcodeRgbaBody(
-                texiFormat, forceEtc2Compression,
+                texiFormat, pcForcesEtc2(name),
                 origFlags, origUnkInt0, encodeW, encodeH, encodeRgba,
             ) { r, ww, hh ->
                 try {
@@ -2598,10 +2644,21 @@ object MpkgPacker {
                 val decoded = decodeLargestImageToRgba(effectiveTex, name)
                 if (decoded != null) {
                     val (rgba0, w0, h0) = decoded
-                    val shrunk = maybeShrinkRgba(rgba0, w0, h0, name)
-                    val (rgba, w, h) = shrunk?.let { Triple(it.first, it.second, it.third) } ?: Triple(rgba0, w0, h0)
+                    // v0.7.25: an embedded image can sit on a padded buffer
+                    // canvas (the PNG covers the full mipW×mipH buffer with
+                    // the content in its top-left imgW×imgH) — crop to the
+                    // TEXI image dims exactly like the raw-body path. A PNG
+                    // SMALLER than the claimed image dims (2048×512 tex
+                    // holding a 1500×489 PNG) is guarded inside the crop and
+                    // ships at the PNG's own dims, matching the PC.
+                    val croppedImg = cropRgbaToImageDims(
+                        rgba0, w0, h0, effInfo.imgW, effInfo.imgH, name)
+                    val (cRgba, cW, cH) = croppedImg
+                    val shrunk = maybeShrinkRgba(cRgba, cW, cH, name)
+                    val (rgba, w, h) = shrunk?.let { Triple(it.first, it.second, it.third) } ?: Triple(cRgba, cW, cH)
+                    val pcForceImg = pcForcesEtc2(name)
                     val result = PcTexTranscoder.transcodeRgbaBody(
-                        effInfo.texiFormat, forceEtc2Compression,
+                        effInfo.texiFormat, pcForceImg,
                         effInfo.flags, effInfo.color, w, h, rgba,
                     ) { r, ww, hh ->
                         try {
@@ -2621,8 +2678,9 @@ object MpkgPacker {
                             "name" to name,
                             "source_kind" to "image",
                             "width" to w, "height" to h,
+                            "cropped" to (w != w0 || h != h0),
                             "shrunk" to (shrunk != null),
-                            "etc2" to PcTexTranscoder.shouldUseEtc2(effInfo.texiFormat, forceEtc2Compression),
+                            "etc2" to PcTexTranscoder.shouldUseEtc2(effInfo.texiFormat, pcForceImg),
                             "texs_preserved" to (withTexs.size > result.size),
                             "original_size" to texData.size,
                             "converted_size" to withTexs.size)
@@ -2634,10 +2692,23 @@ object MpkgPacker {
                 }
             }
 
-            // ── raw (or LZ4-decompressed) RGBA body at the mip dims ──
+            // ── raw (or LZ4-decompressed) RGBA body ──
+            // v0.7.25: the body is a BUFFER of mipW×mipH pixels whose actual
+            // image content is the top-left imgW×imgH region (TEXI) — crop to
+            // the image dims first (the PC's RGBA output always carries the
+            // image's own, un-padded dims; shipping the padded buffer
+            // squeezed the image into the top-left of the UV space), then
+            // apply -shrink, then transcode.
+            val croppedBody = cropRgbaToImageDims(
+                body, effInfo.mipW, effInfo.mipH, effInfo.imgW, effInfo.imgH, name)
+            val (bodyRgba, bodyW, bodyH) = croppedBody
+            val shrunkRaw = maybeShrinkRgba(bodyRgba, bodyW, bodyH, name)
+            val (rgba, w, h) = shrunkRaw?.let { Triple(it.first, it.second, it.third) }
+                ?: Triple(bodyRgba, bodyW, bodyH)
+            val pcForceRaw = pcForcesEtc2(name)
             val result = PcTexTranscoder.transcodeRgbaBody(
-                effInfo.texiFormat, forceEtc2Compression,
-                effInfo.flags, effInfo.color, effInfo.mipW, effInfo.mipH, body,
+                effInfo.texiFormat, pcForceRaw,
+                effInfo.flags, effInfo.color, w, h, rgba,
             ) { r, ww, hh ->
                 try {
                     if (EtcpackEncoder.isAvailable()) {
@@ -2653,8 +2724,10 @@ object MpkgPacker {
                 WepWawetLogger.proxy("MpkgPacker.convertFormat0TexPc: RGBA body transcoded (PC pipeline)",
                     "name" to name,
                     "source_kind" to if (info.bodyIsLz4) "lz4-rgba" else "raw-rgba",
-                    "width" to effInfo.mipW, "height" to effInfo.mipH,
-                    "etc2" to PcTexTranscoder.shouldUseEtc2(effInfo.texiFormat, forceEtc2Compression),
+                    "width" to w, "height" to h,
+                    "cropped" to (w != effInfo.mipW || h != effInfo.mipH),
+                    "shrunk" to (shrunkRaw != null),
+                    "etc2" to PcTexTranscoder.shouldUseEtc2(effInfo.texiFormat, pcForceRaw),
                     "texs_preserved" to (withTexs.size > result.size),
                     "original_size" to texData.size,
                     "converted_size" to withTexs.size)
@@ -2663,8 +2736,9 @@ object MpkgPacker {
                 WepWawetLogger.proxyWarn("MpkgPacker.convertFormat0TexPc: RGBA body rejected",
                     "name" to name,
                     "mip_dims" to "${effInfo.mipW}x${effInfo.mipH}",
+                    "image_dims" to "${effInfo.imgW}x${effInfo.imgH}",
                     "body_len" to body.size,
-                    "expected" to (effInfo.mipW * effInfo.mipH * 4))
+                    "expected" to (w * h * 4))
             }
             return result
         } catch (e: Exception) {
@@ -3713,6 +3787,52 @@ object MpkgPacker {
         bitmap.compress(Bitmap.CompressFormat.JPEG, 85, baos)
         bitmap.recycle()
         return baos.toByteArray()
+    }
+
+    /**
+     * v0.7.25 (PC parity — the "frozen square" fix): crop a decoded RGBA
+     * buffer to the TEXI's imgW/imgH CONTENT dims.
+     *
+     * WE stores some textures (effect masks in particular) on a
+     * power-of-two BUFFER canvas (texW/texH = 1024×1024) while the actual
+     * image (imgW/imgH = 600×960) sits at the buffer's TOP-LEFT origin with
+     * the remainder as padding. The scene's geometry UVs span the IMAGE, not
+     * the buffer — so a transcode that keeps the buffer dims squeezes the
+     * image into the top-left fraction of the texture's UV space. On masked
+     * effect wallpapers (shake / waterflow) that left a large region of the
+     * screen where the effect's mask sampled zero and NOTHING MOVED.
+     *
+     * Ground truth: the real PC-produced .mpkg of workshop 1572670027 ships
+     * those masks as ETC2 at exactly 600×960 (the imgW/imgH), decoded from
+     * the same 1024×1024-buffered source. The PC's rule: the RGBA output
+     * uses the image's own (un-padded) dims; the ETC2 output uses those dims
+     * padded to a multiple of 4 ([PcTexTranscoder] does the 4-padding).
+     *
+     * Guarded: only crops when imgW/imgH are sane (1..buffer dims) and
+     * strictly smaller — a header with garbage/zero img dims, or an image
+     * larger than its buffer (a PNG smaller than the claimed image is
+     * shipped at the PNG's own dims, matching the PC), falls through
+     * unchanged.
+     */
+    private fun cropRgbaToImageDims(
+        rgba: ByteArray, bufW: Int, bufH: Int, imgW: Int, imgH: Int, name: String,
+    ): Triple<ByteArray, Int, Int> {
+        if (imgW < 1 || imgH < 1 || imgW > bufW || imgH > bufH) {
+            return Triple(rgba, bufW, bufH)
+        }
+        if (imgW == bufW && imgH == bufH) return Triple(rgba, bufW, bufH)
+        if (rgba.size.toLong() < bufW.toLong() * bufH.toLong() * 4L) return Triple(rgba, bufW, bufH)
+        val out = ByteArray(imgW * imgH * 4)
+        for (y in 0 until imgH) {
+            System.arraycopy(rgba, y * bufW * 4, out, y * imgW * 4, imgW * 4)
+        }
+        WepWawetLogger.proxy("MpkgPacker: cropped texture to TEXI image dims (PC rule)",
+            "name" to name,
+            "buffer" to "${bufW}x${bufH}",
+            "image" to "${imgW}x${imgH}",
+            "bytes_before" to rgba.size,
+            "bytes_after" to out.size)
+        return Triple(out, imgW, imgH)
     }
 
     /**

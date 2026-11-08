@@ -2,10 +2,14 @@ package com.wepwawet.ui.screens
 
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
+import java.util.Locale
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,6 +32,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -35,9 +41,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -55,8 +64,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
@@ -91,6 +102,23 @@ import java.io.File
  *     and only if the coroutine is still active.
  *   - Fixed VT-5: thumbnail bitmaps recycled on dispose.
  *   - Fixed VT-7: playhead visible at position 0.
+ *
+ * v0.7.25:
+ *   - TAP A FILMSTRIP FRAME to jump the video AND the playhead marker to
+ *     that frame's timestamp.
+ *   - AUTO-SCROLL: dragging any handle (start/end clip, playhead) into the
+ *     last/first 56dp of the strip viewport scrolls the strip in that
+ *     direction, and the handle rides along with the content — the clip
+ *     keeps extending as long as you hold at the edge.
+ *   - The START/END time labels are now tappable: type an exact time
+ *     (seconds like "12.5" or clock form "1:23") clamped to the video's
+ *     bounds.
+ *   - Frame aspect ratio: the displayed dimensions are derived from the
+ *     first DECODED frame (always rotation-applied) instead of the
+ *     metadata WIDTH/HEIGHT (device-inconsistent pre/post rotation), so
+ *     frame boxes match the video's real proportions on every device.
+ *   - More frames: one per ~1.6s, clamped to [60, 144] (was 40), decoded
+ *     via getScaledFrameAtTime (API 28+) directly at target size — fast.
  *
  * @param videoFile The downloaded video file (already exists on disk).
  * @param itemTitle Wallpaper title.
@@ -176,59 +204,92 @@ fun VideoTrimScreen(
             try {
                 retriever.setDataSource(videoFile.absolutePath)
                 val dur = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                val w = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 1920
-                val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 1080
-                // v0.7.24 BUG FIX: METADATA_KEY_VIDEO_WIDTH/HEIGHT return the
-                // PRE-ROTATION dimensions, but getFrameAtTime returns POST-ROTATION
-                // bitmaps. For a phone-recorded portrait video (1080x1920 stored as
-                // 1920x1080 + rotation=90), the frames were stretched into landscape
-                // boxes — "frames not to the aspect ratio". Swap w/h for 90/270
-                // rotation so both the preview AND the frame boxes use the displayed
-                // (rotated) aspect ratio.
-                val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
-                val rotated = rotation == 90 || rotation == 270
-                val dispW = if (rotated) h else w
-                val dispH = if (rotated) w else h
                 durationMs = dur
                 endMs = dur
-                videoWidth = dispW
-                videoHeight = dispH
+
+                // v0.7.25: the first DECODED FRAME is the authoritative source
+                // for the displayed (rotation-applied) dimensions. Whether
+                // METADATA_KEY_VIDEO_WIDTH/HEIGHT are pre- or post-rotation is
+                // device/version-inconsistent, which made the frame boxes the
+                // wrong aspect ratio on some videos. A decoded bitmap is ALWAYS
+                // display-oriented, so both the preview surface and the frame
+                // boxes derive their aspect from it — they can never disagree
+                // with the actual pixels on screen.
+                val raw0 = retriever.getFrameAtTime(0)
+                if (raw0 != null && raw0.width > 0 && raw0.height > 0) {
+                    videoWidth = raw0.width
+                    videoHeight = raw0.height
+                } else {
+                    val w = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 1920
+                    val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 1080
+                    val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+                    val rotated = rotation == 90 || rotation == 270
+                    videoWidth = if (rotated) h else w
+                    videoHeight = if (rotated) w else h
+                }
                 WepWawetLogger.workshop("VideoTrimScreen: metadata loaded",
-                    "duration_ms" to dur, "width" to dispW, "height" to dispH,
-                    "rotation" to rotation)
+                    "duration_ms" to dur, "width" to videoWidth, "height" to videoHeight)
 
                 // v0.7.21: Clear any stale thumbnails before regenerating.
                 thumbnails.forEach { runCatching { it.recycle() } }
                 thumbnails.clear()
 
-                // v0.7.24: Frame count is DURATION-BASED (one frame per 2 seconds,
-                // clamped to 48..120) — was a fixed 40 which was too coarse for
-                // long videos ("not enough frames"). frameCountFor() is shared
-                // with the layout so the strip geometry always matches.
+                // v0.7.25: Frame count is DURATION-BASED (one frame per ~1.6
+                // seconds, clamped to 60..144) — "not enough frames" with the
+                // old fixed 40 (and the 48..120 of the never-shipped v0.7.24).
+                // frameCountFor() is shared with the layout so the strip
+                // geometry always matches.
                 val thumbCount = frameCountFor(dur)
                 val targetH = 160
-                val targetW = (targetH * dispW / dispH).toInt().coerceAtLeast(1)
+                val aspect = if (videoHeight > 0) videoWidth.toFloat() / videoHeight.toFloat() else 16f / 9f
+                val targetW = (targetH * aspect).toInt().coerceAtLeast(1)
                 // v0.7.24: reuse the LAST successfully-decoded (scaled) bitmap when
-                // getFrameAtTime returns null (common at the very end of the video
-                // and for exotic codecs) — keeps thumbnails.size == frameCount so
-                // the strip geometry never drifts from the overlay math.
+                // decoding fails (common at the very end of the video and for
+                // exotic codecs) — keeps thumbnails.size == frameCount so the
+                // strip geometry never drifts from the overlay math.
                 var lastScaled: android.graphics.Bitmap? = null
                 for (i in 0 until thumbCount) {
-                    // v0.7.24: t = dur * i / thumbCount keeps t < dur (was
-                    // dur * i / (thumbCount - 1) which hits exactly dur at the last
-                    // frame — getFrameAtTime(duration) often returns null there).
+                    // t = dur * i / thumbCount keeps t < dur (dur * i /
+                    // (thumbCount - 1) would hit exactly dur at the last frame —
+                    // getFrameAtTime(duration) often returns null there).
                     val t = dur * i / thumbCount
-                    val raw = retriever.getFrameAtTime(t * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    // v0.7.25: getScaledFrameAtTime (API 28+) decodes DIRECTLY
+                    // at the target size — dramatically faster than decoding a
+                    // full-resolution frame and downscaling, which makes the
+                    // denser strip affordable. It preserves the source aspect
+                    // and fits into dstW×dstH, so a target that already matches
+                    // the video's aspect comes out exactly targetW×targetH.
+                    var frame: android.graphics.Bitmap? = null
+                    if (Build.VERSION.SDK_INT >= 28) {
+                        frame = runCatching {
+                            retriever.getScaledFrameAtTime(
+                                t * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, targetW, targetH)
+                        }.getOrNull()
+                    }
+                    val raw = frame
+                        ?: (if (i == 0 && raw0 != null) raw0
+                            else retriever.getFrameAtTime(t * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC))
                     val src = raw ?: lastScaled
                     if (src == null) continue
-                    val scaled = android.graphics.Bitmap.createScaledBitmap(src, targetW, targetH, true)
+                    val scaled = if (src.width == targetW && src.height == targetH) {
+                        src
+                    } else {
+                        android.graphics.Bitmap.createScaledBitmap(src, targetW, targetH, true)
+                    }
                     if (raw != null && scaled !== raw) raw.recycle()
                     thumbnails.add(scaled)
                     lastScaled = scaled
                 }
+                // raw0 was only borrowed for dims / the i==0 fallback — recycle
+                // it when it never became part of the strip (e.g. the scaled
+                // decode succeeded directly).
+                if (raw0 != null && thumbnails.none { it === raw0 }) {
+                    runCatching { raw0.recycle() }
+                }
                 WepWawetLogger.workshop("VideoTrimScreen: thumbnails generated",
                     "count" to thumbnails.size,
-                    "requested" to thumbCount)
+                    "requested" to thumbCount,
+                    "frame_px" to "${targetW}x$targetH")
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -241,10 +302,23 @@ fun VideoTrimScreen(
     }
 
     // Poll current position for the playhead marker.
+    // v0.7.25 (audit M-U12): only WRITE state when a value actually changed —
+    // a paused player reports the same position forever, and the old loop
+    // recomposed the whole screen 10×/s regardless.
     LaunchedEffect(player) {
+        var lastPos = -1L
+        var lastPlaying = false
         while (true) {
-            currentPosition = player.currentPosition
-            isPlaying = player.isPlaying
+            val pos = player.currentPosition
+            val playing = player.isPlaying
+            if (pos != lastPos) {
+                currentPosition = pos
+                lastPos = pos
+            }
+            if (playing != lastPlaying) {
+                isPlaying = playing
+                lastPlaying = playing
+            }
             delay(100)
         }
     }
@@ -270,6 +344,70 @@ fun VideoTrimScreen(
     // v0.7.23: The clip bar thumb size — 48dp touch target, 8dp visible bar.
     val thumbTouchSize = 48.dp
     val thumbBarWidth = 8.dp
+
+    // ══════════════════════════════════════════════════════════════════
+    // v0.7.25: Manual time entry (tap the start/end labels) + filmstrip
+    // auto-scroll while dragging a handle at the viewport edge.
+    // ══════════════════════════════════════════════════════════════════
+    var editingStart by remember { mutableStateOf(false) }
+    var editingEnd by remember { mutableStateOf(false) }
+    var timeInput by remember { mutableStateOf("") }
+    var timeInputError by remember { mutableStateOf<String?>(null) }
+
+    // Which handle is being dragged: 0 = none, 1 = start, 2 = end, 3 = playhead.
+    var dragHandle by remember { mutableStateOf(0) }
+    // The strip VIEWPORT width in px (the clipped, visible part).
+    var stripViewportPx by remember { mutableStateOf(0) }
+
+    // Auto-scroll: while a handle is dragged into the last/first ~56dp of the
+    // viewport, scroll the strip in that direction and advance the handle by
+    // the same time delta — the thumb "rides along" with the content, so
+    // holding the end thumb at the right edge keeps extending the clip
+    // (exactly how the platform trimmers behave). The speed ramps linearly
+    // the deeper into the zone the handle sits.
+    LaunchedEffect(dragHandle, totalStripWidthPx) {
+        if (dragHandle == 0) return@LaunchedEffect
+        val edge = with(density) { 56.dp.toPx() }
+        while (true) {
+            val totalPx = totalStripWidthPx
+            val viewportPx = stripViewportPx.toFloat()
+            if (durationMs > 0 && totalPx > 0f && viewportPx > 0f) {
+                val frac = when (dragHandle) {
+                    1 -> startMs.toFloat() / durationMs
+                    2 -> endMs.toFloat() / durationMs
+                    else -> (currentPosition.toFloat() / durationMs).coerceIn(0f, 1f)
+                }.coerceIn(0f, 1f)
+                val handleX = frac * totalPx - filmstripScrollState.value
+                val speed = when {
+                    handleX > viewportPx - edge && filmstripScrollState.value < filmstripScrollState.maxValue ->
+                        ((handleX - (viewportPx - edge)) / edge).coerceIn(0f, 1f) * 16f
+                    handleX < edge && filmstripScrollState.value > 0 ->
+                        -(((edge - handleX) / edge).coerceIn(0f, 1f)) * 16f
+                    else -> 0f
+                }
+                if (speed != 0f) {
+                    val deltaMs = (speed / totalPx * durationMs.toFloat()).toLong()
+                    runCatching { filmstripScrollState.scrollBy(speed) }
+                    when (dragHandle) {
+                        1 -> {
+                            val maxStart = (endMs - MIN_CLIP_MS).coerceAtLeast(0L).coerceAtMost(durationMs)
+                            startMs = (startMs + deltaMs).coerceIn(0L, maxStart)
+                        }
+                        2 -> {
+                            val minEnd = (startMs + MIN_CLIP_MS).coerceAtMost(durationMs).coerceAtLeast(0L)
+                            endMs = (endMs + deltaMs).coerceIn(minEnd, durationMs)
+                        }
+                        else -> {
+                            val np = (currentPosition + deltaMs).coerceIn(0L, durationMs)
+                            player.seekTo(np)
+                            currentPosition = np
+                        }
+                    }
+                }
+            }
+            delay(16)
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -333,16 +471,57 @@ fun VideoTrimScreen(
                 }
             }
 
-            // === Time labels ===
+            // === Time labels (v0.7.25: tap start/end to type an exact time) ===
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("${formatTime(startMs)}", style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary)
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable {
+                            timeInput = secondsString(startMs)
+                            timeInputError = null
+                            editingStart = true
+                        }
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(formatTime(startMs), style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary)
+                    Icon(
+                        Icons.Filled.Edit,
+                        contentDescription = "Edit start time",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .padding(start = 2.dp)
+                            .size(14.dp),
+                    )
+                }
                 Text("Duration: ${formatTime(endMs - startMs)}", style = MaterialTheme.typography.labelMedium)
-                Text("${formatTime(endMs)}", style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary)
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable {
+                            timeInput = secondsString(endMs)
+                            timeInputError = null
+                            editingEnd = true
+                        }
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(formatTime(endMs), style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary)
+                    Icon(
+                        Icons.Filled.Edit,
+                        contentDescription = "Edit end time",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .padding(start = 2.dp)
+                            .size(14.dp),
+                    )
+                }
             }
 
             // === v0.7.23: Scrollable filmstrip with 3 draggable handles ===
@@ -362,6 +541,7 @@ fun VideoTrimScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(filmstripHeight)
+                        .onSizeChanged { stripViewportPx = it.width }
                         .clip(RoundedCornerShape(6.dp)),
                 ) {
                     // Inner scrollable Box — frames + dim overlays + handles
@@ -386,14 +566,28 @@ fun VideoTrimScreen(
                                 .width(totalStripWidthDp)
                                 .fillMaxHeight(),
                         ) {
-                            thumbnails.forEach { bmp ->
+                            // v0.7.25: tap a frame to jump the video AND the
+                            // playhead marker to that frame's timestamp. The
+                            // plain overlay/handle layers above carry no
+                            // pointerInput, so taps fall through to these
+                            // Images everywhere outside the 48dp handles.
+                            thumbnails.forEachIndexed { index, bmp ->
                                 Image(
                                     bitmap = bmp.asImageBitmap(),
                                     contentDescription = null,
                                     contentScale = ContentScale.FillBounds,
                                     modifier = Modifier
                                         .width(frameWidthDp)
-                                        .fillMaxHeight(),
+                                        .fillMaxHeight()
+                                        .pointerInput(durationMs, frameCount) {
+                                            detectTapGestures {
+                                                if (durationMs > 0) {
+                                                    val t = durationMs * index / frameCount
+                                                    player.seekTo(t)
+                                                    currentPosition = t
+                                                }
+                                            }
+                                        },
                                 )
                             }
                         }
@@ -456,8 +650,9 @@ fun VideoTrimScreen(
                                         .height(thumbTouchSize)
                                         .pointerInput(durationMs) {
                                             detectDragGestures(
-                                                onDragStart = { },
-                                                onDragEnd = { },
+                                                onDragStart = { dragHandle = 3 },
+                                                onDragEnd = { dragHandle = 0 },
+                                                onDragCancel = { dragHandle = 0 },
                                             ) { _, dragAmount ->
                                                 if (durationMs <= 0) return@detectDragGestures
                                                 val fraction = dragAmount.x / totalStripWidthPx
@@ -496,8 +691,9 @@ fun VideoTrimScreen(
                                     .height(thumbTouchSize)
                                     .pointerInput(durationMs) {
                                         detectDragGestures(
-                                            onDragStart = { },
-                                            onDragEnd = { player.seekTo(startMs) },
+                                            onDragStart = { dragHandle = 1 },
+                                            onDragEnd = { dragHandle = 0; player.seekTo(startMs) },
+                                            onDragCancel = { dragHandle = 0 },
                                         ) { _, dragAmount ->
                                             if (durationMs <= 0) return@detectDragGestures
                                             val fraction = dragAmount.x / totalStripWidthPx
@@ -536,8 +732,9 @@ fun VideoTrimScreen(
                                     .height(thumbTouchSize)
                                     .pointerInput(durationMs) {
                                         detectDragGestures(
-                                            onDragStart = { },
-                                            onDragEnd = { player.seekTo(endMs) },
+                                            onDragStart = { dragHandle = 2 },
+                                            onDragEnd = { dragHandle = 0; player.seekTo(endMs) },
+                                            onDragCancel = { dragHandle = 0 },
                                         ) { _, dragAmount ->
                                             if (durationMs <= 0) return@detectDragGestures
                                             val fraction = dragAmount.x / totalStripWidthPx
@@ -727,6 +924,63 @@ fun VideoTrimScreen(
                     Text("Send Full Video")
                 }
             }
+
+            // === v0.7.25: manual time entry dialog (start/end labels) ===
+            if (editingStart || editingEnd) {
+                val editingStartTime = editingStart
+                val minVal = if (editingStartTime) 0L
+                    else (startMs + MIN_CLIP_MS).coerceAtMost(durationMs).coerceAtLeast(0L)
+                val maxVal = if (editingStartTime) (endMs - MIN_CLIP_MS).coerceAtLeast(0L).coerceAtMost(durationMs)
+                    else durationMs
+                AlertDialog(
+                    onDismissRequest = {
+                        editingStart = false
+                        editingEnd = false
+                    },
+                    title = { Text(if (editingStartTime) "Start time" else "End time") },
+                    text = {
+                        OutlinedTextField(
+                            value = timeInput,
+                            onValueChange = {
+                                timeInput = it
+                                timeInputError = null
+                            },
+                            singleLine = true,
+                            label = { Text("Seconds — e.g. 12.5 or 1:23") },
+                            isError = timeInputError != null,
+                            supportingText = {
+                                Text(timeInputError
+                                    ?: "Allowed range: ${formatTime(minVal)} – ${formatTime(maxVal)}")
+                            },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            val parsed = parseTimeInput(timeInput)
+                            if (parsed == null) {
+                                timeInputError = "Enter seconds like 12.5 or 1:23"
+                                return@TextButton
+                            }
+                            val clamped = parsed.coerceIn(minVal, maxVal)
+                            if (editingStartTime) {
+                                startMs = clamped
+                            } else {
+                                endMs = clamped
+                            }
+                            player.seekTo(clamped)
+                            editingStart = false
+                            editingEnd = false
+                        }) { Text("Set") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = {
+                            editingStart = false
+                            editingEnd = false
+                        }) { Text("Cancel") }
+                    },
+                )
+            }
         }
     }
 }
@@ -739,10 +993,47 @@ private fun formatTime(ms: Long): String {
     return if (hr > 0) "%d:%02d:%02d".format(hr, min, sec) else "%d:%02d".format(min, sec)
 }
 
+/** v0.7.25: the minimum clip length enforced by both the drag handles and the manual input. */
+private const val MIN_CLIP_MS = 500L
+
 /**
- * v0.7.24: Duration-based filmstrip frame count — one frame per 2 seconds of
- * video, clamped to [48, 120]. Shared by the thumbnail generator and the strip
- * layout so the geometry always matches the number of generated frames.
+ * v0.7.25: the start/end time input as plain seconds ("83.50") — Locale.US
+ * so the decimal separator is always '.', matching what [parseTimeInput]
+ * expects regardless of the device locale.
+ */
+private fun secondsString(ms: Long): String =
+    String.format(Locale.US, "%.2f", ms / 1000.0)
+
+/**
+ * v0.7.25: parse a manual time entry — seconds ("12.5"), mm:ss ("1:23"), or
+ * h:mm:ss ("1:02:03"). Returns milliseconds, or null when the text is not a
+ * recognizable non-negative finite time. Accepts ',' as a decimal separator
+ * (locale-keyboards) for the seconds form.
+ */
+private fun parseTimeInput(text: String): Long? {
+    val s = text.trim().replace(',', '.')
+    if (s.isEmpty()) return null
+    return if (s.contains(':')) {
+        val parts = s.split(':')
+        if (parts.size !in 2..3) return null
+        var totalSec = 0.0
+        for (p in parts) {
+            val v = p.toDoubleOrNull() ?: return null
+            if (!v.isFinite() || v < 0) return null
+            totalSec = totalSec * 60 + v
+        }
+        (totalSec * 1000).toLong()
+    } else {
+        val v = s.toDoubleOrNull() ?: return null
+        if (!v.isFinite() || v < 0) return null
+        (v * 1000).toLong()
+    }
+}
+
+/**
+ * v0.7.25: Duration-based filmstrip frame count — one frame per ~1.6 seconds
+ * of video, clamped to [60, 144]. Shared by the thumbnail generator and the
+ * strip layout so the geometry always matches the number of generated frames.
  */
 private fun frameCountFor(durationMs: Long): Int =
-    if (durationMs <= 0L) 48 else (durationMs / 2000L).toInt().coerceIn(48, 120)
+    if (durationMs <= 0L) 60 else (durationMs / 1600L).toInt().coerceIn(60, 144)

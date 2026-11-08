@@ -1171,7 +1171,22 @@ object ShaderEsslSafety {
                 }
                 else -> lookupCallable(name)
                     ?: BUILTIN_RET[name]
-                    ?: if (name in FIRST_ARG_RET) args.firstOrNull()?.ty ?: Ty.UNK else Ty.UNK
+                    ?: if (name in FIRST_ARG_RET)
+                        // v0.7.25: fxc broadcasts scalar arguments, so the
+                        // return type follows the first VECTOR argument, not
+                        // literally the first argument. ESSL's scalar
+                        // overloads prove the point: `step(0.0, vec4)` is the
+                        // scalar-EDGE overload returning vec4 (smoothstep's
+                        // scalar pair works the same at the tail). Typing it
+                        // float made the assignment pass wrap it in a
+                        // redundant vec4(...) — valid ESSL, but NOT the
+                        // byte-exact PC output (the real .mpkg of workshop
+                        // 1572670027 ships shake.frag's `step(0.0, csines)`
+                        // untouched). All-vector and all-scalar calls are
+                        // unchanged by this rule.
+                        args.firstOrNull { isNumericTy(it.ty) && it.ty.n in 2..4 }?.ty
+                            ?: args.firstOrNull()?.ty ?: Ty.UNK
+                    else Ty.UNK
             }
             return ERes(ret, callStart, i - 1)
         }

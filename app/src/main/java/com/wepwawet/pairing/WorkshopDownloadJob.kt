@@ -1129,6 +1129,13 @@ object WorkshopDownloadJob {
         val sendId = System.currentTimeMillis()
         val cacheMpkg = File(appContext.cacheDir, "${pendingItem.id}_${sendId}_send.mpkg")
         val installDir = File(appContext.cacheDir, "workshop_downloads/${pendingItem.id}")
+        // v0.7.25 (audit M-D9): never orphan an in-flight job for this item —
+        // a second "continue" tap (or a retry racing the first) used to
+        // overwrite jobs[itemId] while the previous pack was still running,
+        // leaving it uncancellable and able to fight over the same cache
+        // files. Cancel the superseded entry first, like every other entry
+        // point does.
+        jobs[itemId]?.cancel()
         jobs[itemId] = WepWawetApplication.appScope.launchSafely(itemId) {
             try {
                 val pm = appContext.getSystemService(Context.POWER_SERVICE) as PowerManager

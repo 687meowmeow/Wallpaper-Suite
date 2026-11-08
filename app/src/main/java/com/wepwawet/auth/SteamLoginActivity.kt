@@ -336,8 +336,12 @@ class SteamLoginActivity : ComponentActivity() {
 
         // User-Agent — must look like a normal desktop browser or Steam's
         // login page will refuse to render properly.
-        const val USER_AGENT =
-            "Mozilla/5.0 (Linux; Android 13; WepWawet/0.1) AppleWebKit/537.36 " +
+        // v0.7.25 (audit M-A4): report the REAL Android version instead of a
+        // hardcoded "Android 13" — Steam can serve version-specific pages and
+        // a stale token risks mismatched behavior on newer devices. Not a
+        // `const` anymore because Build.VERSION.RELEASE is runtime state.
+        val USER_AGENT: String =
+            "Mozilla/5.0 (Linux; Android ${android.os.Build.VERSION.RELEASE}; WepWawet/0.1) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 
         /**

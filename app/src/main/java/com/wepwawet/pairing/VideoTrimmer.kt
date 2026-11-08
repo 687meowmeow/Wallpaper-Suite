@@ -269,11 +269,14 @@ object VideoTrimmer {
                     if (dur > maxDuration) maxDuration = dur
                 }
             }
-            extractor.release()
             maxDuration / 1000 // μs → ms
         } catch (e: Exception) {
-            runCatching { extractor.release() }
             0L
+        } finally {
+            // v0.7.25 (audit M-V5): release EXACTLY ONCE, in finally — the old
+            // code released in the try block AND again in the catch, so a
+            // throwing first release triggered a double release.
+            runCatching { extractor.release() }
         }
     }
 }

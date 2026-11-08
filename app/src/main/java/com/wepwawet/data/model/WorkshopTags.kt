@@ -146,6 +146,12 @@ object WorkshopTags {
         addAll(MISC_TAGS)
         // Category
         addAll(CATEGORY_TAGS)
+        // v0.7.25: the Steam-declared groups that were missing here — the
+        // browse page's declaredTags offers all of these as filters (this is
+        // where "No Animation" lives, in SCRIPT_TYPE_TAGS).
+        addAll(ASSET_TYPE_TAGS)
+        addAll(ASSET_GENRE_TAGS)
+        addAll(SCRIPT_TYPE_TAGS)
         // Hidden/admin
         addAll(HIDDEN_TAGS)
     }.distinct()

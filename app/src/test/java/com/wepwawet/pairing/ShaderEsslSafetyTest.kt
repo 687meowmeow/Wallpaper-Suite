@@ -263,6 +263,43 @@ void main() {
         assertEquals(src, ShaderEsslSafety.apply(src))
     }
 
+    /**
+     * v0.7.25 regression — the REAL shake.frag of workshop 1572670027
+     * (byte-identical in the PC-produced reference .mpkg). The typer used
+     * to follow literally the FIRST argument for FIRST_ARG_RET builtins, so
+     * `step(0.0, csines)` typed as float and the assignment pass wrapped it
+     * in a redundant `vec4(...)` — valid ESSL, but NOT the PC's byte-exact
+     * output. ESSL's scalar-edge overload `step(float, genType)` returns
+     * genType: the return type follows the first VECTOR argument (fxc
+     * broadcast semantics). The scalar case (`float base = step(0.0, ...)`)
+     * and the all-vector case are unchanged.
+     */
+    @Test
+    fun `shake frag - step with scalar edge and vector x stays untouched`() {
+        val src = StringBuilder().apply {
+            append("uniform float g_Speed;\n")
+            append("uniform float g_Time;\n")
+            append("uniform vec2 g_Friction;\n")
+            append("varying vec4 v_TexCoord;\n")
+            append("varying vec2 v_Bounds;\n")
+            append("void main() {\n")
+            append("\tfloat flowPhase = 0.5;\n")
+            append("\tvec4 sines = flowPhase + frac(g_Speed * g_Time / M_PI_2 * vec4(1.0, -0.16161616, 0.0083333, -0.00019841)) * M_PI_2;\n")
+            append("\tvec4 csines = cos(sines);\n")
+            append("\tsines = sin(sines);\n")
+            append("\tvec4 base = step(0.0, csines);\n")
+            append("\tsines = sines * 0.498 + 0.5;\n")
+            append("\tsines = mix(1.0 - pow(1.0 - sines, CAST4(g_Friction.x)), pow(sines, CAST4(g_Friction.y)), base);\n")
+            append("\tfloat offset = dot(CAST4(0.5), sines);\n")
+            append("\tfloat scalarBase = step(0.0, cos(g_Time));\n")
+            append("\toffset = saturate((offset - v_Bounds.x) * v_Bounds.y);\n")
+            append("\tout_FragColor = vec4(offset, offset, offset, 1.0) * base;\n")
+            append("}\n")
+        }.toString()
+        val out = ShaderEsslSafety.apply(src)
+        assertEquals(src, out)
+    }
+
     @Test
     fun `CRLF line endings are preserved exactly`() {
         val src = "uniform int u_a;\r\nvoid main() {\r\n\tfloat x = u_a ? 1.0 : 0.0;\r\n" +
