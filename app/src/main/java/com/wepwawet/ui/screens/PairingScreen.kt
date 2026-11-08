@@ -76,10 +76,17 @@ fun PairingScreen(
     // with our local PIN. This is a no-op if the service is already running
     // with the same PIN, and a clean restart otherwise. We deliberately do
     // NOT call PairingService.stop here — the proxy is meant to be always-on.
+    // v0.8.1: only while the pairing toggle is ON — the screen itself is
+    // only reachable through pairing-enabled UI, but the guard makes the
+    // "nothing pairing-related runs while disabled" invariant airtight.
     DisposableEffect(Unit) {
         WepWawetLogger.lifecycle("PairingScreen appear — ensure proxy running",
             "pin" to pin)
-        runCatching { PairingService.start(context, pin) }
+        if (PairingService.isPairingEnabled(context)) {
+            runCatching { PairingService.start(context, pin) }
+        } else {
+            WepWawetLogger.lifecycle("PairingScreen appear — pairing disabled, service not started")
+        }
         onDispose { }
     }
 
@@ -175,7 +182,10 @@ fun PairingScreen(
                             WepWawetLogger.proxy("PairingScreen change pin", "pin" to pinToSave)
                             PairingService.setPairingPin(context, pinToSave)
                             pin = pinToSave
-                            runCatching { PairingService.start(context, pinToSave) }
+                            // v0.8.1: restart only while the pairing toggle is ON.
+                            if (PairingService.isPairingEnabled(context)) {
+                                runCatching { PairingService.start(context, pinToSave) }
+                            }
                             showPinDialog = false
                         }) { Text("Save") }
                     },
