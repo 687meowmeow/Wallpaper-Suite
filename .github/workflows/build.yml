@@ -1,0 +1,104 @@
+name: Build WallpaperSuite APK
+
+on:
+  push:
+    # v0.6.0-alpha: workflow now triggers on BOTH dev-branch pushes AND tag pushes.
+    # This is needed because v0.6.0-alpha is a major parity release that the user
+    # wants CI to verify builds successfully.
+    branches: [ dev, main ]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-tag:
+    name: Check for duplicate tag run
+    runs-on: ubuntu-24.04
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - name: Check if commit has a v* tag
+        id: check
+        run: |
+          TAG=$(curl -sS -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/tags?per_page=100" | \
+            python3 -c "
+          import sys, json
+          tags = json.load(sys.stdin)
+          sha = '${{ github.sha }}'
+          for t in tags:
+              if t['commit']['sha'] == sha and t['name'].startswith('v'):
+                  print(t['name'])
+                  break
+          " 2>/dev/null || true)
+          echo "Found tag: '${TAG}'"
+          if [ "${{ github.ref_type }}" = "branch" ] && [ -n "$TAG" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+  build-apk:
+    name: Build APK
+    needs: check-tag
+    if: needs.check-tag.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # v0.7.24 (H-B1): explicitly install the NDK + CMake versions the
+          # project declares (ndkVersion = 27.0.12077973, cmake 3.22.1). The
+          # action's default is platform-tools only — the build previously
+          # relied on AGP's auto-download, which silently breaks on license
+          # changes or network hiccups.
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0 ndk;27.0.12077973 cmake;3.22.1'
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build APK
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Locate APK
+        id: find-apk
+        run: |
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -1)
+          echo "apk_path=$APK" >> $GITHUB_OUTPUT
+          ls -lh "$APK"
+
+      # v0.8.1: the release is created DIRECTLY from this job — the old
+      # artifact handoff (upload-artifact -> download-artifact in a release
+      # job) blew the free Actions artifact-storage quota (150 MB APKs,
+      # usage recalculated only every 6-12h, failing otherwise-green builds).
+      # Release assets don't count against that quota, so tags attach the
+      # APK straight from the build job.
+      - name: Create release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.find-apk.outputs.apk_path }}
+          draft: true
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}
+          # v0.8.4: no auto-generated release notes — the auto notes are a
+          # commit-history list ("What's Changed"), and the repo history was
+          # squashed clean; the release is just the APK.
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,875 @@
+package com.wepwawet.pairing
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.ServiceInfo
+import android.os.Build
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import androidx.core.app.NotificationCompat
+import com.wepwawet.log.WepWawetLogger
+import java.io.File
+
+/**
+ * PairingService — foreground service that runs the WE pairing servers.
+ *
+ * Starts:
+ * - WeDiscoveryBroadcaster (UDP 7884 — WallpaperEngine/Ping broadcast)
+ * - WePairingServer (TCP 7889 — RSA + AES pairing handshake)
+ *
+ * The service runs as a foreground service with a sticky notification so
+ * Android doesn't kill it when the user switches to the WE Android app.
+ *
+ * Usage from PairingScreen:
+ *   val intent = Intent(context, PairingService::class.java)
+ *   intent.putExtra("pin", pin)
+ *   ContextCompat.startForegroundService(context, intent)
+ *   // To stop:
+ *   context.stopService(Intent(context, PairingService::class.java))
+ *
+ * == Static access from UI (per Task 9) ==
+ *
+ * The [Companion.pairingServer] field exposes the singleton [WePairingServer]
+ * instance for the lifetime of the service. UI screens can call:
+ *   - [isPaired] to check if a phone is currently paired
+ *   - [queueWallpaper] to push a .mpkg file to the paired phone
+ *   - [pairedDeviceName] to display the connected phone's name
+ *
+ * All three are safe to call from any thread (atomic / volatile reads).
+ */
+class PairingService : Service() {
+
+    companion object {
+        const val CHANNEL_ID = "wepwawet_pairing"
+        const val NOTIFICATION_ID = 1001
+        const val EXTRA_PIN = "pin"
+
+        /**
+         * Notification action: the user tapped "Stop" on the foreground
+         * notification. Handled in [onStartCommand] — we tear down the
+         * servers and stop the service. The intent is delivered to the
+         * already-running service via `PendingIntent.getService`, so it
+         * doesn't count as a fresh background service start (the user's
+         * tap on the notification is treated as a user-initiated event
+         * by the platform, not a background start).
+         */
+        const val ACTION_KILL = "com.wepwawet.pairing.ACTION_KILL"
+
+        /**
+         * v0.7.21: Broadcast action fired by the notification's delete intent
+         * when the user swipes the notification away. The dynamically-registered
+         * [notificationDeletedReceiver] catches this and re-posts the notification
+         * after a short delay — making the notification effectively non-dismissible
+         * (it comes back within ~500ms of being swiped).
+         *
+         * On Android 14+, `setOngoing(true)` no longer prevents the user from
+         * swiping an FGS notification. The system does NOT auto-repost it.
+         * This receiver is the workaround.
+         */
+        const val ACTION_NOTIFICATION_DELETED = "com.wepwawet.pairing.NOTIFICATION_DELETED"
+
+        /**
+         * v0.7.23: The maximum time the proxy is allowed to run in the
+         * background (30 minutes). After this limit, the service stops itself.
+         * The timer starts when the app goes to the background and is cancelled
+         * when the app returns to the foreground. This prevents the proxy from
+         * running indefinitely and draining battery.
+         */
+        const val BACKGROUND_TIMEOUT_MS = 30L * 60 * 1000 // 30 minutes
+
+        /** v0.7.21: The last notification text — used by the delete receiver to
+         *  re-post the notification with the correct text. */
+        @Volatile
+        var lastNotificationText: String = "WallpaperSuite proxy running"
+
+        /**
+         * v0.7.23: Weak reference to the currently-running PairingService
+         * instance. Used by the static [startBackgroundTimeout] and
+         * [cancelBackgroundTimeout] methods so MainActivity can control the
+         * background time limit without holding a strong reference to the
+         * service (which would prevent GC).
+         */
+        @Volatile
+        private var instance: java.lang.ref.WeakReference<PairingService>? = null
+
+        /**
+         * v0.7.23: Called by MainActivity.onResume to cancel the background
+         * time limit (the user is in the foreground, no limit applies).
+         */
+        fun cancelBackgroundTimeout() {
+            instance?.get()?.cancelBackgroundTimeoutInternal()
+        }
+
+        /**
+         * v0.7.23: Called by MainActivity.onPause to start the background
+         * time limit (the app is going to the background).
+         */
+        fun startBackgroundTimeout() {
+            instance?.get()?.startBackgroundTimeoutInternal()
+        }
+
+        // ====== PIN persistence (v0.7.0) ======
+        // The user can now set a custom PIN in Settings. It's persisted in
+        // SharedPreferences so it survives app restarts/updates.
+        private const val PREFS_NAME = "wepwawet_pairing"
+        private const val KEY_PIN = "pairing_pin"
+        private const val KEY_PAIRED_DEVICE = "paired_device_name"
+        private const val DEFAULT_PIN = "1234"
+
+        // v0.8.1: the master switch for the ENTIRE pairing subsystem. The
+        // user wants zero pairing activity unless this is explicitly ON —
+        // no foreground service, no discovery broadcasts, no boot restart,
+        // and no "Send to phone" button anywhere in the UI.
+        private const val KEY_PAIRING_ENABLED = "pairing_enabled"
+
+        /**
+         * v0.8.1: is the pairing subsystem enabled? Default OFF — the app is
+         * a self-contained Wallpaper Engine client now; pairing (acting as a
+         * fake PC for the official WE Android app) is opt-in.
+         */
+        fun isPairingEnabled(context: Context): Boolean {
+            return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getBoolean(KEY_PAIRING_ENABLED, false)
+        }
+
+        /**
+         * v0.8.1: flip the pairing subsystem on/off. Turning it ON starts the
+         * pairing foreground service immediately (same as the old app-launch
+         * auto-start); turning it OFF stops the service right away. Both
+         * paths are logged so the toggle's effect is verifiable in the Logs
+         * screen.
+         */
+        fun setPairingEnabled(context: Context, enabled: Boolean) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_PAIRING_ENABLED, enabled)
+                .apply()
+            WepWawetLogger.proxy("pairing toggle changed",
+                "enabled" to enabled)
+            if (enabled) {
+                appContext = context.applicationContext
+                runCatching {
+                    start(context, getPairingPin(context))
+                }.onFailure {
+                    WepWawetLogger.proxyWarn("pairing toggle: service start failed",
+                        "exception" to (it.message ?: it.javaClass.name))
+                }
+            } else {
+                runCatching {
+                    stop(context)
+                }
+                WepWawetLogger.proxy("pairing disabled — pairing service stopped")
+            }
+        }
+
+        /** Get the user's saved pairing PIN (default: "1234"). */
+        fun getPairingPin(context: Context): String {
+            return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(KEY_PIN, DEFAULT_PIN) ?: DEFAULT_PIN
+        }
+
+        /** Save a custom pairing PIN. */
+        fun setPairingPin(context: Context, pin: String) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit().putString(KEY_PIN, pin).apply()
+        }
+
+        /** Persist the paired device name so it survives app restarts. */
+        fun savePairedDevice(context: Context, name: String) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit().putString(KEY_PAIRED_DEVICE, name).apply()
+        }
+
+        /** Load the last paired device name (or null if never paired). */
+        fun loadPairedDevice(context: Context): String? {
+            return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(KEY_PAIRED_DEVICE, null)
+        }
+
+        /** Clear the persisted paired device name (called on unpair/disconnect). */
+        fun clearPairedDevice(context: Context) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit().remove(KEY_PAIRED_DEVICE).apply()
+        }
+
+        // ====== Static UI accessors (per Task 9) ======
+
+        /**
+         * Singleton reference to the active [WePairingServer], or `null` if the
+         * pairing service isn't running. Set in [onStartCommand], cleared in
+         * [onDestroy]. Read by [isPaired] and [queueWallpaper].
+         */
+        @Volatile
+        var pairingServer: WePairingServer? = null
+            private set
+
+        /**
+         * The name of the currently-paired phone, or `null` if no phone is paired.
+         * Updated by the [WePairingServer.onPairingSuccess] / [onPairingFailure]
+         * callbacks registered in [onStartCommand].
+         */
+        @Volatile
+        var pairedDeviceName: String? = null
+            private set
+
+        /**
+         * Quick check whether a phone is currently paired and ready to receive
+         * wallpaper transfers.
+         *
+         * Returns `true` iff [pairingServer] is non-null AND [pairedDeviceName]
+         * is non-null. The underlying [WePairingServer] command loop is what
+         * actually delivers queued files — this flag just tells the UI whether
+         * a transfer will be picked up immediately or will sit in the queue
+         * until pairing completes.
+         */
+        fun isPaired(): Boolean {
+            // pairedDeviceName is the authoritative signal — it is set only in the
+            // WePairingServer.onPairingSuccess callback (which fires after the AES
+            // handshake completes) and cleared in onPairingFailure / stopServers.
+            // We deliberately don't reflect into WePairingServer's private
+            // currentClient field; the name flag is the source of truth.
+            //
+            // v0.7.0: Also check SharedPreferences for persisted pairing state —
+            // the app may have been killed/restarted, and the phone hasn't
+            // reconnected yet, but the UI should still show "paired".
+            //
+            // v0.7.4: the old first check (`pairingServer != null &&
+            // pairedDeviceName != null → return true`) was dead code — the
+            // return below already covers that case (pairedDeviceName != null →
+            // true). Simplified to the single expression; truth table unchanged.
+            return pairedDeviceName != null ||
+                (appContext?.let { loadPairedDevice(it) } != null)
+        }
+
+        /** App context for static accessors (set in onStartCommand). */
+        @Volatile var appContext: Context? = null  // v0.7.1: public for MainActivity to set
+
+        /**
+         * Queue a wallpaper .mpkg file for transfer to the paired phone.
+         *
+         * If a phone is currently paired, the file is sent during the next
+         * iteration of the [WePairingServer] command loop (typically immediate).
+         * If no phone is paired yet, the file sits in the queue and is sent
+         * as soon as pairing completes.
+         *
+         * @param file the .mpkg file to send. Must be readable. Should be a stable
+         *   path (not a temp file) because the queue holds a [File] reference, not
+         *   the bytes — the file must still exist when the loop picks it up.
+         * @param title human-readable wallpaper title, shown in the WE app's
+         *   "Open wallpaper" dialog. Must be ≤ 256 chars.
+         */
+        fun queueWallpaper(file: File, title: String) {
+            val server = pairingServer
+            if (server == null) {
+                WepWawetLogger.proxyWarn("queueWallpaper called but pairing server not running",
+                    "file" to file.name, "title" to title)
+                return
+            }
+            if (!file.exists() || !file.canRead()) {
+                WepWawetLogger.proxyWarn("queueWallpaper file not readable",
+                    "path" to file.absolutePath,
+                    "exists" to file.exists(),
+                    "readable" to file.canRead())
+                return
+            }
+            WepWawetLogger.proxy("queueWallpaper",
+                "file" to file.name,
+                "title" to title,
+                "size" to file.length(),
+                "paired" to isPaired())
+            server.sendWallpaper(file, title)
+        }
+
+        /**
+         * Auto-open the WE Android app so the user can see the wallpaper transfer.
+         * Called after queueWallpaper completes. Uses packageManager to find and
+         * launch the WE Android app's main activity.
+         */
+        fun launchWallpaperEngineApp(context: Context) {
+            // v0.7.1: The correct WE Android package name is io.wallpaperengine.weclient
+            // (from Google Play Store URL). Previously used com.wallpaper.engine which
+            // was wrong and never matched.
+            val wePackages = context.packageManager.getLaunchIntentForPackage("io.wallpaperengine.weclient")
+                ?: context.packageManager.getLaunchIntentForPackage("com.wallpaper.engine")
+                ?: context.packageManager.getLaunchIntentForPackage("com.fws.wallpaperengine")
+            if (wePackages != null) {
+                wePackages.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                runCatching { context.startActivity(wePackages) }
+                WepWawetLogger.proxy("launched Wallpaper Engine Android app")
+            } else {
+                WepWawetLogger.proxyWarn("Wallpaper Engine Android app not found — cannot auto-open")
+            }
+        }
+
+        // ====== Service start/stop helpers (existing) ======
+
+        fun start(context: Context, pin: String) {
+            val intent = Intent(context, PairingService::class.java)
+            intent.putExtra(EXTRA_PIN, pin)
+            context.startForegroundService(intent)
+        }
+
+        fun stop(context: Context) {
+            context.stopService(Intent(context, PairingService::class.java))
+        }
+    }
+
+    private var pairingServerLocal: WePairingServer? = null
+    private var discoveryBroadcaster: WeDiscoveryBroadcaster? = null
+
+    /**
+     * v0.7.23: The Handler used for the notification re-post delay + the
+     * background time limit. Hoisted to a field so we can remove callbacks
+     * in onDestroy (BUG PS-1 fix).
+     */
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * v0.7.23: The Runnable that re-posts the notification after the user
+     * swipes it away. Hoisted to a field so we can remove it in onDestroy.
+     */
+    private val repostNotificationRunnable = Runnable {
+        if (pairingServerLocal != null || discoveryBroadcaster != null) {
+            updateNotification(lastNotificationText)
+            WepWawetLogger.proxy("PairingService: notification re-posted after user dismissal")
+        }
+    }
+
+    /**
+     * v0.7.23: The Runnable that stops the service after the background time
+     * limit (30 minutes). Started when the app goes to the background, cancelled
+     * when the app returns to the foreground. This prevents the proxy from
+     * running indefinitely in the background and draining battery.
+     */
+    private val backgroundTimeoutRunnable = Runnable {
+        WepWawetLogger.proxy("PairingService: background time limit reached (30 min) — stopping service")
+        stopServers()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    /**
+     * v0.7.21: Dynamically-registered receiver that catches the notification's
+     * delete intent (fired when the user swipes the notification away) and
+     * re-posts the notification after a 500ms delay.
+     *
+     * On Android 14+, `setOngoing(true)` does NOT prevent the user from
+     * swiping an FGS notification — the system allows dismissal and does NOT
+     * auto-repost. This receiver is the workaround: it catches the dismissal
+     * and immediately re-posts the notification, so the notification always
+     * stays visible while the proxy is running.
+     *
+     * v0.7.23 BUG PS-1: The Handler + Runnable are now hoisted to fields
+     * (mainHandler + repostNotificationRunnable) so they can be removed in
+     * onDestroy, preventing a 500ms service leak.
+     */
+    private val notificationDeletedReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == ACTION_NOTIFICATION_DELETED) {
+                WepWawetLogger.proxy("PairingService: notification dismissed by user — re-posting in 500ms")
+                mainHandler.removeCallbacks(repostNotificationRunnable)
+                mainHandler.postDelayed(repostNotificationRunnable, 500)
+            }
+        }
+    }
+
+    /**
+     * v0.7.1 (round 6 — pairing persistence): tracks the PIN the currently-
+     * running server was started with, so we can detect "PIN unchanged →
+     * don't restart the live pairing session" in [onStartCommand].
+     *
+     * Set in onStartCommand after [start] succeeds; cleared in [stopServers].
+     * Compared to the new PIN passed in via the start intent — if they match
+     * AND the server is still running, we know the user hasn't changed the
+     * PIN and we can avoid killing the live phone connection.
+     */
+    private var runningPin: String? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        createNotificationChannel()
+        // v0.7.21: Register the notification-deleted receiver so we can
+        // re-post the notification when the user swipes it away (Android 14+
+        // allows dismissing ongoing FGS notifications — this is the workaround).
+        val filter = IntentFilter(ACTION_NOTIFICATION_DELETED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(notificationDeletedReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(notificationDeletedReceiver, filter)
+        }
+        // v0.7.23: Store a weak reference to this instance so the static
+        // startBackgroundTimeout/cancelBackgroundTimeout methods can access it.
+        instance = java.lang.ref.WeakReference(this)
+        // v0.7.24 (H-P3 + H-A6 BUG FIX): the 30-minute background timeout is
+        // now driven by the PROCESS lifecycle (ProcessLifecycleOwner), not by
+        // MainActivity.onPause/onResume. The Activity callbacks fired on every
+        // in-app navigation (e.g. to SteamLoginActivity), and when the service
+        // was created while the app was ALREADY resumed, onResume never fired
+        // again — so the timer was never cancelled and the proxy killed
+        // itself 30 minutes into active use. ON_STOP only fires when the
+        // WHOLE process goes to the background; ON_START cancels the timer no
+        // matter which Activity resumed.
+        androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.addObserver(
+            object : androidx.lifecycle.DefaultLifecycleObserver {
+                override fun onStop(owner: androidx.lifecycle.LifecycleOwner) {
+                    startBackgroundTimeoutInternal()
+                }
+                override fun onStart(owner: androidx.lifecycle.LifecycleOwner) {
+                    cancelBackgroundTimeoutInternal()
+                }
+            }
+        )
+        // Arm the timer defensively at create; the process-lifecycle observer
+        // cancels it on the next ON_START if we're actually in the foreground
+        // (ProcessLifecycleOwner replays the current state to new observers).
+        startBackgroundTimeoutInternal()
+        WepWawetLogger.proxy("PairingService.onCreate")
+    }
+
+    /**
+     * v0.7.23: Start the background time limit timer. After BACKGROUND_TIMEOUT_MS
+     * (30 minutes), the service stops itself. Called in onCreate and whenever
+     * the app goes to the background (via MainActivity.onPause).
+     */
+    private fun startBackgroundTimeoutInternal() {
+        mainHandler.removeCallbacks(backgroundTimeoutRunnable)
+        mainHandler.postDelayed(backgroundTimeoutRunnable, BACKGROUND_TIMEOUT_MS)
+        WepWawetLogger.proxy("PairingService: background timeout started (30 min)")
+    }
+
+    /**
+     * v0.7.23: Cancel the background time limit timer. Called when the app
+     * comes to the foreground (via MainActivity.onResume).
+     */
+    private fun cancelBackgroundTimeoutInternal() {
+        mainHandler.removeCallbacks(backgroundTimeoutRunnable)
+        WepWawetLogger.proxy("PairingService: background timeout cancelled")
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // v0.7.23: The user swiped the app from recents — start the background
+        // timeout so the proxy doesn't run forever.
+        startBackgroundTimeoutInternal()
+        super.onTaskRemoved(rootIntent)
+    }
+
+    /**
+     * Called by the system on Android 14+ (API 34+) when the foreground service
+     * has reached its time limit OR when the system has decided the service
+     * should stop (e.g. on Android 16 the dataSync FGS type can be asked to
+     * stop shortly after starting if the system thinks it's no longer needed).
+     *
+     * v0.7.20: Our `specialUse` foreground service type is NOT subject to the
+     * system timeout (only `dataSync` and `mediaProcessing` have the 6-hour
+     * timeout per the Android docs). So this callback should NEVER fire in
+     * practice. If it does (e.g. a future Android version extends timeouts to
+     * `specialUse`, or the OEM's battery optimizer triggers it), we gracefully
+     * stop the servers + foreground state and let the system restart us via
+     * START_STICKY (which will re-enter onStartCommand and re-promote to
+     * foreground once the app is in the foreground again).
+     *
+     * If we don't call stopSelf() within the system's timeout window (a few
+     * seconds), the system throws ForegroundServiceDidNotStopInTimeException
+     * and kills the app process.
+     */
+    override fun onTimeout(startId: Int) {
+        WepWawetLogger.proxyWarn("PairingService.onTimeout — system requested stop (specialUse should not time out)",
+            "start_id" to startId,
+            "action" to "graceful_stop")
+        // v0.7.24 (M-P8): on Android 15 (API 35+, our targetSdk) the system
+        // calls the TWO-ARG overload onTimeout(startId, fgsType) — the
+        // one-arg override below it is only invoked on Android 14. Both
+        // funnel into the same graceful stop.
+        // Stop the pairing servers cleanly so pairedDeviceName is cleared
+        stopServers()
+        // Remove the foreground notification
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        // Stop the service — the proxy will resume on next PairingService.start()
+        // call (either from MainActivity.onCreate auto-start, BootReceiver, or
+        // the user returning to the Pairing screen).
+        stopSelf()
+    }
+
+    /**
+     * v0.7.24 (M-P8): Android 15 (API 35) invokes this two-arg overload
+     * instead of onTimeout(Int). Delegates to the same graceful stop.
+     */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        WepWawetLogger.proxyWarn("PairingService.onTimeout(2-arg, Android 15+) — system requested stop",
+            "start_id" to startId,
+            "fgs_type" to fgsType,
+            "action" to "graceful_stop")
+        stopServers()
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        stopSelf()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        WepWawetLogger.proxy("PairingService.onStartCommand",
+            "flags" to flags,
+            "action" to (intent?.action ?: "null"))
+        appContext = applicationContext
+
+        // v0.7.5: Handle the "Stop" notification action — the user tapped
+        // the Stop button on the foreground notification. Tear down the
+        // servers, remove the notification, and stop the service. We
+        // return START_NOT_STICKY so the system doesn't auto-restart the
+        // service after we've been explicitly killed (BootReceiver /
+        // MainActivity will start it again on next boot / app open, which
+        // is the right UX — explicit kill should stick until the user
+        // re-engages with the app).
+        //
+        // Note: this Intent is delivered via PendingIntent.getService to
+        // the already-running service instance (the notification exists
+        // because the service is in the foreground state). The user's
+        // tap on the notification action button is treated as a
+        // user-initiated event, so it is NOT subject to the Android 12+
+        // background-service-start restriction.
+        if (intent?.action == ACTION_KILL) {
+            WepWawetLogger.proxy("PairingService: ACTION_KILL — explicit stop from notification",
+                "had_server" to (pairingServerLocal != null),
+                "had_broadcaster" to (discoveryBroadcaster != null),
+                "was_paired" to (pairedDeviceName != null))
+            stopServers()
+            // v0.7.24 (H-P2): if the system restarted us via START_STICKY and
+            // the first delivered intent carries ACTION_KILL, we reach here
+            // WITHOUT ever having called startForeground() — calling
+            // stopForeground() then throws. Wrapped; the stopSelf() below is
+            // what actually matters in that path.
+            runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        // Get PIN from intent (default "1234" matches the auto-start PIN
+        // used by MainActivity.onCreate and the PairingScreen default).
+        val pin = intent?.getStringExtra(EXTRA_PIN) ?: getPairingPin(this)
+        // v0.7.24 (C-P3): PIN redacted from logs.
+        WepWawetLogger.proxy("Starting pairing servers",
+            "pin" to if (pin == "1234") "default" else "custom(${pin.length})")
+
+        // v0.7.1 (round 6 — pairing persistence): SMART RESTART.
+        //
+        // PROBLEM: onStartCommand was called from MainActivity.onCreate,
+        // every PairingScreen appearance, and every PIN change. The old
+        // implementation ALWAYS called stopServers() and rebuilt the
+        // pairing server stack — killing the live TCP connection to the
+        // phone, clearing pairedDeviceName, and forcing the user to
+        // re-pair on every screen entry. The comment in PairingScreen
+        // claiming onStartCommand was a no-op when already running was
+        // FALSE.
+        //
+        // FIX: if the pairing server is already running AND the PIN
+        // matches the running PIN, we DO NOT tear down the live phone
+        // connection. We only check if the discovery broadcaster died
+        // (e.g. its thread crashed silently) and restart JUST that
+        // component. Otherwise we return START_STICKY immediately,
+        // leaving the live pairing session intact.
+        val existingServer = pairingServerLocal
+        val existingBroadcaster = discoveryBroadcaster
+        if (existingServer != null && existingServer.isRunning && runningPin == pin) {
+            // Server is alive + PIN unchanged — don't kill the phone session.
+            WepWawetLogger.proxy("PairingService: server already running with same PIN — keeping live session",
+                "pin" to if (pin == "1234") "default" else "custom(${pin.length})",
+                "broadcaster_alive" to (existingBroadcaster?.isRunning ?: false))
+
+            // v0.7.1 (round 6): notification text should show "Paired: <name>"
+            // if already paired. This handles the case where MainActivity
+            // re-issues onStartCommand after the user already paired — the
+            // notification should reflect the actual paired state, not the
+            // generic "proxy running" text.
+            val persistedName = loadPairedDevice(applicationContext)
+            val displayName = pairedDeviceName ?: persistedName
+            val notifText = if (!displayName.isNullOrBlank()) {
+                "Paired: $displayName"
+            } else {
+                "WallpaperSuite proxy running. PIN: $pin"
+            }
+            updateNotification(notifText)
+
+            // Only restart the discovery broadcaster if it died (its
+            // thread crashed silently). We pass the persistent GUID so
+            // the phone sees the SAME computer.
+            if (existingBroadcaster == null || !existingBroadcaster.isRunning) {
+                WepWawetLogger.proxy("Discovery broadcaster died — restarting it (server kept alive)")
+                try {
+                    val guid = PairingIdentity.getGuid(applicationContext)
+                    val broadcaster = WeDiscoveryBroadcaster(this)
+                    broadcaster.start(guid = guid)
+                    discoveryBroadcaster = broadcaster
+                } catch (e: Exception) {
+                    WepWawetLogger.proxyError("Failed to restart discovery broadcaster",
+                        "exception" to e.javaClass.name,
+                        "message" to (e.message ?: ""))
+                }
+            }
+            return START_STICKY
+        }
+
+        // PIN changed OR server isn't running — do the full (re)start.
+        WepWawetLogger.proxy("PairingService: full (re)start — server down or PIN changed",
+            "server_running" to (existingServer?.isRunning ?: false),
+            "running_pin_matches" to (runningPin == pin))
+
+        // v0.7.1 (round 6): notification text shows "Paired: <name>" if
+        // we have a persisted paired-device name (so the foreground
+        // notification reflects the previously-paired state during the
+        // brief window before the phone reconnects).
+        val persistedName = loadPairedDevice(applicationContext)
+        val initialNotifText = if (!persistedName.isNullOrBlank()) {
+            "Paired: $persistedName"
+        } else {
+            "WallpaperSuite proxy running. PIN: $pin"
+        }
+        val notification = createNotification(initialNotifText)
+
+        // v0.7.1 (round 6): wrap startForeground in try/catch — on
+        // Android 12+ (API 31+) a background restart (e.g. from
+        // BootReceiver if the user has just rebooted and the app isn't
+        // yet in the foreground) throws
+        // ForegroundServiceStartNotAllowedException. We catch it, log
+        // the issue, and return START_STICKY anyway — Android will
+        // retry the service start later when the user opens the app
+        // (which puts us in the foreground and lets startForeground
+        // succeed). The previous code would CRASH, killing the
+        // foreground service permanently until the user manually
+        // re-launched the app.
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(NOTIFICATION_ID, notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            // ForegroundServiceStartNotAllowedException on Android 12+ when
+            // the service is started from the background (e.g. from
+            // BootReceiver just after a reboot, before the user opens
+            // the app).
+            //
+            // v0.7.24 (H-P1 BUG FIX): was `return START_STICKY`. The 5-second
+            // startForeground deadline had ALREADY been missed at this point,
+            // so on Android 12+ the system throws
+            // ForegroundServiceDidNotStartInTimeException and kills the
+            // process; START_STICKY then re-delivers the SAME intent,
+            // re-entering onStartCommand, re-throwing — a tight restart loop
+            // that could pin the CPU. Stop cleanly instead; the proxy comes
+            // back on the next user-initiated start (app open / Pairing
+            // screen / boot).
+            val excName = e.javaClass.name
+            WepWawetLogger.proxyError("startForeground failed — stopping service (will restart on next user action)",
+                "exception" to excName,
+                "message" to (e.message ?: ""))
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+
+        // Stop any existing servers (PIN changed or first start)
+        stopServers()
+
+        // v0.7.1 (round 6): load the PERSISTENT RSA keypair so the
+        // phone sees the same computer across app restarts/updates.
+        val persistentKeyPair = PairingIdentity.loadOrCreateKeyPair(applicationContext)
+
+        // Start the pairing server (TCP 7889)
+        try {
+            pairingServerLocal = WePairingServer().also { server ->
+                server.onPairingSuccess = { deviceName ->
+                    // Update the static pairedDeviceName so UI can query isPaired()
+                    pairedDeviceName = deviceName
+                    // v0.7.0: Persist the paired device name so it survives
+                    // app restarts/updates. The UI can show "paired" even
+                    // before the phone reconnects.
+                    savePairedDevice(applicationContext, deviceName)
+                    WepWawetLogger.proxy("Pairing SUCCESS!",
+                        "device" to deviceName,
+                        "queued_wallpapers" to "n/a")
+                    updateNotification("Paired: $deviceName")
+                }
+                server.onPairingFailure = { error ->
+                    pairedDeviceName = null
+                    WepWawetLogger.proxyError("Pairing FAILED", "error" to error)
+                }
+                // v0.7.1 (round 6): clear pairedDeviceName + update the
+                // notification when the phone disconnects. The persisted
+                // paired-device name in SharedPreferences is KEPT (so
+                // the UI can still show "previously paired with X" and
+                // the phone can reconnect without re-PIN-prompting, since
+                // the phone's pairing DB is keyed by the persistent GUID
+                // + RSA pubkey — both stable across app restarts).
+                server.onDisconnected = {
+                    pairedDeviceName = null
+                    val pinForNotif = runningPin ?: getPairingPin(applicationContext)
+                    updateNotification("WallpaperSuite proxy running. PIN: $pinForNotif")
+                    WepWawetLogger.proxy("Pairing: phone disconnected — UI reverted to 'not paired' (persisted name kept)")
+                }
+                // v0.7.1 (round 6): pass the persistent keypair so the
+                // phone sees the same RSA pubkey across restarts.
+                server.start(pin, persistentKeyPair)
+                // Expose via companion
+                pairingServer = server
+            }
+            // v0.7.1 (round 6): record the PIN we started with so the
+            // next onStartCommand can detect "PIN unchanged → don't
+            // tear down the live session".
+            runningPin = pin
+        } catch (e: Exception) {
+            WepWawetLogger.proxyError("Failed to start pairing server",
+                "exception" to e.javaClass.name, "message" to (e.message ?: ""))
+        }
+
+        // Start the discovery broadcaster (UDP 7884)
+        try {
+            // v0.7.1 (round 6): pass the persistent GUID so the phone
+            // sees the same computer across restarts.
+            val guid = PairingIdentity.getGuid(applicationContext)
+            discoveryBroadcaster = WeDiscoveryBroadcaster(this).also { broadcaster ->
+                broadcaster.start(guid = guid)
+            }
+        } catch (e: Exception) {
+            WepWawetLogger.proxyError("Failed to start discovery broadcaster",
+                "exception" to e.javaClass.name, "message" to (e.message ?: ""))
+        }
+
+        return START_STICKY
+    }
+
+    override fun onDestroy() {
+        WepWawetLogger.proxy("PairingService.onDestroy")
+        // v0.7.21: Unregister the notification-deleted receiver.
+        runCatching { unregisterReceiver(notificationDeletedReceiver) }
+        // v0.7.23: Remove all pending handler callbacks to prevent leaks
+        // (BUG PS-1: the repostNotificationRunnable + backgroundTimeoutRunnable).
+        mainHandler.removeCallbacks(repostNotificationRunnable)
+        mainHandler.removeCallbacks(backgroundTimeoutRunnable)
+        // v0.7.23: Clear the weak reference to this instance.
+        instance?.clear()
+        instance = null
+        stopServers()
+        super.onDestroy()
+    }
+
+    private fun stopServers() {
+        try {
+            pairingServerLocal?.stop()
+        } catch (e: Exception) {
+            WepWawetLogger.proxyError("Error stopping pairing server",
+                "exception" to e.javaClass.name)
+        }
+        pairingServerLocal = null
+        pairingServer = null
+        pairedDeviceName = null
+        // v0.7.1 (round 6): clear the running PIN so the next onStartCommand
+        // does a full restart instead of being short-circuited by a stale
+        // runningPin match. We deliberately do NOT clear the persisted
+        // paired-device name in SharedPreferences here — that's preserved
+        // across service restarts so the phone can reconnect without
+        // re-PIN-prompting (the phone's pairing DB is keyed by the
+        // persistent GUID + RSA pubkey).
+        runningPin = null
+
+        try {
+            discoveryBroadcaster?.stop()
+        } catch (e: Exception) {
+            WepWawetLogger.proxyError("Error stopping discovery broadcaster",
+                "exception" to e.javaClass.name)
+        }
+        discoveryBroadcaster = null
+    }
+
+    private fun createNotificationChannel() {
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            "WallpaperSuite Pairing",
+            NotificationManager.IMPORTANCE_LOW,
+        ).apply {
+            description = "Pairing proxy service for Wallpaper Engine"
+            // v0.7.20: Show the notification on the lock screen so the user
+            // can always see/kill the proxy even when the phone is locked.
+            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            // v0.7.20: Don't allow the user to bypass via the channel
+            // settings — the notification IS the foreground service
+            // notification, hiding it defeats the purpose.
+            setShowBadge(false)
+        }
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(channel)
+    }
+
+    private fun createNotification(text: String): Notification {
+        // v0.7.21: Store the text so the delete receiver can re-post with the
+        // correct text.
+        lastNotificationText = text
+
+        val killIntent = Intent(this, PairingService::class.java).apply {
+            action = ACTION_KILL
+        }
+        val killPendingIntent = PendingIntent.getService(
+            this,
+            0,
+            killIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val contentIntent = Intent(this, com.wepwawet.MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val contentPendingIntent = PendingIntent.getActivity(
+            this,
+            1,
+            contentIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        // v0.7.21: Delete intent — fires a broadcast when the user swipes the
+        // notification away. The notificationDeletedReceiver catches it and
+        // re-posts the notification after 500ms. This makes the notification
+        // effectively non-dismissible: it always comes back while the service
+        // is running.
+        val deleteIntent = Intent(ACTION_NOTIFICATION_DELETED).apply {
+            setPackage(packageName)
+        }
+        val deletePendingIntent = PendingIntent.getBroadcast(
+            this,
+            2,
+            deleteIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("WallpaperSuite")
+            .setContentText(text)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setOngoing(true)
+            .setShowWhen(false)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setForegroundServiceBehavior(
+                NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .setContentIntent(contentPendingIntent)
+            .setDeleteIntent(deletePendingIntent)
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "Stop proxy",
+                killPendingIntent,
+            )
+            .build()
+    }
+
+    private fun updateNotification(text: String) {
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(NOTIFICATION_ID, createNotification(text))
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+}
