@@ -140,6 +140,18 @@ object WepWawetLogger {
             val verboseLog = settingsPrefs.getBoolean(SETTINGS_KEY_VERBOSE_LOG, true)
             minLevel = if (verboseLog) Level.TRACE else Level.WARN
         }
+        // v0.8.3: the official client's "Write Errors to Log" setting
+        // (general_log_errors) gates file logging to filesDir/logs/applog.txt
+        // — both our mirrored messages (WeClientLog) AND the native engine's
+        // own log output (SceneLib.setLogToFileEnabled writes to that file).
+        // The engine flag is applied by WEWallpaperService (engine start),
+        // the preview's load path, and the Settings toggle — mirroring the
+        // official call sites (BrowseActivity.onCreate + PreviewActivity).
+        runCatching {
+            val general = io.wallpaperengine.weclient.WeEnginePrefs
+                .readGeneralSettings(context)
+            WeClientLog.setLogToFile(context, general.logToFileEnabled)
+        }
         // WorkManager scheduling — wrap in try-catch. WorkManager.getInstance() can throw
         // IllegalStateException if the on-demand initializer is misconfigured, and we don't
         // want a WorkManager init failure to crash the app on boot. The in-memory ring
@@ -274,6 +286,19 @@ object WepWawetLogger {
 
         // Android logcat (cheap, off-thread)
         androidLog(domain, level, message, contextStr(context), exception)
+
+        // v0.8.3: mirror the wallpaper-relevant domains (ENGINE + CRASH) into
+        // the official client's logging pipeline — logcat tag WEERR plus the
+        // applog.txt file with the real app's exact timestamp format — so a
+        // log exported from our app reads exactly like one from the official
+        // client (the user's explicit request). INFO+ only: DEBUG entries are
+        // verbose-only chatter that would drown the file.
+        if (domain == Domain.ENGINE || domain == Domain.CRASH) {
+            val ctx = contextStr(context)
+            WeClientLog.log(
+                "${domain.tag}: $message" + if (ctx.isBlank()) "" else " $ctx"
+            )
+        }
     }
 
     fun snapshot(): List<LogEntry> = synchronized(ringBuffer) { ringBuffer.toList() }

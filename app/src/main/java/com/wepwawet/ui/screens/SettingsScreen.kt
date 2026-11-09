@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.KeyboardOptions
@@ -1068,6 +1070,23 @@ private fun EngineSettingsCard() {
     }
     var restoreConfirm by remember { mutableStateOf(false) }
     var playlistSummary by remember { mutableStateOf("") }
+    var writeErrorsLog by remember {
+        mutableStateOf(
+            io.wallpaperengine.weclient.WeEnginePrefs.getStoredBoolean(
+                context, io.wallpaperengine.weclient.WallpaperProperties.GENERAL_PROP_LOG_ERRORS,
+                false,
+            )
+        )
+    }
+    var snackbarResult by remember { mutableStateOf<String?>(null) }
+
+    // v0.8.3: surface the export result (Saved to Downloads / nothing logged)
+    LaunchedEffect(snackbarResult) {
+        snackbarResult?.let {
+            WepWawetLogger.appInfo(it)
+            snackbarResult = null
+        }
+    }
 
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
@@ -1148,11 +1167,22 @@ private fun EngineSettingsCard() {
                 "Wallpaper Colors integration",
                 style = MaterialTheme.typography.bodyLarge,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // v0.8.3 PARITY FIX: the official general_colors_api ListPreference
+            // has FIVE modes (arrays.xml colorsapi_mode_labels) — ours only
+            // offered three, so "Suggest Dark Theme" and "Suggest Bright
+            // Foreground" were unreachable. Exact official labels + values.
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+            ) {
                 listOf(
                     "Enabled" to "enabled",
                     "Disabled" to "disabled",
-                    "Dark hint" to "hintdark",
+                    "Suggest Dark Foreground" to "hintdark",
+                    "Suggest Dark Theme" to "hintdarktheme",
+                    "Suggest Bright Foreground" to "hintbright",
                 ).forEach { (label, value) ->
                     FilterChip(
                         selected = colorsApi == value,
@@ -1196,6 +1226,53 @@ private fun EngineSettingsCard() {
                     },
                 )
             }
+
+            // ===== Developer section (official general_settings_developer) =====
+            Text(
+                "Developer",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 12.dp),
+            )
+            // v0.8.3: the official "Write Errors to Log" switch
+            // (general_log_errors). Gates BOTH our mirrored WEERR messages
+            // AND the native engine's own log output — both write to
+            // filesDir/logs/applog.txt with the official timestamp format.
+            SettingToggleRow(
+                label = "Write Errors to Log",
+                checked = writeErrorsLog,
+            ) { checked ->
+                writeErrorsLog = checked
+                io.wallpaperengine.weclient.WeEnginePrefs.storeBoolean(
+                    context,
+                    io.wallpaperengine.weclient.WallpaperProperties.GENERAL_PROP_LOG_ERRORS,
+                    checked,
+                )
+                com.wepwawet.log.WeClientLog.setLogToFile(context, checked)
+                runCatching {
+                    io.wallpaperengine.wrapper.SceneLib().setLogToFileEnabled(checked)
+                }
+                WepWawetLogger.appInfo(
+                    "File logging " + if (checked) "enabled" else "disabled",
+                    "sink" to "filesDir/logs/applog.txt")
+            }
+            Text(
+                "May reduce performance",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(
+                onClick = {
+                    scope.launch {
+                        val exported = withContext(Dispatchers.IO) {
+                            exportErrorLog(context)
+                        }
+                        snackbarResult = exported
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Save Error Log")
+            }
         }
     }
 }
@@ -1214,5 +1291,30 @@ private fun SettingToggleRow(
     ) {
         Text(label, style = MaterialTheme.typography.bodyLarge)
         Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+/**
+ * v0.8.3: "Save Error Log" (official general_settings_export_log) — copies
+ * the official-format engine log (filesDir/logs/applog.txt, shared by our
+ * mirrored WEERR messages and the native engine's own output) into the
+ * public Downloads folder. Returns a result line for the log/snackbar.
+ */
+private fun exportErrorLog(context: Context): String {
+    val logFile = java.io.File(context.filesDir.absolutePath +
+            com.wepwawet.log.WeClientLog.LOG_RELATIVE_PATH)
+    if (!logFile.exists() || logFile.length() == 0L) {
+        return "No errors have been logged yet."
+    }
+    return try {
+        val stamp = java.text.SimpleDateFormat(
+            "yyyyMMdd-HHmmss", java.util.Locale.US
+        ).format(java.util.Date())
+        val content = logFile.readBytes()
+        val uri = com.wepwawet.log.PublicDownloadsWriter.writeBytes(
+            context, "wallpapersuite-errorlog-$stamp.txt", content)
+        if (uri != null) "Error log saved to Downloads" else "Failed to save error log"
+    } catch (t: Throwable) {
+        "Failed to save error log: ${t.message ?: t.javaClass.name}"
     }
 }

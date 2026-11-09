@@ -60,8 +60,10 @@ fun PlaylistEditorScreen(
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             playlist = WeEnginePrefs.readPlaylist(context)
-            mode = WeEnginePrefs.getStoredString(context, WallpaperProperties.PLAYLIST_MODE)
-                ?: WallpaperProperties.PLAYLIST_MODE_RANDOM
+            mode = playlist.mode.ifEmpty {
+                WeEnginePrefs.getStoredString(context, WallpaperProperties.PLAYLIST_MODE)
+                    ?: WallpaperProperties.PLAYLIST_MODE_RANDOM
+            }
             durationMinutes = WeEnginePrefs.getStoredInt(
                 context, WallpaperProperties.PLAYLIST_DURATION,
                 WallpaperProperties.PLAYLIST_DEFAULT_DURATION,
@@ -70,6 +72,10 @@ fun PlaylistEditorScreen(
     }
 
     fun persist() {
+        // v0.8.3: the official model stores the mode INSIDE the playlist
+        // JSON (PlaylistData.mode) — keep the legacy pref in sync for older
+        // readers, but the JSON is the source of truth now.
+        playlist.mode = mode
         WeEnginePrefs.storePlaylist(context, playlist)
         WeEnginePrefs.storeString(context, WallpaperProperties.PLAYLIST_MODE, mode)
         WeEnginePrefs.storeInt(context, WallpaperProperties.PLAYLIST_DURATION, durationMinutes)

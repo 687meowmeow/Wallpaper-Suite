@@ -15,6 +15,11 @@ class PlaylistDataWallpaper {
 class PlaylistData {
     var wallpapers: ArrayList<PlaylistDataWallpaper> = ArrayList()
 
+    // v0.8.3: the official model carries the playback mode inside the same
+    // JSON ("random" / "sorted" / "timeOfDay" / "dayOfWeek"); our port had
+    // dropped it, breaking the day-of-week 7-item cap parity.
+    var mode: String = io.wallpaperengine.weclient.WallpaperProperties.PLAYLIST_MODE_RANDOM
+
     companion object {
         private val playlistDataType = object : TypeToken<PlaylistData>() {}.type
 

@@ -140,6 +140,7 @@ fun WepWawetNavHost() {
                 onBrowse = { nav.navigate("workshop") },
                 onOpenSettings = { nav.navigate("settings") },
                 onOpenDownloads = { nav.navigate("downloads") },
+                onOpenWorkshopItem = { itemId -> nav.navigate("detail/$itemId") },
                 onOpenWallpaper = { wallpaper ->
                     com.wepwawet.engine.PreviewRequestHolder.set(wallpaper)
                     nav.navigate("preview")
@@ -159,6 +160,7 @@ fun WepWawetNavHost() {
                 wallpaper = wallpaper,
                 onBack = { nav.popBackStack() },
                 onOpenWorkshop = { itemId -> nav.navigate("detail/$itemId") },
+                onOpenSettings = { nav.navigate("settings") },
             )
         }
 

@@ -599,8 +599,8 @@ android {
         //     hardcoded "Android 13" user-agent; M-U7 favorites LazyColumn
         //     keys; M-U12 10Hz recomposition storm while paused; M-A10 dead
         //     ic_launcher_background color (now referenced by the new icon).
-        versionCode = 120
-        versionName = "0.8.2-alpha"
+        versionCode = 121
+        versionName = "0.8.3-alpha"
         // Native ABI filter — only build for arm64-v8a (WE app targets Snapdragon 8 Gen 2+)
         ndk {
             abiFilters += "arm64-v8a"
@@ -698,6 +698,12 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    // v0.8.3: JVM unit tests touch android.util.Log (WeClientLog mirrors
+    // the official WEERR logging) — default-value stubs keep them runnable.
+    testOptions {
+        unitTests.isReturnDefaultValues = true
     }
 
     // Java/Kotlin target — matches the JavaSteam + Android Gradle Plugin Java 17 baseline

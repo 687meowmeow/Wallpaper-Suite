@@ -2,7 +2,7 @@
 
 > A complete personal Wallpaper Engine for Android: browse 3M+ Steam Workshop items, download them with your own Steam account, **and render them as live wallpapers directly on your phone** — powered by the official WE engine. **No PC required.**
 
-**Status: v0.8.1-alpha.** The app integrates the official Wallpaper Engine renderer (scenes, videos, images, GIFs) as a live wallpaper service, with a wallpaper library as the home screen, a one-tap **Download** button that puts workshop items straight into the engine, manual import, playlists, per-wallpaper properties and battery-aware playback. The workshop browser, mpkg packer and pairing proxy are all still here — pairing is now **opt-in** behind a Settings toggle.
+**Status: v0.8.3-alpha.** The app integrates the official Wallpaper Engine renderer (scenes, videos, images, GIFs) as a live wallpaper service. The home screen is the wallpaper library; the preview screen matches the official client's PreviewActivity (fullscreen renderer, swipe-up properties drawer, parallax/motion input, audio-responsive effects, apply button with the lockscreen notice and revert flow); per-wallpaper properties are the official property sheets with proper localizations, and logging is the official WEERR/applog.txt pipeline. The workshop browser, mpkg packer and pairing proxy are all still here — pairing is **opt-in** behind a Settings toggle.
 
 [![Build APK](https://github.com/687meowmeow/Wallpaper-Suite/actions/workflows/build.yml/badge.svg)](https://github.com/687meowmeow/Wallpaper-Suite/actions/workflows/build.yml)
 
@@ -28,15 +28,25 @@ The app can also act as a **pairing proxy** for the official Wallpaper Engine An
 
 ## Features
 
-- **Wallpaper library home screen**: every wallpaper the engine knows (bundled official WE wallpapers, workshop downloads, imported files) in one grid, with an Active badge and the Browse Workshop button.
-- **Live preview**: tap any wallpaper to render it live through the engine — scenes, videos, images and GIFs — with per-wallpaper properties (sliders, combos, colors), playlist management and a workshop-page button that opens the item's page inside the app.
-- **Browse & search**: scroll through Wallpaper Engine workshop items, sort them, search by text, and filter by tags.
+### The engine (official parity)
+- **Official renderer**: the real `libscenejni.so` + the ported `io.wallpaperengine.*` layer (views, service, properties, parallax, touch) — scenes, videos, images and GIFs play exactly like the official client.
+- **Wallpaper library home screen**: every wallpaper the engine knows (bundled official WE wallpapers, workshop downloads, imported files) in a square-thumbnail grid with overlaid titles, **search**, **sorting** (newest / oldest / alphabetical) and **pin to top**.
+- **Live preview, like the real app**: almost-fullscreen renderer behind a semi-clear top bar; **drag to align** the wallpaper, **tilt for parallax** ("React to motion"), audio-responsive effects with the permission flow; static preview bitmap that fades into the live scene; battery-saver banner.
+- **Swipe-up properties drawer**: the official properties panel rebuilt — localized labels (e.g. *React to motion*, *Motion strength*, *Show color options*), bool switches, precision sliders that apply live, combo radio dialogs, a full **color picker**, text inputs and user-texture pickers; dependency visibility rules; **Reset Wallpaper Settings**; changes apply live and persist on leave.
+- **Apply flow**: apply button in the top bar (long-press for the official Apply / Revert-to-system dialog), lockscreen notice on first apply, playlist-aware.
+
+### Workshop & downloads
+- **Browse & search**: scroll through Wallpaper Engine workshop items, sort them, search by text, and filter by the full Steam tag sheet.
 - **Steam login**: sign in with your own account, including Steam Guard / 2FA. Your login is remembered.
-- **Download**: one button downloads the real `.pkg` via JavaSteam, packs it into the `.mpkg` the engine plays, and imports it straight into the app's wallpaper library. No PC, no pairing required.
+- **Download**: one button downloads the real `.pkg` via JavaSteam, packs it into the `.mpkg` the engine plays (byte-exact PC packing parity), and imports it straight into the app's wallpaper library. No PC, no pairing required.
 - **Send to phone (opt-in)**: the PC-pairing subsystem for the official WE Android app, behind a Settings toggle.
 - **Manual import**: open `.mpkg` / video / image / GIF files from any file manager, or pick them in-app.
-- **Battery aware**: the wallpaper pauses when not visible and in system power-save mode, scenes respect the FPS limit, videos run at native FPS.
-- **Logs**: built-in logging (including an engine lifecycle domain) with crash capture and one-tap export for bug reports.
+
+### Engine settings & logging
+- **General settings parity**: FPS limit, pause while saving battery, wallpaper touch input, **Wallpaper Colors integration** (all five official modes) and restore-official-wallpapers.
+- **Playlists**: random / sorted / time-of-day / day-of-week playlists with per-item durations.
+- **Official logging**: the real client's `WEERR` logcat tag and `filesDir/logs/applog.txt` file (same timestamp format, 1 MiB truncation), shared with the native engine's own log output — enabled by the **Write Errors to Log** setting, exportable via **Save Error Log**. Crash reports append the engine log tail, so wallpaper issues are diagnosable from one file.
+- **In-app logs**: structured multi-domain logging with the verbose toggle, plus crash capture.
 
 ## Tech stack
 
@@ -65,8 +75,9 @@ The JavaSteam fork exists because upstream skips some Wallpaper Engine workshop 
 | `app/src/main/java/com/wepwawet/engine/` | Engine library bridge: enumerate / import / delete wallpapers |
 | `app/src/main/java/io/wallpaperengine/` | The ported official client layer (JNI ABI — names are load-bearing) |
 | `app/src/main/java/com/wepwawet/auth/` | Steam login activity |
-| `app/src/main/java/com/wepwawet/log/` | Logger, crash handler, log persistence |
+| `app/src/main/java/com/wepwawet/log/` | Logger, the official WEERR/applog pipeline, crash handler, log persistence |
 | `app/src/main/cpp/` | JNI + bundled etc2comp |
+| `app/src/main/assets/` | The engine's own assets (fonts, locale, scripts, shaders, materials) |
 | `app/proguard-rules.pro` | R8 rules |
 | `app/debug.keystore` | Stable debug keystore so all builds share a signing key |
 | `.github/workflows/build.yml` | CI: build the APK and attach it to a release |
@@ -79,6 +90,7 @@ The JavaSteam fork exists because upstream skips some Wallpaper Engine workshop 
 - **RAM:** 6 GB+ recommended
 - **Storage:** 1 GB+ free for the app and downloaded packs
 - **Network:** internet access for Steam APIs
+- **Optional:** a gyroscope enables *React to motion* (Device Motion parallax); a microphone enables audio-responsive effects
 
 ## Building
 

@@ -256,10 +256,14 @@ class WEWallpaperService : WallpaperService() {
 
             fun syncSettings() {
                 playlistData = WeEnginePrefs.readPlaylist(this@WEWallpaperService)
-                var storedString = WeEnginePrefs.getStoredString(
-                    this@WEWallpaperService, WallpaperProperties.PLAYLIST_MODE
-                )
-                if (storedString == null) {
+                // v0.8.3: the mode lives INSIDE the playlist JSON (official
+                // model); the legacy pref is the fallback for old installs.
+                var storedString = playlistData.mode.ifEmpty {
+                    WeEnginePrefs.getStoredString(
+                        this@WEWallpaperService, WallpaperProperties.PLAYLIST_MODE
+                    ) ?: ""
+                }
+                if (storedString.isEmpty()) {
                     storedString = WallpaperProperties.PLAYLIST_MODE_RANDOM
                 }
                 mode = storedString

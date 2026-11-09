@@ -201,20 +201,36 @@ object PcShaderFixes {
                 // IDEMPOTENT: they fire only when their result is not already
                 // present, which is the only behavior consistent with the
                 // shipped assets compiling on the engine.
-                if (c.contains(XRAY_VARYING) &&
-                    !c.contains("uniform vec4 g_PointerState;")) {
+                //
+                // v0.8.3: every sub-patch decision is logged (WEERR file +
+                // logcat through the WORKSHOP domain mirror) so an X-ray
+                // wallpaper that renders wrongly can be diagnosed from the
+                // exported log — which sub-patches fired, which were already
+                // applied, and which could not match.
+                val hadPointerState = c.contains("uniform vec4 g_PointerState;")
+                val applied = mutableListOf<String>()
+                if (c.contains(XRAY_VARYING) && !hadPointerState) {
                     c = c.replace(XRAY_VARYING, XRAY_VARYING_REPLACEMENT)
+                    applied += "declare g_PointerState"
                 }
                 if (Regex(XRAY_UNPROJECTED_SEARCH).containsMatchIn(c) &&
                     !c.contains(XRAY_UNPROJECTED_MARK)) {
                     c = Regex(XRAY_UNPROJECTED_SEARCH).replace(c, XRAY_UNPROJECTED_REPLACEMENT)
+                    applied += "scale unprojectedUVs by g_PointerState.y"
                 }
                 if (c.contains(XRAY_MVPINV) && XRAY_MVPINV_USE.containsMatchIn(c) &&
                     Regex(XRAY_POINTERUV_SEARCH).containsMatchIn(c)) {
                     c = c.replace(XRAY_MVPINV, XRAY_MVPINV_REPLACEMENT)
                     c = XRAY_MVPINV_USE.replace(c, XRAY_MVPINV_USE_REPLACEMENT)
                     c = Regex(XRAY_POINTERUV_SEARCH).replace(c, XRAY_POINTERUV_REPLACEMENT)
+                    applied += "swap MVP-inverse + pointer UV space"
                 }
+                com.wepwawet.log.WepWawetLogger.engine(
+                    "xray shader patch decisions",
+                    "shader" to name,
+                    "patches_applied" to applied.joinToString("; ").ifEmpty { "none" },
+                    "pre_patched" to hadPointerState,
+                    "mvpinv_swapped_or_absent" to (!c.contains(XRAY_MVPINV)))
             }
             "perspective" -> {
                 if (Regex(PERSPECTIVE_MIX_SEARCH).containsMatchIn(c) && c.contains(TEXRES_UNIFORM)) {

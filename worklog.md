@@ -3071,3 +3071,179 @@ Reminders for future agents:
   82. The engine reads assets/fonts|html|locale|materials|models|scripts|
       shaders|wallpapers from the APK — the full parity checklist lives in
       scripts/asset_parity.py (official APK = ground truth, md5 per file).
+
+---
+Task ID: v0.8.3-alpha
+Agent: main (preview parity rebuild + library features + official logging +
+  comprehensive bug sweep)
+
+User request (verbatim intent): features missing from the real app — can't
+move the wallpaper; properties show but can't be changed; properties should
+be a swipe-up; sorting + search + pin on the wallpaper screen; remove the
+"scene of video" label under the name; copy the real app's logging exactly;
+color integration missing options; no react-to-motion option; xray is
+backwards; remove the preview's bottom bar, do the almost-fullscreen preview
+with a semi-clear top bar; parity check; comprehensive bug check; README
+accuracy. "use the decompiled apk every step of the way" — every change below
+was made against the freshly re-downloaded official APK (jadx with
+resources: activity_preview.xml, menu XMLs, strings, Util.log ground truth).
+
+## A. Preview rebuild (WallpaperPreviewScreen.kt, ground truth: PreviewActivity)
+
+- ALMOST-FULLSCREEN + SEMI-CLEAR TOP BAR: the renderer now fills the screen
+  (aspect-matched to the physical display while GENERAL_PROP_MATCH_PREVIEW
+  is on — official updateAspectRatio), with a 40%-black translucent top bar
+  floating over it. The bottom bar (details pills + workshop button + apply
+  button) is GONE — apply moved to the top bar (check icon, long-press opens
+  the official Change Wallpaper dialog with Preview & Apply / Disable
+  WallpaperSuite), details moved into an info-icon dialog (Title/Filename/
+  File size/Workshop ID + Type/Resolution/FPS — the official keeps these in
+  FileDetailsActivity), the workshop-page button stayed in the top bar.
+- SWIPE-UP PROPERTIES DRAWER: official guideline parity — closed at 0.98,
+  tap toggles to 0.5 (300 ms animation), drag moves freely, 15 px click
+  threshold, clamped to [statusBar/screen .. 1 - navBar/screen], 16 dp
+  accent strip + drag-handle pill centered on the drawer's top edge (the
+  official CardView bottom-margin -10dp trick), body at 0.92 alpha with
+  nav-bar bottom padding.
+- "CAN'T MOVE THE WALLPAPER" — ROOT CAUSES FIXED:
+  1. The preview screen never created a ParallaxController (the official
+     links one to the renderer in onCreate and re-applies properties on
+     every load/change). Now linked, re-applied on load + on every property
+     change, paused/resumed with the lifecycle.
+  2. ParallaxController used TYPE_ROTATION_VECTOR (quaternion components)
+     where the official registers sensor type 4 = TYPE_GYROSCOPE (rad/s) —
+     the engine received wrong-magnitude offsets, so gyro parallax ("React
+     to motion: Device Motion") barely moved. Fixed to TYPE_GYROSCOPE
+     (decompiled ParallaxController: getDefaultSensor(4), onSensorChanged
+     checks getType() == 4).
+  3. AudioRecorder was never wired in the preview — now created, listener →
+     sendAudioData, started/stopped per the official flows (load-time
+     ensurePermissionAllowed with the prompt/force/"" modes and the
+     "don't ask again" key, plus the live switch handling in the change
+     callback).
+  4. setScreenRotation is applied at view creation AND on configuration
+     change; Surface.setFrameRate on load (API 31+, scene: default
+     compatibility, video: fixed at the wallpaper's own FPS — exact
+     official constants).
+- LOADING PARITY: static preview bitmap behind the GL surface (fades out
+  300 ms on load — official fadeIntoCurrentScene), centered progress
+  spinner, align-overlay first-run hint (‹ Move wallpaper to align it ›,
+  60% black overlay, dismissed-on-touch + stored flag — official
+  showAlignOverlay), battery-saver banner (makePowerSavingReceiver +
+  the official dialog with Open Settings).
+- APPLY FLOW PARITY: 1 s rate limit, first-apply lockscreen notice
+  (dialog_nolockscreen text), playlist-aware (auto-add when a playlist
+  exists but the service is down), apply/revert long-press dialog with
+  resetToSystemWallpaper.
+- STORE-ON-PAUSE PARITY: properties are stored + pushed to the running
+  service on onPause (official), not on every change; changes apply LIVE
+  via applyWallpaperProperties on every edit (official changeCallback).
+- Process-death guard: an empty WallpaperInfoSparse (lost
+  PreviewRequestHolder) now logs + returns instead of a dead screen.
+
+## B. The property editor (WallpaperPropertyEditor.kt, ground truth:
+   WallpaperProperties PreferenceFragment)
+
+Complete rewrite as a standalone component:
+- LOCALIZED TITLES: customLocalizations (lib.getUserLocalizations) →
+  lib.getLocalization → non-token author text passes through; HTML
+  stripped (Html.fromHtml parity). Cached per properties/localizations
+  pair — getLocalization is JNI and must not run per recomposition.
+  This is why "React to motion" (ui_browse_properties_parallax) and the
+  wec_* "Show color options" group now display their REAL names instead
+  of raw-token heuristics.
+- TYPES: bool → switch; slider → live-applying with precision display;
+  combo → radio dialog with localized entries + current-value summary
+  (ListPreference parity, including the homescreen-scroll warning key);
+  color → full picker (hue slider + SV field + hex + presets —
+  ColorPreferenceCompat parity) with the EXACT official
+  normalizedVec3 ↔ color24 round-trip; textinput → edit dialog;
+  scenetexture → SAF picker with the official ChooseUserTexture mime
+  contract (URI + display name).
+- VISIBILITY: condition "false" entries are never shown; conditions like
+  "wec_e.value" / "== false" drive dependency visibility with the
+  official regex and double-invert rules.
+- NO GYRO: parallax props are dropped and parallax forced to 0
+  (official reloadPreferences).
+- RESET: "Reset Wallpaper Settings" → confirm (Yes/No) → defaults
+  restored + applied (official reset flow).
+- AUDIO: the official initializeWallpaperProperties block — permission
+  prompt/force/"don't ask again", audioprocessing forced off when denied.
+- Slider changes apply continuously (updatesContinuously parity).
+
+## C. Library screen (ground truth: BrowseFragment + content_browse_item)
+
+- SEARCH: live title filter (trim + lowercase contains — official), bar
+  replaces the title while active, closing clears (official collapse).
+- SORT: dropdown with the official four methods (Newest/Oldest/Alpha
+  asc/desc; NEWEST = lastModifiedDate desc default).
+- PIN (user-requested, ours alone): long-press → context sheet with
+  Pin to top / Unpin; pinned items float above every sort (stable within
+  the group), persisted in SharedPreferences; pin marker on the card;
+  delete unpins.
+- CARD PARITY: square thumbnail, title overlaid at the bottom on a 60%
+  black scrim (wallpaper_title_background #99000000), white, 3 lines,
+  5/8 dp padding — the "Scene/Video" subtitle below the name is GONE
+  (the official grid has none). Download progress bar retained
+  (official pbDownload).
+- Context sheet: Add to playlist / Pin / Open workshop page (filename
+  item-id fallback) / Remove. Delete failure logs the official message
+  "Failed deleting cache for <file>".
+
+## D. Logging — copied exactly from the real app
+
+- NEW WeClientLog: byte-for-byte behavior copy of Util$Companion.log —
+  Log.v("WEERR", str) always; when the "Write Errors to Log" setting
+  (general_log_errors) is on, appends to filesDir/logs/applog.txt with
+  format `yyyy-MM-dd'T'HH:mm'Z'` (UTC, minute precision, literal Z),
+  1 MiB truncate-to-zero, synchronized, never throws.
+- WepWawetLogger mirrors ENGINE + CRASH domain entries (INFO+) into
+  WeClientLog — an exported log is indistinguishable from the official
+  client's.
+- Settings → Developer: "Write Errors to Log" (+ "May reduce performance"
+  hint) and "Save Error Log" (exports applog.txt to Downloads —
+  general_settings_export_log parity). The toggle also flips the native
+  engine's setLogToFileEnabled (official wiring).
+- WeClientLogTest: JVM unit tests for the format, the disabled mode, the
+  1 MiB truncation and UTC stamps (testOptions returnDefaultValues added).
+
+## E. Color integration + xray diagnostics
+
+- "Wallpaper Colors integration" now has all FIVE official modes
+  (enabled/disabled/hintdark/hintdarktheme/hintbright with the official
+  labels) — ours shipped only three, so "Suggest Dark Theme" and "Suggest
+  Bright Foreground" were unreachable.
+- XRAY ("the xray is backwards"): the packer's xray patch now logs every
+  sub-patch decision (fired / already-applied / no-match, per shader) into
+  the WEERR pipeline, so the next exported applog.txt shows exactly what
+  the packer did to the user's scene. The patch itself was re-verified
+  against the decompiled ground truth (idempotent, byte-exact for the
+  built-in asset). The scene itself is age-gated on Steam and cannot be
+  pulled from here — the log instrumentation + the engine's own log tail
+  (already in crash reports since 0.8.2) make the next report conclusive.
+
+## F. Other fixes from the sweep
+
+- PlaylistData.mode: the official model carries the playback mode inside
+  the playlist JSON; our port had dropped it (day-of-week 7-item cap was
+  unreachable). Restored + synced (editor + service read the JSON first,
+  legacy pref as fallback).
+- addWallpaperToPlaylist: full official logic (day-of-week cap,
+  computeNewPlaylistItemLength rebalancing).
+- Search bar gets statusBarsPadding (was drawing under the status bar).
+- Version 0.8.3-alpha (121). README rewritten to describe the actual
+  feature set (preview parity, search/sort/pin, official logging, colors
+  modes, optional gyro/mic requirements).
+
+Reminders for future agents:
+  83. Compose parity ports die by the wiring, not the widgets: the views
+      (SceneWallpaperView & co.) had perfect touch/parallax handling all
+      along — the preview SCREEN simply never linked a ParallaxController
+      or AudioRecorder to them. When a feature "doesn't work", grep the
+      official activity for the controller wiring first.
+  84. localizeText/getLocalization is JNI — never call it per
+      recomposition; resolve once per (properties, localizations) and
+      remember the map (the official sets each Preference title once).
+  85. Sensor parity is exact-constant parity: the official gyro parallax
+      registers TYPE_GYROSCOPE (4), NOT TYPE_ROTATION_VECTOR (11) — the
+      values have completely different units.

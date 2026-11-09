@@ -85,7 +85,15 @@ class ParallaxController(private val context: Context) : SensorEventListener {
 
     private fun startSensors() {
         val sm = sensorManager ?: return
-        sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)?.let { sensor ->
+        // v0.8.3 PARITY FIX: the official client registers sensor type 4 —
+        // TYPE_GYROSCOPE — not TYPE_ROTATION_VECTOR (verified in the
+        // decompiled ParallaxController: getDefaultSensor(4) and
+        // onSensorChanged's event.sensor.getType() == 4). The rotation
+        // vector's values are quaternion components ([-1,1] sin half-angles)
+        // while the gyro returns rad/s — the old port fed the engine
+        // completely wrong magnitudes, so gyro parallax barely moved or
+        // felt alien compared to the real app.
+        sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE)?.let { sensor ->
             sm.registerListener(this, sensor, SensorManager.SENSOR_DELAY_UI)
         }
         if (supportsForceInput) startAccel()
@@ -111,7 +119,8 @@ class ParallaxController(private val context: Context) : SensorEventListener {
     override fun onSensorChanged(event: SensorEvent) {
         if (parallaxMode != 1 && parallaxMode != 3) return
         when (event.sensor.type) {
-            Sensor.TYPE_ROTATION_VECTOR -> {
+            // v0.8.3: TYPE_GYROSCOPE (4) — see startSensors for the parity note.
+            Sensor.TYPE_GYROSCOPE -> {
                 if (event.values.size < 2) return
                 val factor = (parallaxStrength * 0.125f) + 0.1f
                 val offset = PointF(event.values[1] * factor, -event.values[0] * factor)

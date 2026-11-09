@@ -55,6 +55,10 @@ object WeEnginePrefs {
     const val PREF_KEY_HAS_SHOWN_ALIGN_OVERLAY = "hasShownAlignOverlay"
     const val PREF_KEY_HAS_SHOWN_LOCKSCREEN_WARNING = "hasShownLockscreenWarning"
 
+    // v0.8.3: the official client's "don't ask again" key for the
+    // audio-responsive permission prompt (Util.PREF_KEY_IGNORE_AUDIO_RESPONSE).
+    const val PREF_KEY_IGNORE_AUDIO_RESPONSE = "ignoreAudioResponse"
+
     /** mpkgs imported via SAF / PC land here (relative to filesDir). */
     const val DOWNLOAD_FOLDER = "downloads/"
 
@@ -243,6 +247,39 @@ object WeEnginePrefs {
     }
 
     fun anyToString(v: Any?): String = v?.toString() ?: ""
+
+    /**
+     * Official color conversion (Util.normalizedVec3ToColor24): parses a
+     * "r g b" normalized vector string into an ARGB int with opaque alpha.
+     * If [v] is already a String it overrides [defaultValue].
+     */
+    fun normalizedVec3ToColor24(v: Any?, defaultValue: String): Int {
+        var source = defaultValue
+        if (v is String) source = v
+        var j = 4278190080L // 0xFF000000
+        var shift = 16
+        for (part in source.split(" ")) {
+            j = j or (minOf(255L, (part.toFloatOrNull() ?: 0f).let { (it * 255f).toLong() }) shl shift)
+            shift -= 8
+        }
+        return j.toInt()
+    }
+
+    /**
+     * Official color conversion (Util.color24ToNormalizedVec3): formats an
+     * ARGB int back into the "r g b" normalized vector string the engine
+     * and PC both use for color properties.
+     */
+    fun color24ToNormalizedVec3(color: Int): String {
+        val sb = StringBuilder()
+        var shift = 16
+        while (shift >= 0) {
+            if (sb.isNotEmpty()) sb.append(' ')
+            sb.append(((color shr shift) and 255) / 255.0f)
+            shift -= 8
+        }
+        return sb.toString()
+    }
 
     fun anyToMatrix(v: Any?, out: FloatArray) {
         val parts = v?.toString()?.trim()?.split(Regex("\\s+")) ?: emptyList()
