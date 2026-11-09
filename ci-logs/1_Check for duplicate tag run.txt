@@ -1,0 +1,55 @@
+﻿2026-11-09T02:15:46.7275834Z Current runner version: '2.338.2'
+2026-11-09T02:15:46.7333273Z ##[group]Runner Image Provisioner
+2026-11-09T02:15:46.7355285Z Hosted Compute Agent
+2026-11-09T02:15:46.7356424Z Version: 20261028.624
+2026-11-09T02:15:46.7357587Z Commit: 54898b74c23fde5556c9b3c3a2290865feef0dfe
+2026-11-09T02:15:46.7358926Z Build Date: 2026-10-28T21:51:42Z
+2026-11-09T02:15:46.7360220Z Worker ID: {17b5525e-fb8c-4cdd-9ca1-d86ca38ed83a}
+2026-11-09T02:15:46.7361829Z Region: centralus
+2026-11-09T02:15:46.7362876Z Cloud: Azure
+2026-11-09T02:15:46.7364117Z ##[endgroup]
+2026-11-09T02:15:46.7366908Z ##[group]Operating System
+2026-11-09T02:15:46.7368103Z Ubuntu
+2026-11-09T02:15:46.7369151Z 24.04.5
+2026-11-09T02:15:46.7370222Z LTS
+2026-11-09T02:15:46.7371174Z ##[endgroup]
+2026-11-09T02:15:46.7372395Z ##[group]Runner Image
+2026-11-09T02:15:46.7373433Z Image: ubuntu-24.04
+2026-11-09T02:15:46.7395012Z Version: 20261101.360.1
+2026-11-09T02:15:46.7397390Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20261101.360/images/ubuntu/Ubuntu2404-Readme.md
+2026-11-09T02:15:46.7400390Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20261101.360
+2026-11-09T02:15:46.7402198Z ##[endgroup]
+2026-11-09T02:15:46.7404659Z ##[group]GITHUB_TOKEN Permissions
+2026-11-09T02:15:46.7407746Z Contents: write
+2026-11-09T02:15:46.7409317Z Metadata: read
+2026-11-09T02:15:46.7410286Z ##[endgroup]
+2026-11-09T02:15:46.7434364Z Secret source: Actions
+2026-11-09T02:15:46.7436212Z Cache mode: write
+2026-11-09T02:15:46.7437910Z Prepare workflow directory
+2026-11-09T02:15:46.8477532Z Prepare all required actions
+2026-11-09T02:15:46.8741692Z Complete job name: Check for duplicate tag run
+2026-11-09T02:15:47.0573309Z ##[group]Run TAG=$(curl -sS -H "Authorization: token ***" \
+2026-11-09T02:15:47.0578399Z [36;1mTAG=$(curl -sS -H "Authorization: token ***" \[0m
+2026-11-09T02:15:47.0579316Z [36;1m  -H "Accept: application/vnd.github+json" \[0m
+2026-11-09T02:15:47.0580399Z [36;1m  "https://api.github.com/repos/687meowmeow/Wallpaper-Suite/tags?per_page=100" | \[0m
+2026-11-09T02:15:47.0581462Z [36;1m  python3 -c "[0m
+2026-11-09T02:15:47.0582084Z [36;1mimport sys, json[0m
+2026-11-09T02:15:47.0582712Z [36;1mtags = json.load(sys.stdin)[0m
+2026-11-09T02:15:47.0583554Z [36;1msha = '214345a6f781cfd1f913f8e6da08b106369d2698'[0m
+2026-11-09T02:15:47.0584743Z [36;1mfor t in tags:[0m
+2026-11-09T02:15:47.0585597Z [36;1m    if t['commit']['sha'] == sha and t['name'].startswith('v'):[0m
+2026-11-09T02:15:47.0586444Z [36;1m        print(t['name'])[0m
+2026-11-09T02:15:47.0587087Z [36;1m        break[0m
+2026-11-09T02:15:47.0587749Z [36;1m" 2>/dev/null || true)[0m
+2026-11-09T02:15:47.0588535Z [36;1mecho "Found tag: '${TAG}'"[0m
+2026-11-09T02:15:47.0589367Z [36;1mif [ "branch" = "branch" ] && [ -n "$TAG" ]; then[0m
+2026-11-09T02:15:47.0590172Z [36;1m  echo "skip=true" >> $GITHUB_OUTPUT[0m
+2026-11-09T02:15:47.0590901Z [36;1melse[0m
+2026-11-09T02:15:47.0591568Z [36;1m  echo "skip=false" >> $GITHUB_OUTPUT[0m
+2026-11-09T02:15:47.0592313Z [36;1mfi[0m
+2026-11-09T02:15:47.0845892Z shell: /usr/bin/bash -e {0}
+2026-11-09T02:15:47.0847532Z ##[endgroup]
+2026-11-09T02:15:47.3843209Z Found tag: ''
+2026-11-09T02:15:47.4067666Z Evaluate and set job outputs
+2026-11-09T02:15:47.4077674Z Set output 'skip'
+2026-11-09T02:15:47.4080089Z Cleaning up orphan processes

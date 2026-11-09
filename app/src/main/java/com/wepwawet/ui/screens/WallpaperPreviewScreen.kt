@@ -48,6 +48,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -312,6 +313,13 @@ fun WallpaperPreviewScreen(
             if (screenHpx > 0f) (statusBarPx / screenHpx).coerceAtLeast(0.04f) else 0.04f
         val clampedMax =
             if (screenHpx > 0f) (1f - navBarPx / screenHpx).coerceAtMost(1f) else 1f
+        // Hoisted out of the nested Box — BoxWithConstraints' `constraints`
+        // is an extension property that cannot be resolved through the
+        // nested composable's content lambda.
+        val screenAspect =
+            if (constraints.maxHeight > 0)
+                constraints.maxWidth.toFloat() / constraints.maxHeight.toFloat()
+            else 1f
 
         // ===================== The renderer =====================
         val configuration = LocalConfiguration.current
@@ -336,9 +344,8 @@ fun WallpaperPreviewScreen(
             // The renderer surface: aspect-matched to the physical screen
             // while "match preview" is on (official updateAspectRatio), or
             // free otherwise.
-            val rendererModifier = if (matchPreview && constraints.maxHeight > 0) {
-                val aspect = constraints.maxWidth.toFloat() / constraints.maxHeight.toFloat()
-                Modifier.fillMaxWidth().aspectRatio(aspect)
+            val rendererModifier = if (matchPreview && screenAspect > 0f) {
+                Modifier.fillMaxWidth().aspectRatio(screenAspect)
             } else {
                 Modifier.fillMaxSize()
             }
@@ -920,10 +927,13 @@ fun WallpaperPreviewScreen(
             }
         }
 
-        // AudioRecorder listener → engine
+        // AudioRecorder listener → engine (Kotlin interface — object
+        // expression, not SAM syntax)
         DisposableEffect(Unit) {
-            audioRecorder.listener = AudioRecorder.Listener { fft ->
-                controls?.sendAudioData(fft)
+            audioRecorder.listener = object : AudioRecorder.Listener {
+                override fun onAudioData(fft: FloatArray) {
+                    controls?.sendAudioData(fft)
+                }
             }
             onDispose {
                 audioRecorder.stopAudioListener()

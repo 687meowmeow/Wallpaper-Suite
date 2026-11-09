@@ -613,7 +613,7 @@ fun WallpaperPropertyEditor(
 
 /**
  * The `scenetexture` row: opens the system document picker with the
- * official ChooseUserTexture contract (video/* + the image types,
+ * official ChooseUserTexture contract (all video and image mime types,
  * EXCLUDE_SELF) and reports the picked URI + display name.
  */
 @Composable

@@ -1,0 +1,33 @@
+﻿2026-11-09T02:16:46.4962107Z ##[group]Run actions/setup-java@v4
+2026-11-09T02:16:46.4962312Z with:
+2026-11-09T02:16:46.4962432Z   distribution: temurin
+2026-11-09T02:16:46.4962563Z   java-version: 17
+2026-11-09T02:16:46.4962685Z   java-package: jdk
+2026-11-09T02:16:46.4962809Z   check-latest: false
+2026-11-09T02:16:46.4962933Z   server-id: github
+2026-11-09T02:16:46.4963061Z   server-username: GITHUB_ACTOR
+2026-11-09T02:16:46.4963214Z   server-password: GITHUB_TOKEN
+2026-11-09T02:16:46.4963362Z   overwrite-settings: true
+2026-11-09T02:16:46.4963499Z   job-status: success
+2026-11-09T02:16:46.4964837Z   token: ***
+2026-11-09T02:16:46.4964955Z env:
+2026-11-09T02:16:46.4965079Z   ANDROID_HOME: /usr/local/lib/android/sdk
+2026-11-09T02:16:46.4965253Z   ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+2026-11-09T02:16:46.4965421Z ##[endgroup]
+2026-11-09T02:16:46.6127580Z ##[warning]setup-java v4 is deprecated and will no longer receive updates. Please migrate to actions/setup-java@v5.
+2026-11-09T02:16:46.6134133Z ##[group]Installed distributions
+2026-11-09T02:16:46.6335378Z Resolved Java 17.0.21+9 from tool-cache
+2026-11-09T02:16:46.6335994Z Setting Java 17.0.21+9 as the default
+2026-11-09T02:16:46.6342424Z (node:2450) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+2026-11-09T02:16:46.6343442Z (Use `node --trace-deprecation ...` to show where the warning was created)
+2026-11-09T02:16:46.6344868Z Creating toolchains.xml for JDK version 17 from temurin
+2026-11-09T02:16:46.6390932Z Writing to /home/runner/.m2/toolchains.xml
+2026-11-09T02:16:46.6391710Z 
+2026-11-09T02:16:46.6392265Z Java configuration:
+2026-11-09T02:16:46.6392712Z   Distribution: temurin
+2026-11-09T02:16:46.6393394Z   Version: 17.0.21+9
+2026-11-09T02:16:46.6394089Z   Path: /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17.0.21-9/x64
+2026-11-09T02:16:46.6396976Z 
+2026-11-09T02:16:46.6397582Z ##[endgroup]
+2026-11-09T02:16:46.6403362Z Creating settings.xml with server-id: github
+2026-11-09T02:16:46.6510981Z Writing to /home/runner/.m2/settings.xml

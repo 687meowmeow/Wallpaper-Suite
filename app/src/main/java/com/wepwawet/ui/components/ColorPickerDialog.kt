@@ -57,13 +57,19 @@ fun ColorPickerDialog(
     onDismiss: () -> Unit,
     onPick: (Color) -> Unit,
 ) {
-    var hue by remember { mutableStateOf(initialHueOf(initialColor)) }
-    var sat by remember { mutableStateOf(initialColor.saturation) }
-    var value by remember { mutableStateOf(initialColor.value) }
+    // Compose's Color has no saturation/brightness accessors (and `.value`
+    // is its ULong packing!) — resolve the initial HSV through the
+    // framework converter once.
+    val initialHsv = remember {
+        FloatArray(3).also { android.graphics.Color.colorToHSV(initialColor.toArgb(), it) }
+    }
+    var hue by remember { mutableStateOf(initialHsv[0]) }
+    var sat by remember { mutableStateOf(initialHsv[1]) }
+    var brightness by remember { mutableStateOf(initialHsv[2]) }
     var hexDraft by remember { mutableStateOf<String?>(null) }
 
     // The hex field overrides the HSV state only while it parses.
-    val current = (hexDraft?.let { parseHex(it) }) ?: hsvColor(hue, sat, value)
+    val current = (hexDraft?.let { parseHex(it) }) ?: hsvColor(hue, sat, brightness)
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -80,21 +86,21 @@ fun ColorPickerDialog(
                         .pointerInput(Unit) {
                             detectTapGestures { offset ->
                                 applySv(offset.x, offset.y, size.width, size.height) { s, v ->
-                                    sat = s; value = v; hexDraft = null
+                                    sat = s; brightness = v; hexDraft = null
                                 }
                             }
                         }
                         .pointerInput(Unit) {
                             detectDragGestures { change, _ ->
                                 applySv(change.position.x, change.position.y, size.width, size.height) { s, v ->
-                                    sat = s; value = v; hexDraft = null
+                                    sat = s; brightness = v; hexDraft = null
                                 }
                             }
                         },
                 ) {
                     drawSvField(hue)
                     val cx = sat * size.width
-                    val cy = (1f - value) * size.height
+                    val cy = (1f - brightness) * size.height
                     drawCircle(Color.White, radius = 10.dp.toPx(), center = Offset(cx, cy))
                     drawCircle(
                         Color.Black,
@@ -176,9 +182,12 @@ fun ColorPickerDialog(
                                 .background(c)
                                 .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape)
                                 .clickable {
-                                    hue = initialHueOf(c)
-                                    sat = c.saturation
-                                    value = c.value
+                                    val hsv = FloatArray(3).also {
+                                        android.graphics.Color.colorToHSV(c.toArgb(), it)
+                                    }
+                                    hue = hsv[0]
+                                    sat = hsv[1]
+                                    brightness = hsv[2]
                                     hexDraft = null
                                 },
                         )
@@ -210,14 +219,6 @@ private fun applySv(
 
 private fun hsvColor(h: Float, s: Float, v: Float): Color =
     Color(android.graphics.Color.HSVToColor(floatArrayOf(h, s, v)))
-
-private fun initialHueOf(c: Color): Float {
-    val hsv = FloatArray(3)
-    android.graphics.Color.RGBToHSV(
-        (c.red * 255).toInt(), (c.green * 255).toInt(), (c.blue * 255).toInt(), hsv,
-    )
-    return hsv[0]
-}
 
 private fun colorHexOf(c: Color): String {
     val r = (c.red * 255).toInt().coerceIn(0, 255)
