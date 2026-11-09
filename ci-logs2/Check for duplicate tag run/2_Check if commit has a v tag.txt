@@ -1,0 +1,22 @@
+﻿2026-11-09T02:24:47.1187969Z ##[group]Run TAG=$(curl -sS -H "Authorization: token ***" \
+2026-11-09T02:24:47.1194324Z [36;1mTAG=$(curl -sS -H "Authorization: token ***" \[0m
+2026-11-09T02:24:47.1195839Z [36;1m  -H "Accept: application/vnd.github+json" \[0m
+2026-11-09T02:24:47.1197506Z [36;1m  "https://api.github.com/repos/687meowmeow/Wallpaper-Suite/tags?per_page=100" | \[0m
+2026-11-09T02:24:47.1198878Z [36;1m  python3 -c "[0m
+2026-11-09T02:24:47.1199731Z [36;1mimport sys, json[0m
+2026-11-09T02:24:47.1200573Z [36;1mtags = json.load(sys.stdin)[0m
+2026-11-09T02:24:47.1201649Z [36;1msha = 'a59ee9047603d73b725fbc3a587d49a5d975656f'[0m
+2026-11-09T02:24:47.1202769Z [36;1mfor t in tags:[0m
+2026-11-09T02:24:47.1203775Z [36;1m    if t['commit']['sha'] == sha and t['name'].startswith('v'):[0m
+2026-11-09T02:24:47.1204844Z [36;1m        print(t['name'])[0m
+2026-11-09T02:24:47.1205842Z [36;1m        break[0m
+2026-11-09T02:24:47.1206647Z [36;1m" 2>/dev/null || true)[0m
+2026-11-09T02:24:47.1207480Z [36;1mecho "Found tag: '${TAG}'"[0m
+2026-11-09T02:24:47.1208655Z [36;1mif [ "branch" = "branch" ] && [ -n "$TAG" ]; then[0m
+2026-11-09T02:24:47.1209701Z [36;1m  echo "skip=true" >> $GITHUB_OUTPUT[0m
+2026-11-09T02:24:47.1210609Z [36;1melse[0m
+2026-11-09T02:24:47.1211395Z [36;1m  echo "skip=false" >> $GITHUB_OUTPUT[0m
+2026-11-09T02:24:47.1212383Z [36;1mfi[0m
+2026-11-09T02:24:47.1761763Z shell: /usr/bin/bash -e {0}
+2026-11-09T02:24:47.1763129Z ##[endgroup]
+2026-11-09T02:24:47.6326130Z Found tag: ''

@@ -1,0 +1,89 @@
+﻿2026-11-09T02:25:50.7878317Z ##[group]Run gradle/actions/setup-gradle@v4
+2026-11-09T02:25:50.7878695Z with:
+2026-11-09T02:25:50.7878933Z   cache-disabled: false
+2026-11-09T02:25:50.7879207Z   cache-read-only: true
+2026-11-09T02:25:50.7879476Z   cache-write-only: false
+2026-11-09T02:25:50.7879773Z   cache-overwrite-existing: false
+2026-11-09T02:25:50.7880105Z   cache-cleanup: on-success
+2026-11-09T02:25:50.7880447Z   gradle-home-cache-includes: caches
+notifications
+
+2026-11-09T02:25:50.7880844Z   add-job-summary: always
+2026-11-09T02:25:50.7881168Z   add-job-summary-as-pr-comment: never
+2026-11-09T02:25:50.7881505Z   dependency-graph: disabled
+2026-11-09T02:25:50.7881875Z   dependency-graph-report-dir: dependency-graph-reports
+2026-11-09T02:25:50.7882355Z   dependency-graph-continue-on-failure: true
+2026-11-09T02:25:50.7882719Z   build-scan-publish: false
+2026-11-09T02:25:50.7883276Z   validate-wrappers: true
+2026-11-09T02:25:50.7883656Z   allow-snapshot-wrappers: false
+2026-11-09T02:25:50.7884012Z   gradle-home-cache-strict-match: false
+2026-11-09T02:25:50.7884530Z   workflow-job-context: null
+2026-11-09T02:25:50.7888661Z   github-token: ***
+2026-11-09T02:25:50.7888944Z env:
+2026-11-09T02:25:50.7889213Z   ANDROID_HOME: /usr/local/lib/android/sdk
+2026-11-09T02:25:50.7889603Z   ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+2026-11-09T02:25:50.7890107Z   JAVA_HOME: /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17.0.21-9/x64
+2026-11-09T02:25:50.7890735Z   JAVA_HOME_17_X64: /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17.0.21-9/x64
+2026-11-09T02:25:50.7891240Z ##[endgroup]
+2026-11-09T02:25:51.2429029Z Merged default JDK locations into /home/runner/.m2/toolchains.xml
+2026-11-09T02:25:51.2447284Z ##[group]Restore Gradle state from cache
+2026-11-09T02:25:51.3184355Z Cache hit for restore-key: gradle-home-v1|Linux-X64|build-apk[157c5d146a1d1cea76cee9f66dd0f390]-28588c04c74bc4f98442dc47dc5e58cbe1bf7e0e
+2026-11-09T02:25:51.9933949Z Received 122944991 of 122944991 (100.0%), 189.1 MBs/sec
+2026-11-09T02:25:51.9935024Z Cache Size: ~117 MB (122944991 B)
+2026-11-09T02:25:51.9962702Z [command]/usr/bin/tar -xf /home/runner/work/_temp/42e3b117-3c5c-481b-81df-fe26b100a35c/cache.tzst -P -C /home/runner/work/Wallpaper-Suite/Wallpaper-Suite --use-compress-program unzstd
+2026-11-09T02:25:52.3072909Z Cache restored successfully
+2026-11-09T02:25:52.3130822Z Restored cache entry with key gradle-home-v1|Linux-X64|build-apk[243930cc7d7e21d376c3e67f20638520]-a59ee9047603d73b725fbc3a587d49a5d975656f to /home/runner/.gradle/caches,/home/runner/.gradle/notifications,/home/runner/.gradle/.setup-gradle in 1069ms
+2026-11-09T02:25:52.4298290Z Cache hit for: gradle-groovy-dsl-v1-140d87178a29ca44c37a6bd79d6df6d0
+2026-11-09T02:25:52.4327652Z Cache hit for: gradle-generated-gradle-jars-v1-2745217bed79d67c9856a7ed393e27bf
+2026-11-09T02:25:52.4409808Z Cache hit for: gradle-wrapper-zips-v1-ffeb4a2ba659779670a5133436ff6d73
+2026-11-09T02:25:52.4437818Z Cache hit for: gradle-transforms-v1-0b3bfe4b97054f5c4ea3702da6b456b8
+2026-11-09T02:25:52.4441140Z Cache hit for: gradle-instrumented-jars-v1-dfd1997bbb19566ecfb068c2e0454f91
+2026-11-09T02:25:52.4510751Z Cache hit for: gradle-kotlin-dsl-v1-cd11dc82c6e51d9c6254821bebe774d9
+2026-11-09T02:25:52.4542013Z Cache hit for: gradle-dependencies-v1-92de9d07c65fffdf35fb805275482b9b
+2026-11-09T02:25:52.5802649Z Received 136385 of 136385 (100.0%), 1.3 MBs/sec
+2026-11-09T02:25:52.5827412Z Cache Size: ~0 MB (136385 B)
+2026-11-09T02:25:52.5913725Z Received 193469 of 193469 (100.0%), 1.8 MBs/sec
+2026-11-09T02:25:52.5927498Z Cache Size: ~0 MB (193469 B)
+2026-11-09T02:25:52.6867831Z Received 122726 of 122726 (100.0%), 0.7 MBs/sec
+2026-11-09T02:25:52.6927418Z Cache Size: ~0 MB (122726 B)
+2026-11-09T02:25:52.9920656Z [command]/usr/bin/tar -xf /home/runner/work/_temp/b6459bee-7d22-4416-b3a2-538c4cb6ec99/cache.tzst -P -C /home/runner/work/Wallpaper-Suite/Wallpaper-Suite --use-compress-program unzstd
+2026-11-09T02:25:53.0720888Z [command]/usr/bin/tar -xf /home/runner/work/_temp/e872b362-d8eb-44d4-a100-acf25119bd51/cache.tzst -P -C /home/runner/work/Wallpaper-Suite/Wallpaper-Suite --use-compress-program unzstd
+2026-11-09T02:25:53.1268867Z Cache restored successfully
+2026-11-09T02:25:53.1272819Z Restored cache entry with key gradle-kotlin-dsl-v1-cd11dc82c6e51d9c6254821bebe774d9 to /home/runner/.gradle/caches/*/kotlin-dsl/accessors/*/,/home/runner/.gradle/caches/*/kotlin-dsl/scripts/*/ in 812ms
+2026-11-09T02:25:53.1740325Z Cache restored successfully
+2026-11-09T02:25:53.1746450Z Restored cache entry with key gradle-groovy-dsl-v1-140d87178a29ca44c37a6bd79d6df6d0 to /home/runner/.gradle/caches/*/groovy-dsl/*/ in 859ms
+2026-11-09T02:25:53.3276182Z [command]/usr/bin/tar -xf /home/runner/work/_temp/cde437e4-5605-492d-b7a1-9ba3249f46dc/cache.tzst -P -C /home/runner/work/Wallpaper-Suite/Wallpaper-Suite --use-compress-program unzstd
+2026-11-09T02:25:53.4519016Z Cache restored successfully
+2026-11-09T02:25:53.5015140Z Received 35514695 of 39708999 (89.4%), 33.5 MBs/sec
+2026-11-09T02:25:53.5021353Z Received 46137344 of 193651489 (23.8%), 43.7 MBs/sec
+2026-11-09T02:25:53.5032392Z Restored cache entry with key gradle-instrumented-jars-v1-dfd1997bbb19566ecfb068c2e0454f91 to /home/runner/.gradle/caches/jars-*/*/ in 1187ms
+2026-11-09T02:25:53.5429787Z Received 50331648 of 136024659 (37.0%), 46.2 MBs/sec
+2026-11-09T02:25:53.5431476Z Received 71303168 of 388109151 (18.4%), 66.1 MBs/sec
+2026-11-09T02:25:53.7013864Z Received 39708999 of 39708999 (100.0%), 31.2 MBs/sec
+2026-11-09T02:25:53.7016796Z Cache Size: ~38 MB (39708999 B)
+2026-11-09T02:25:54.0788828Z [command]/usr/bin/tar -xf /home/runner/work/_temp/7ed3412f-f3ff-4afb-83c9-fef39926af4f/cache.tzst -P -C /home/runner/work/Wallpaper-Suite/Wallpaper-Suite --use-compress-program unzstd
+2026-11-09T02:25:54.4748617Z Received 136024659 of 136024659 (100.0%), 65.8 MBs/sec
+2026-11-09T02:25:54.4761170Z Cache Size: ~130 MB (136024659 B)
+2026-11-09T02:25:54.5048328Z Received 142606336 of 193651489 (73.6%), 67.7 MBs/sec
+2026-11-09T02:25:54.5607833Z Received 209715200 of 388109151 (54.0%), 97.8 MBs/sec
+2026-11-09T02:25:54.8391463Z Cache restored successfully
+2026-11-09T02:25:54.8438003Z Restored cache entry with key gradle-generated-gradle-jars-v1-2745217bed79d67c9856a7ed393e27bf to /home/runner/.gradle/caches/8.10.2/generated-gradle-jars/gradle-api-8.10.2.jar in 2528ms
+2026-11-09T02:25:54.8628308Z Received 193651489 of 193651489 (100.0%), 78.0 MBs/sec
+2026-11-09T02:25:54.8629241Z Cache Size: ~185 MB (193651489 B)
+2026-11-09T02:25:54.8630693Z [command]/usr/bin/tar -xf /home/runner/work/_temp/5a079e17-0a17-46c1-85d3-8e4c46c07b3d/cache.tzst -P -C /home/runner/work/Wallpaper-Suite/Wallpaper-Suite --use-compress-program unzstd
+2026-11-09T02:25:54.8905486Z [command]/usr/bin/tar -xf /home/runner/work/_temp/5db3dbd5-f9bf-4f59-aff4-6f7676bbe0dc/cache.tzst -P -C /home/runner/work/Wallpaper-Suite/Wallpaper-Suite --use-compress-program unzstd
+2026-11-09T02:25:55.4949483Z Cache restored successfully
+2026-11-09T02:25:55.5108737Z Restored cache entry with key gradle-wrapper-zips-v1-ffeb4a2ba659779670a5133436ff6d73 to /home/runner/.gradle/wrapper/dists/gradle-8.10.2-bin/a04bxjujx95o3nb99gddekhwo in 3196ms
+2026-11-09T02:25:55.5607764Z Received 377487360 of 388109151 (97.3%), 118.2 MBs/sec
+2026-11-09T02:25:55.7370170Z Received 388109151 of 388109151 (100.0%), 114.8 MBs/sec
+2026-11-09T02:25:55.7371219Z Cache Size: ~370 MB (388109151 B)
+2026-11-09T02:25:55.7635606Z [command]/usr/bin/tar -xf /home/runner/work/_temp/854298c5-d7cc-46d3-9cd7-ceebd535d105/cache.tzst -P -C /home/runner/work/Wallpaper-Suite/Wallpaper-Suite --use-compress-program unzstd
+2026-11-09T02:26:04.1863004Z Cache restored successfully
+2026-11-09T02:26:04.3091917Z Restored cache entry with key gradle-dependencies-v1-92de9d07c65fffdf35fb805275482b9b to /home/runner/.gradle/caches/modules-*/files-*/*/*/*/* in 11994ms
+2026-11-09T02:26:06.0001923Z Cache restored successfully
+2026-11-09T02:26:06.0503400Z Restored cache entry with key gradle-transforms-v1-0b3bfe4b97054f5c4ea3702da6b456b8 to /home/runner/.gradle/caches/transforms-4/*/,/home/runner/.gradle/caches/*/transforms/*/ in 13734ms
+2026-11-09T02:26:06.2060040Z ##[endgroup]
+2026-11-09T02:26:06.2200957Z ##[group]All Gradle Wrapper jars are valid
+2026-11-09T02:26:06.2202798Z ✓ Found known Gradle Wrapper JAR files:
+2026-11-09T02:26:06.2203543Z   2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046 gradle/wrapper/gradle-wrapper.jar
+2026-11-09T02:26:06.2204271Z ##[endgroup]
