@@ -80,7 +80,6 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import com.google.gson.Gson
 import com.wepwawet.engine.EngineLibrary
-import com.wepwawet.log.WeClientLog
 import com.wepwawet.log.WepWawetLogger
 import com.wepwawet.ui.components.WallpaperPropertyEditor
 import io.wallpaperengine.weclient.WEWallpaperService
@@ -285,7 +284,28 @@ fun WallpaperPreviewScreen(
         val c = controls ?: return
         loaded = true
         propertiesRevision++
-        showBackground = false
+        // v0.8.6: DON'T hide the static preview bitmap here — the GL
+        // surface hasn't drawn its first frame yet (the load callback
+        // fires at the end of loadScene, BEFORE the first onDrawFrame).
+        // Hiding the bitmap here showed a black screen for ~100-500ms
+        // until the first GL frame was drawn (the "preview is black"
+        // bug). Instead, register a first-frame callback that hides the
+        // bitmap once the GL surface has actually drawn something. For
+        // video wallpapers (which don't have a first-frame callback), we
+        // fall back to hiding the bitmap immediately — videos display
+        // their first frame quickly via the media player.
+        val sceneView = c as? io.wallpaperengine.weviews.SceneWallpaperView
+        if (sceneView != null) {
+            sceneView.setFirstFrameCallback(Runnable {
+                WepWawetLogger.engine("Preview: first GL frame drawn — hiding static preview")
+                showBackground = false
+            })
+        } else {
+            // Video wallpaper — no first-frame callback. Hide the bitmap
+            // immediately (the video player's first frame appears within
+            // a frame or two of the load callback).
+            showBackground = false
+        }
         parallaxController.applyProperties(c.getWallpaperProperties())
         // The official relinkPreferences bridge: re-apply any texture picked
         // while the SAF picker was open to the freshly rebuilt property map
@@ -809,10 +829,16 @@ fun WallpaperPreviewScreen(
                 WeEnginePrefs.readGeneralSettings(context)
             }
             c.setGeneralSettings(general)
-            // official: engine file logging follows the general setting
+            // v0.8.6: ensure the engine's log-to-file is on during preview
+            // too (so shader compile errors / texture load failures during
+            // preview are captured by EngineLogTailer and show up in the
+            // in-app Logs screen). The wallpaper service sets this in
+            // onCreate, but the preview runs in the activity — the engine
+            // instance is shared (singleton), so this is a no-op if already
+            // on, and a one-time enable if the user opens preview before
+            // ever starting the wallpaper service.
             runCatching {
-                EngineLibrary.sceneLib(context).setLogToFileEnabled(
-                    WeClientLog.isLogToFileEnabled())
+                EngineLibrary.sceneLib(context).setLogToFileEnabled(true)
             }
             c.setLoadCallback { onLoaded() }
             // static preview bitmap for the loading fade

@@ -477,16 +477,21 @@ class WorkshopRepository constructor(
                 "filtered_out" to (items.size - filteredItems.size),
                 "total_items" to _browseItems.value.size)
         } catch (e: CancellationException) {
-            // Coroutine cancellation (e.g., user navigated away from the
-            // WorkshopBrowserScreen while loadNextPage was in flight). MUST
-            // be re-thrown — swallowing it would break structured concurrency
-            // and would also leave the browseState stuck on Loading(page).
-            //
-            // The previous code (catch Exception) put BrowseState.Error and
-            // logged LeftCompositionCancellationException as a warning, which
-            // polluted the logs and showed a fake error state to the user.
+            // Coroutine cancellation. v0.8.5: with the appScope-launch fix
+            // in WorkshopBrowserScreen, this should only fire on explicit
+            // cancel (e.g., a new startBrowse supersedes the old one).
+            // MUST be re-thrown — swallowing it would break structured
+            // concurrency. The state is reset to Loaded (with whatever
+            // items were already fetched) so the UI doesn't get stuck on
+            // an infinite "Loading…" spinner — a cancelled load leaves
+            // the previously-loaded items visible and the user can retry.
             WepWawetLogger.workshopDebug("loadNextPage cancelled (coroutine scope disposed)",
                 "page" to currentPage)
+            if (_browseItems.value.isNotEmpty()) {
+                _browseState.value = BrowseState.Loaded(currentPage, hasMore)
+            } else {
+                _browseState.value = BrowseState.Idle
+            }
             throw e
         } catch (e: Exception) {
             _browseState.value = BrowseState.Error(e.message ?: "Unknown error", currentPage)
@@ -873,8 +878,14 @@ class WorkshopRepository constructor(
                 "served_by" to servedBy)
         } catch (e: CancellationException) {
             // See loadNextPageLocked for rationale — cancellation must propagate.
+            // v0.8.5: reset the state so the UI doesn't get stuck on Loading.
             WepWawetLogger.workshopDebug("loadNextSearchPage cancelled (coroutine scope disposed)",
                 "page" to currentSearchPage)
+            if (_searchItems.value.isNotEmpty()) {
+                _searchState.value = BrowseState.Loaded(currentSearchPage, searchHasMore)
+            } else {
+                _searchState.value = BrowseState.Idle
+            }
             throw e
         } catch (e: Exception) {
             _searchState.value = BrowseState.Error(e.message ?: "Unknown error", currentSearchPage)

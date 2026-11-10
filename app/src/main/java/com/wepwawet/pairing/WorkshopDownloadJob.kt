@@ -197,6 +197,14 @@ object WorkshopDownloadJob {
     //     phase transitions as the detail screen). ===
     private fun onDownloadStarted(item: WorkshopItemTyped) {
         com.wepwawet.data.DownloadManager.startDownload(item)
+        // v0.8.6: start the foreground DownloadService so the download
+        // survives the app being backgrounded and the user sees a sticky
+        // progress notification. The service auto-stops when the active
+        // downloads map becomes empty.
+        runCatching {
+            com.wepwawet.pairing.DownloadService.startForDownload(
+                com.wepwawet.WepWawetApplication.instance)
+        }
     }
 
     /**

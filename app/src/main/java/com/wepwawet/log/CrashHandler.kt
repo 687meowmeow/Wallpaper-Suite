@@ -171,11 +171,15 @@ class CrashHandler private constructor(
         sb.append("\n--- Thread dump (via /proc/self/task) ---\n")
         runCatching { dumpTopThreads(sb) }
 
-        // v0.8.2: the native engine (libscenejni.so) writes its own log to
-        // filesDir/logs/applog.txt when log-to-file is enabled — scene load
-        // failures (missing script assets, shader compile errors, texture
-        // problems) are only visible there. Append its tail so every crash
-        // report carries the engine's side of the story.
+        // v0.8.6: re-append the native engine's own log tail. The engine
+        // (libscenejni.so) writes shader compile errors, texture load
+        // failures and scene-init diagnostics to
+        // filesDir/logs/applog.txt — these are usually the smoking gun for
+        // "wallpaper loads but renders black" crashes. WepWawetLogger's
+        // EngineLogTailer ALSO feeds these lines into the main ring buffer
+        // (so they show up in the --- Recent log entries --- section above),
+        // but the dedicated tail here is a safety net in case the tailer
+        // hadn't caught up yet at crash time.
         runCatching { appendEngineLogTail(sb) }
 
         sb.append("\n--- /proc/self/maps (first 50 lines) ---\n")
@@ -312,14 +316,19 @@ class CrashHandler private constructor(
 
     /**
      * Appends the tail of the native engine's own log file
-     * (filesDir/logs/applog.txt — the official client's LOG_RELATIVE_PATH)
-     * to the crash report. The engine only writes it while its log-to-file
-     * setting is on; when the file is absent we note that and move on.
+     * (filesDir/logs/applog.txt) to the crash report. The engine writes
+     * shader compile errors, texture load failures and scene-init
+     * diagnostics there — usually the smoking gun for "wallpaper loads
+     * but renders black" crashes.
+     *
+     * v0.8.6: restored (was removed in v0.8.5 along with the engine
+     * log-to-file toggle; both are back so engine diagnostics survive
+     * crashes again).
      */
     private fun appendEngineLogTail(sb: StringBuilder) {
         val engineLog = java.io.File(appContext.filesDir, "logs/applog.txt")
         if (!engineLog.exists() || engineLog.length() == 0L) {
-            sb.append("\n--- Engine log ---\n(not present — engine log-to-file is off or nothing was logged)\n")
+            sb.append("\n--- Engine log ---\n(not present — engine hasn't written anything yet)\n")
             return
         }
         // Read at most the last 96 KB, keep the last 300 lines.

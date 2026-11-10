@@ -139,29 +139,23 @@ object WepWawetLogger {
             )
             val verboseLog = settingsPrefs.getBoolean(SETTINGS_KEY_VERBOSE_LOG, true)
             minLevel = if (verboseLog) Level.TRACE else Level.WARN
-            // v0.8.4: the WE engine logging is INTEGRATED into this logger —
-            // one system, one switch. The official-format file sink
-            // (filesDir/logs/applog.txt, WEERR logcat tag — the real
-            // client's exact format) and the native engine's own log output
-            // both follow the app's VERBOSE toggle instead of a separate
-            // "Write Errors to Log" setting.
-            WeClientLog.setLogToFile(context, verboseLog)
-            // Keep the engine-side general setting in sync (the wallpaper
-            // service and the preview read general_log_errors to flip the
-            // NATIVE engine's own log output) so both sinks follow the
-            // same single switch. init() runs in Application.onCreate,
-            // before any engine starts.
-            runCatching {
-                io.wallpaperengine.weclient.WeEnginePrefs.storeBoolean(
-                    context,
-                    io.wallpaperengine.weclient.WallpaperProperties.GENERAL_PROP_LOG_ERRORS,
-                    verboseLog)
-            }
+            // v0.8.6: the engine's own log-to-file is re-enabled in
+            // WEWallpaperService.onCreate (lib.setLogToFileEnabled(true)).
+            // The EngineLogTailer (started just below) watches
+            // filesDir/logs/applog.txt and feeds new lines into this
+            // logger as ENGINE-domain entries — so the engine's diagnostics
+            // appear automatically in the in-app Logs screen, no manual
+            // export needed. The previous v0.8.5 change disabled the
+            // engine log file entirely and lost all native-side
+            // diagnostics (shader compile errors, texture load failures).
         }
-        // v0.8.3: the official client's "Write Errors to Log" setting
-        // (general_log_errors) was removed in v0.8.4 — the engine logging is
-        // integrated into the app's main logging now, and this init block no
-        // longer reads it (the verbose toggle above owns the file sink).
+        // v0.8.6: start the engine log tailer. Best-effort — wrap in
+        // runCatching so a tailer failure can never block logger init.
+        runCatching {
+            EngineLogTailer.start(context)
+        }.onFailure { t ->
+            android.util.Log.e("WepWawetLogger", "EngineLogTailer.start failed", t)
+        }
         // WorkManager scheduling — wrap in try-catch. WorkManager.getInstance() can throw
         // IllegalStateException if the on-demand initializer is misconfigured, and we don't
         // want a WorkManager init failure to crash the app on boot. The in-memory ring
@@ -204,18 +198,10 @@ object WepWawetLogger {
      */
     fun setVerbose(enabled: Boolean) {
         minLevel = if (enabled) Level.TRACE else Level.WARN
-        // v0.8.4: one switch for everything — the verbose toggle also drives
-        // the official-format engine log file (WEERR / applog.txt), so the
-        // Wallpaper Engine logging is part of the app's main logging system
-        // instead of its own separately-toggled thing. setLogToFile derives
-        // the file path too (a bare setLogToFileEnabled after an
-        // initialized-off state would leave a null path and never write).
-        val ctx = appContextRef
-        if (ctx != null) {
-            WeClientLog.setLogToFile(ctx, enabled)
-        } else {
-            WeClientLog.setLogToFileEnabled(enabled)
-        }
+        // v0.8.5: one switch, one log — the verbose toggle only adjusts the
+        // main logger's level now. There is no separate engine log file to
+        // keep in sync (the WE engine layer logs through the ENGINE domain
+        // of this very logger).
     }
 
     // ====== Convenience entry points per domain ======
@@ -308,19 +294,6 @@ object WepWawetLogger {
 
         // Android logcat (cheap, off-thread)
         androidLog(domain, level, message, contextStr(context), exception)
-
-        // v0.8.3: mirror the wallpaper-relevant domains (ENGINE + CRASH) into
-        // the official client's logging pipeline — logcat tag WEERR plus the
-        // applog.txt file with the real app's exact timestamp format — so a
-        // log exported from our app reads exactly like one from the official
-        // client (the user's explicit request). INFO+ only: DEBUG entries are
-        // verbose-only chatter that would drown the file.
-        if (domain == Domain.ENGINE || domain == Domain.CRASH) {
-            val ctx = contextStr(context)
-            WeClientLog.log(
-                "${domain.tag}: $message" + if (ctx.isBlank()) "" else " $ctx"
-            )
-        }
     }
 
     fun snapshot(): List<LogEntry> = synchronized(ringBuffer) { ringBuffer.toList() }

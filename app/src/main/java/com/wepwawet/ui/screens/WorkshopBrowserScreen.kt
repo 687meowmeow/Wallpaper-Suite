@@ -64,7 +64,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -200,7 +199,10 @@ fun WorkshopBrowserScreen(
     val searchState by repo.searchState.collectAsState()
     val isRefreshing by repo.isRefreshing.collectAsState()
     val creatorNames by repo.creatorNames.collectAsState()
-    val scope = rememberCoroutineScope()
+    // v0.8.6: rememberCoroutineScope removed — all repo calls now launch
+    // on WepWawetApplication.appScope so they survive composition disposal
+    // (the 5-second JavaSteam auth was being cancelled mid-flight by
+    // LeftCompositionCancellation).
 
     val isCreatorMode = creatorSteamId != null
 
@@ -445,6 +447,17 @@ fun WorkshopBrowserScreen(
     // navigation), causing a spurious startBrowse on every return from
     // detail. Now reads from repo.lastStartBrowseFilter (singleton, hoisted
     // to WorkshopRepository so it survives navigation).
+    //
+    // v0.8.5 BUG: the workshop failed to load on first open because the
+    // 5-second JavaSteam auth was interrupted by LeftCompositionCancellation
+    // — the LaunchedEffect's coroutine scope was disposed mid-auth (any
+    // transient recomposition that left the composable's window could
+    // trigger this), cancelling the in-flight queryFiles RPC and leaving
+    // browseState stuck on Loading forever. The user had to close and
+    // reopen the workshop to recover. Fix: launch startBrowse/startSearch
+    // on WepWawetApplication.appScope so the browse survives composition
+    // disposal. The LaunchedEffect just fires the launch and immediately
+    // returns — it's no longer the parent of the long-running coroutine.
     LaunchedEffect(Unit) {
         snapshotFlow {
             if (filterLoaded) currentFilter() else null
@@ -466,7 +479,12 @@ fun WorkshopBrowserScreen(
                             "excluded_tags" to filter.excludedTags.joinToString(","),
                             "creator_steam_id" to (creatorSteamId ?: "none"),
                         )
-                        repo.startSearch(currentQuery, filter)
+                        // v0.8.5: launch on appScope so the search survives
+                        // composition disposal (the JavaSteam auth takes 5+
+                        // seconds and was being cancelled mid-flight).
+                        com.wepwawet.WepWawetApplication.appScope.launch {
+                            repo.startSearch(currentQuery, filter)
+                        }
                     } else {
                         WepWawetLogger.workshop("filter_changed restart_browse",
                             "sort" to sort.name, "trend_days" to sort.trendDays,
@@ -479,7 +497,12 @@ fun WorkshopBrowserScreen(
                             updateQuery("")
                             repo.clearSearch()
                         }
-                        repo.startBrowse(filter)
+                        // v0.8.5: launch on appScope so the browse survives
+                        // composition disposal (the JavaSteam auth takes 5+
+                        // seconds and was being cancelled mid-flight).
+                        com.wepwawet.WepWawetApplication.appScope.launch {
+                            repo.startBrowse(filter)
+                        }
                     }
                 }
             }
@@ -538,7 +561,13 @@ fun WorkshopBrowserScreen(
                             "debounced query — startSearch",
                             "query" to q.take(80),
                         )
-                        repo.startSearch(q)
+                        // v0.8.5: launch on appScope — see the filter-change
+                        // LaunchedEffect above for the rationale (searches
+                        // hit JavaSteam auth too and were being cancelled
+                        // mid-flight by LeftCompositionCancellation).
+                        com.wepwawet.WepWawetApplication.appScope.launch {
+                            repo.startSearch(q)
+                        }
                     }
                 }
         }
@@ -621,7 +650,11 @@ fun WorkshopBrowserScreen(
                         "total" to displayItems.size,
                         "auto_preload" to (displayItems.size < 30),
                     )
-                    repo.loadNextPage()
+                    // v0.8.5: launch on appScope — see the filter-change
+                    // LaunchedEffect above for the rationale.
+                    com.wepwawet.WepWawetApplication.appScope.launch {
+                        repo.loadNextPage()
+                    }
                 }
         }
     }
@@ -629,7 +662,9 @@ fun WorkshopBrowserScreen(
     // === Pull-to-refresh handler ===
     val onRefresh: () -> Unit = {
         WepWawetLogger.workshop("pull_to_refresh triggered")
-        scope.launch { repo.refresh() }
+        // v0.8.5: launch on appScope so the refresh survives composition
+        // disposal (refresh re-runs the JavaSteam auth path too).
+        com.wepwawet.WepWawetApplication.appScope.launch { repo.refresh() }
     }
 
     // The creator display name to show in the header — prefer the resolved
@@ -798,8 +833,9 @@ fun WorkshopBrowserScreen(
                                 "ime search action — startSearch",
                                 "query" to query.take(80),
                             )
-                            if (query.isBlank()) scope.launch { repo.clearSearch() }
-                            else scope.launch { repo.startSearch(query) }
+                            // v0.8.5: appScope — see filter-change LaunchedEffect.
+                            if (query.isBlank()) com.wepwawet.WepWawetApplication.appScope.launch { repo.clearSearch() }
+                            else com.wepwawet.WepWawetApplication.appScope.launch { repo.startSearch(query) }
                         },
                     ),
                     singleLine = true,
@@ -995,7 +1031,10 @@ fun WorkshopBrowserScreen(
                                     "in_search_mode" to inSearchMode,
                                 )
                                 if (currentPage > 1) {
-                                    scope.launch { repo.loadPage(currentPage - 1) }
+                                    // v0.8.5: appScope — see filter-change LaunchedEffect.
+                                    com.wepwawet.WepWawetApplication.appScope.launch {
+                                        repo.loadPage(currentPage - 1)
+                                    }
                                 }
                             },
                             enabled = prevEnabled,
@@ -1026,7 +1065,10 @@ fun WorkshopBrowserScreen(
                                     "in_search_mode" to inSearchMode,
                                 )
                                 if (hasMore) {
-                                    scope.launch { repo.loadPage(currentPage + 1) }
+                                    // v0.8.5: appScope — see filter-change LaunchedEffect.
+                                    com.wepwawet.WepWawetApplication.appScope.launch {
+                                        repo.loadPage(currentPage + 1)
+                                    }
                                 }
                             },
                             enabled = nextEnabled,
@@ -1069,7 +1111,10 @@ fun WorkshopBrowserScreen(
                                             "page" to page,
                                             "in_search_mode" to inSearchMode,
                                         )
-                                        scope.launch { repo.loadPage(page) }
+                                        // v0.8.5: appScope — see filter-change LaunchedEffect.
+                                        com.wepwawet.WepWawetApplication.appScope.launch {
+                                            repo.loadPage(page)
+                                        }
                                         jumpPageText = ""
                                     }
                                 },
@@ -1108,7 +1153,10 @@ fun WorkshopBrowserScreen(
                                                 "page" to page,
                                                 "in_search_mode" to inSearchMode,
                                             )
-                                            scope.launch { repo.loadPage(page) }
+                                            // v0.8.5: appScope — see filter-change LaunchedEffect.
+                                            com.wepwawet.WepWawetApplication.appScope.launch {
+                                                repo.loadPage(page)
+                                            }
                                             jumpPageText = ""
                                         }
                                     },

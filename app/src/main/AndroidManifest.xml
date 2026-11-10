@@ -195,6 +195,25 @@
         </service>
 
         <!--
+            v0.8.6: DownloadService — keeps workshop downloads alive in the
+            background and shows a sticky progress notification. Same
+            specialUse type as PairingService (dataSync has a 6-hour cap on
+            Android 14+ which a large workshop download + pack can exceed).
+            Auto-starts when a download begins (WorkshopDownloadJob calls
+            DownloadService.startForDownload) and auto-stops when the
+            active downloads map becomes empty.
+        -->
+        <service
+            android:name=".pairing.DownloadService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Downloads Steam Workshop wallpaper packs (.pkg) via the JavaSteam protocol and packs them into the .mpkg format the on-device renderer consumes. The download + ETC2 packing can take 1-10 minutes for large 4K wallpapers and must continue when the user backgrounds the app." />
+        </service>
+
+        <!--
             v0.7.1 (round 6 — pairing persistence): BootReceiver — auto-restart
             the pairing foreground service after a device reboot or after an
             app update.

@@ -1275,10 +1275,15 @@ private fun SettingToggleRow(
  * the official-format engine log (filesDir/logs/applog.txt, shared by our
  * mirrored WEERR messages and the native engine's own output) into the
  * public Downloads folder. Returns a result line for the log/snackbar.
+ *
+ * v0.8.6: WeClientLog was removed in v0.8.5 — the path is hardcoded here.
+ * The engine log is also auto-tailed into the main ring buffer by
+ * EngineLogTailer, so this function is now a convenience for users who
+ * want the raw engine log file (with its native timestamp format) rather
+ * than the structured WepWawetLogger entries.
  */
 private fun exportErrorLog(context: Context): String {
-    val logFile = java.io.File(context.filesDir.absolutePath +
-            com.wepwawet.log.WeClientLog.LOG_RELATIVE_PATH)
+    val logFile = java.io.File(context.filesDir.absolutePath + "/logs/applog.txt")
     if (!logFile.exists() || logFile.length() == 0L) {
         return "No errors have been logged yet."
     }

@@ -45,6 +45,15 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
     var lib: SceneLib? = null
     private var customHandler: Handler? = null
     private var loadCallback: Runnable? = null
+    // v0.8.6: first-frame callback — fires after the renderer has drawn
+    // its first complete frame (i.e. after onDrawFrame has run once with
+    // a valid sceneContext). Used by WallpaperPreviewScreen to keep the
+    // static preview bitmap visible until the GL surface has actually
+    // drawn something, fixing the "preview is black when it shouldn't be"
+    // bug where the bitmap was hidden the instant the load callback fired
+    // but before the first GL frame was drawn.
+    private var firstFrameCallback: Runnable? = null
+    private var firstFrameFired: Boolean = false
 
     private var supportsAudioProcessing: Boolean = false
     private var supportsAlignment: Boolean = false
@@ -94,13 +103,23 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
 
     private fun onTouchEventInternal(view: View, motionEvent: MotionEvent): Boolean {
         val action = motionEvent.actionMasked
+        // v0.8.6: log touch events at TRACE level so the xray-circle-freeze
+        // bug can be diagnosed — the freeze happens when the xray effect's
+        // touch-up event triggers a shader recompile in the native engine,
+        // and without touch timing in the log we can't correlate the freeze
+        // to the engine's shader activity. The logs are gated by the verbose
+        // toggle (TRACE level is suppressed when verbose is off).
         when (action) {
             MotionEvent.ACTION_DOWN -> {
+                WepWawetLogger.engineDebug("SceneView: touch DOWN",
+                    "x" to motionEvent.x.toInt(), "y" to motionEvent.y.toInt())
                 if (enablePreviewTouchInput) {
                     sendTouchInput(motionEvent.x, motionEvent.y, true)
                 }
             }
             MotionEvent.ACTION_UP -> {
+                WepWawetLogger.engineDebug("SceneView: touch UP",
+                    "x" to motionEvent.x.toInt(), "y" to motionEvent.y.toInt())
                 if (enablePreviewTouchInput) {
                     sendTouchInput(motionEvent.x, motionEvent.y, false)
                 }
@@ -344,6 +363,24 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
         loadCallback = runnable
     }
 
+    /**
+     * v0.8.6: Set a callback that fires after the renderer has drawn its
+     * first complete frame. Used by [com.wepwawet.ui.screens.WallpaperPreviewScreen]
+     * to keep the static preview bitmap visible until the GL surface has
+     * actually drawn something (fixes the "preview is black" bug where the
+     * bitmap was hidden the instant the load callback fired but before the
+     * first GL frame was drawn).
+     *
+     * The callback fires exactly once per scene load. Calling
+     * [requestLoadScene] again resets the flag so the callback fires again
+     * for the new scene.
+     */
+    fun setFirstFrameCallback(runnable: Runnable?) {
+        firstFrameCallback = runnable
+        // Reset so the new callback fires on the next first frame.
+        firstFrameFired = false
+    }
+
     override fun isSupportingAudioProcessing(): Boolean = supportsAudioProcessing
 
     override fun sendAudioData(fft64: FloatArray) {
@@ -512,6 +549,12 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
         }
 
         fun requestLoadScene(packageFile: String) {
+            // v0.8.6: reset the first-frame flag so the callback fires
+            // again for the new scene (e.g. after a lifecycle stop/restart
+            // reload). Without this, a reload wouldn't fire the callback
+            // and the static preview bitmap would stay hidden from the
+            // first load — showing a black screen during the reload.
+            firstFrameFired = false
             if (surfaceValid) {
                 loadScene(packageFile)
             } else {
@@ -546,6 +589,19 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
         override fun onDrawFrame(gl: GL10) {
             if (sceneContext != 0) {
                 lib?.updateScene(sceneContext)
+                // v0.8.6: fire the first-frame callback after the first
+                // successful updateScene. The GL surface has now drawn
+                // something visible, so the WallpaperPreviewScreen can
+                // safely hide the static preview bitmap. Before this fix,
+                // the bitmap was hidden the instant the load callback fired
+                // (which runs at the end of loadScene, BEFORE the first
+                // onDrawFrame) — the user saw a black screen for ~100-500ms
+                // until the first GL frame was drawn.
+                if (!firstFrameFired) {
+                    firstFrameFired = true
+                    WepWawetLogger.engine("SceneView: first frame drawn")
+                    getActiveHandler()?.post { firstFrameCallback?.run() }
+                }
                 if (bitmapCallbackDelay > 0) {
                     bitmapCallbackDelay--
                     if (bitmapCallbackDelay <= 0 && bitmapCallback != null &&
@@ -558,6 +614,18 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
                 }
                 val nanoTime = System.nanoTime()
                 val frameTime = nanoTime - lastDrawTime
+                // v0.8.6: log frame-time spikes — anything over 100ms
+                // (10 FPS) is a visible freeze. Correlating these spikes
+                // with touch UP events (logged in onTouchEventInternal)
+                // and engine log entries (captured by EngineLogTailer)
+                // will pinpoint the cause of the "xray circle goes away
+                // then freezes" bug. Only log after the first frame
+                // (lastDrawTime is 0 before the first frame, which would
+                // produce a bogus huge delta).
+                if (lastDrawTime != 0L && frameTime > 100_000_000L) {
+                    WepWawetLogger.engineWarn("SceneView: frame time spike (freeze)",
+                        "frame_ms" to (frameTime / 1_000_000L))
+                }
                 lastDrawTime = nanoTime
                 if (maxFpsNano >= 1.0) {
                     try {

@@ -178,7 +178,17 @@ class WEWallpaperService : WallpaperService() {
                 areTouchEventsEnabled = true
             }
             lib.initLibrary(this@WEWallpaperService)
-            lib.setLogToFileEnabled(generalSettings.logToFileEnabled)
+            // v0.8.6: re-enable the engine's own log-to-file — the native
+            // engine (libscenejni.so) writes shader compile errors, texture
+            // load failures and scene-init diagnostics to
+            // filesDir/logs/applog.txt when this is on. WepWawetLogger's
+            // EngineLogTailer watches that file and feeds new lines into
+            // the main ring buffer as ENGINE-domain entries, so the engine's
+            // logs appear automatically in the in-app Logs screen (the
+            // user's explicit request: "no save to log because it should
+            // automatically be in the main log"). The previous v0.8.5
+            // change disabled this and lost all engine-side diagnostics.
+            lib.setLogToFileEnabled(true)
             // v0.8.2 CRITICAL FIX: do NOT call isPreview() here. The framework's
             // WallpaperService.Engine.isPreview() reads mIWallpaperEngine, which
             // is only assigned by attach() AFTER onCreateEngine() returns
@@ -498,7 +508,8 @@ class WEWallpaperService : WallpaperService() {
             if (wallpaper != null) {
                 val oldColorsApi = generalSettings.colorsApi
                 generalSettings = WeEnginePrefs.readGeneralSettings(this@WEWallpaperService)
-                lib.setLogToFileEnabled(generalSettings.logToFileEnabled)
+                // v0.8.6: keep the engine log file enabled (see onCreate).
+                lib.setLogToFileEnabled(true)
                 wallpaperControls?.setGeneralSettings(generalSettings)
                 updatePausedState()
                 if (oldColorsApi != generalSettings.colorsApi) {

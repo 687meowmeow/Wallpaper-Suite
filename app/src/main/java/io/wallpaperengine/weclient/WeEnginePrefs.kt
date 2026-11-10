@@ -110,7 +110,10 @@ object WeEnginePrefs {
         info.maxFps = readGeneralSettingsInt(context, WallpaperProperties.GENERAL_PROP_FPS, 30)
         info.touchInputEnabled = readGeneralSettingsBoolean(context, WallpaperProperties.GENERAL_PROP_TOUCH_INPUT, true)
         info.powerSavingEnabled = readGeneralSettingsBoolean(context, WallpaperProperties.GENERAL_PROP_POWER_SAVE, true)
-        info.logToFileEnabled = readGeneralSettingsBoolean(context, WallpaperProperties.GENERAL_PROP_LOG_ERRORS, false)
+        // v0.8.5: the engine's own log-to-file setting is gone — engine
+        // logging is integrated into the app's main log. Keep the field at
+        // false so GeneralSettingsInfo stays source-compatible.
+        info.logToFileEnabled = false
         info.colorsApi = readGeneralSettingsString(context, WallpaperProperties.GENERAL_PROP_COLORS_API, "enabled")
         return info
     }

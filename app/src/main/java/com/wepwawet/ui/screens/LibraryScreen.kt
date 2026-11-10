@@ -8,6 +8,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -386,15 +387,21 @@ fun LibraryScreen(
                 else -> {
                     LazyVerticalGrid(
                         columns = GridCells.Adaptive(minSize = 150.dp),
-                        // v0.8.4: zero spacing + zero horizontal padding — the
-                        // previews sit flush against each other and the screen
-                        // edges, like the official browse grid (the user asked
-                        // for the margins between wallpaper previews gone).
+                        // v0.8.6: SMALL spacing (4dp) + 4dp horizontal
+                        // content padding — the user clarified "when I
+                        // said no margin I meant a small one like in the
+                        // real app". The previous v0.8.4 change set these
+                        // to 0dp which made the previews sit flush against
+                        // each other and the screen edges (too tight).
+                        // 4dp matches the official browse grid's gap.
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                            start = 4.dp,
+                            end = 4.dp,
+                            top = 4.dp,
                             bottom = 24.dp,
                         ),
-                        verticalArrangement = Arrangement.spacedBy(0.dp),
-                        horizontalArrangement = Arrangement.spacedBy(0.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         items(visibleWallpapers, key = { it.filePath }) { wallpaper ->
@@ -643,6 +650,11 @@ private fun LibraryWallpaperCard(
         modifier = Modifier
             .fillMaxWidth()
             .aspectRatio(1f)
+            // v0.8.6: rounded corners + clip so the small 4dp grid gaps
+            // look clean (square corners with gaps looks like a bug;
+            // rounded corners with gaps looks intentional like the
+            // official browse grid).
+            .clip(RoundedCornerShape(8.dp))
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick,
