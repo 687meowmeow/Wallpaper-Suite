@@ -162,6 +162,16 @@ class DownloadService : Service() {
     private fun startCollecting() {
         if (collectJob?.isActive == true) return
         collectJob = serviceScope.launch {
+            // v0.8.7 (bug check): DownloadManager.updateProgress fires on
+            // EVERY chunk (10-100+ times per second during a fast CDN
+            // download) — calling NotificationManager.notify() per tick
+            // flooded the system notification service and burned battery.
+            // Throttle: repost the notification at most every 500ms, and
+            // ALWAYS repost when the set of downloads changes (count or
+            // any status/message change) so phase transitions (connecting
+            // → downloading → packing) are never delayed.
+            var lastNotifyMs = 0L
+            var lastFingerprint = ""
             DownloadManager.activeDownloads.collectLatest { active ->
                 if (active.isEmpty()) {
                     // No active downloads — auto-stop the service.
@@ -169,10 +179,26 @@ class DownloadService : Service() {
                     stopSelfSafely()
                     return@collectLatest
                 }
-                // Update the notification with the latest progress.
-                val notification = buildNotification(active)
-                val manager = getSystemService(NotificationManager::class.java)
-                manager.notify(NOTIFICATION_ID, notification)
+                // Fingerprint = count + status ENUMS only. The
+                // statusMessage is intentionally excluded — during chunk
+                // downloads it embeds the live percentage ("Downloading…
+                // 42% (40 chunks…)") and changes on EVERY tick, which
+                // would defeat the throttle. The enum only changes on real
+                // phase transitions (CONNECTING → DOWNLOADING → PACKING →
+                // QUEUING), which must always repost immediately.
+                val fingerprint = active.entries.sortedBy { it.key }.joinToString("|") {
+                    "${it.key}:${it.value.status}"
+                }
+                val now = System.currentTimeMillis()
+                val structuralChange = fingerprint != lastFingerprint
+                val enoughTimePassed = now - lastNotifyMs >= 500L
+                if (structuralChange || enoughTimePassed) {
+                    lastNotifyMs = now
+                    lastFingerprint = fingerprint
+                    val notification = buildNotification(active)
+                    val manager = getSystemService(NotificationManager::class.java)
+                    manager.notify(NOTIFICATION_ID, notification)
+                }
             }
         }
     }

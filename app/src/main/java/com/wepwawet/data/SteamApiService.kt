@@ -577,9 +577,17 @@ class SteamApiService(
             matchAllTags = true,
             searchText = query,
             // For RankedByTrend (query_type=3), pass the trendDays value. NO [1,7] limit
-            // on this service path — Steam honors 365 for Year, 30 for Month, etc.
+            // on this service path — Steam honors 365 for Year, 31 for Month, etc.
             days = if (sort.queryType == 3) sort.trendDays.toUInt() else null,
             requiredKvTags = requiredKvTags,
+            // v0.8.7 (Ghidra parity check on wallpaperui.exe 0x14050b750):
+            // WE PC passes eMatchType = 2 (k_EUGCMatchingUGCType_Items_ReadyToUse)
+            // to steam_api64's CreateQueryAllUGCRequest, which maps straight
+            // onto the proto's `filetype` field. We previously left filetype
+            // null (proto default 0 = k_EUGCMatchingUGCType_Items). For WE's
+            // workshop both sets are identical today, but 2 is what the real
+            // client sends — strict parity.
+            filetype = 2,
             returnVoteData = true,
             returnTags = true,
             returnKvTags = true,
@@ -1249,10 +1257,24 @@ class SteamApiService(
         // HTML endpoint as a fallback for trend sorts, which DOES accept arbitrary
         // day values (verified: days=1, days=30, days=365 all return distinct results).
         MOST_POPULAR_YEAR(3, "trend", "Most Popular (Year)", trendDays = 365),
-        MOST_POPULAR_MONTH(3, "trend", "Most Popular (Month)", trendDays = 30),
+        // v0.8.7 (Ghidra parity check on wallpaperui.exe 0x14050b750):
+        // WE PC's SetRankedByTrendDays values, parsed from the browse-type
+        // string — today=1, week=7, month=0x1f=31 (NOT 30), default/year=0x16d=365.
+        // The old value (30) returned a slightly different window than the PC.
+        MOST_POPULAR_MONTH(3, "trend", "Most Popular (Month)", trendDays = 31),
         MOST_POPULAR_WEEK(3, "trend", "Most Popular (Week)", trendDays = 7),
         MOST_POPULAR_TODAY(3, "trend", "Most Popular (Today)", trendDays = 1),
         MOST_RECENT(1, "mostrecent", "Most Recent"),
+        // v0.8.7 (Ghidra parity check): WE PC maps most_up_votes →
+        // EUGCQuery 10 (k_EUGCQuery_RankedByVotesUp), subscriptions →
+        // EUGCQuery 12 (TotalUniqueSubscriptions), relevance → EUGCQuery 11
+        // (TextSearch) via steam_api64's CreateQueryAllUGCRequest. The SDK's
+        // EUGCQuery numbering differs from the protobuf
+        // EPublishedFileQueryType numbering WE ALSO verified
+        // (SteamDatabase Protobufs: VotesUp=11, TextSearch=12,
+        // TotalUniqueSubscriptions=9) — steam_api64 translates between them
+        // internally. This app speaks the CM protobuf directly, so the proto
+        // numbers below are the correct equivalents of WE's EUGCQuery values.
         MOST_UP_VOTES(11, "toprated", "Most Up Votes"),
         MOST_SUBSCRIPTIONS(9, "toprated", "Most Subscriptions"),
         MOST_RELEVANT(12, "mostrelevant", "Most Relevant"), // search only

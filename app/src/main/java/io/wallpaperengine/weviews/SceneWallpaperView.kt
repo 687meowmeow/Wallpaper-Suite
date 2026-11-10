@@ -52,8 +52,17 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
     // drawn something, fixing the "preview is black when it shouldn't be"
     // bug where the bitmap was hidden the instant the load callback fired
     // but before the first GL frame was drawn.
-    private var firstFrameCallback: Runnable? = null
-    private var firstFrameFired: Boolean = false
+    //
+    // v0.8.7 (bug check): both fields are written from the MAIN thread
+    // (setFirstFrameCallback is called in WallpaperPreviewScreen.onLoaded)
+    // and read/written from the GL RENDER thread (onDrawFrame,
+    // requestLoadScene via queueEvent) — a data race without @Volatile.
+    // A stale firstFrameFired=true on the GL thread would skip firing the
+    // freshly-registered callback; a stale null callback reference would
+    // drop the first-frame event entirely (preview stuck on the static
+    // bitmap).
+    @Volatile private var firstFrameCallback: Runnable? = null
+    @Volatile private var firstFrameFired: Boolean = false
 
     private var supportsAudioProcessing: Boolean = false
     private var supportsAlignment: Boolean = false
@@ -614,17 +623,27 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
                 }
                 val nanoTime = System.nanoTime()
                 val frameTime = nanoTime - lastDrawTime
-                // v0.8.6: log frame-time spikes — anything over 100ms
-                // (10 FPS) is a visible freeze. Correlating these spikes
-                // with touch UP events (logged in onTouchEventInternal)
-                // and engine log entries (captured by EngineLogTailer)
-                // will pinpoint the cause of the "xray circle goes away
-                // then freezes" bug. Only log after the first frame
-                // (lastDrawTime is 0 before the first frame, which would
-                // produce a bogus huge delta).
-                if (lastDrawTime != 0L && frameTime > 100_000_000L) {
-                    WepWawetLogger.engineWarn("SceneView: frame time spike (freeze)",
-                        "frame_ms" to (frameTime / 1_000_000L))
+                // v0.8.6: log frame-time spikes — a real freeze is a frame
+                // that took far longer than the target interval. Correlating
+                // these spikes with touch UP events (logged in
+                // onTouchEventInternal) and engine log entries (captured by
+                // EngineLogTailer) will pinpoint the cause of the "xray
+                // circle goes away then freezes" bug.
+                //
+                // v0.8.7 (bug check): the 100ms fixed threshold was wrong —
+                // frameTime INCLUDES the previous frame's intentional
+                // FPS-limit sleep (lastDrawTime is stamped before the sleep
+                // runs), so any maxFps ≤ 10 would fire the warning on EVERY
+                // frame. The threshold is now adaptive: 4× the target frame
+                // interval, floored at 200ms — a genuine hitch is always
+                // above that, and normal paced frames never are.
+                if (lastDrawTime != 0L) {
+                    val thresholdNs = (maxFpsNano.toLong() * 4L).coerceAtLeast(200_000_000L)
+                    if (frameTime > thresholdNs) {
+                        WepWawetLogger.engineWarn("SceneView: frame time spike (freeze)",
+                            "frame_ms" to (frameTime / 1_000_000L),
+                            "max_fps_pacing_ns" to maxFpsNano.toLong())
+                    }
                 }
                 lastDrawTime = nanoTime
                 if (maxFpsNano >= 1.0) {

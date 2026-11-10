@@ -128,13 +128,28 @@ object EngineLogTailer {
                     continue
                 }
                 // Read new bytes [watermark .. len).
+                // v0.8.7 (bug check): only consume up to the LAST COMPLETE
+                // NEWLINE. The native engine may be mid-write when we poll —
+                // forwarding a partial line split it into two bogus log
+                // entries (the remainder arriving on the next poll). The
+                // watermark now only advances past the last '\n'; the
+                // trailing partial bytes are re-read next poll once the
+                // engine finishes the line.
                 val readLen = (len - watermark).toInt()
-                val text = RandomAccessFile(logFile, "r").use { raf ->
+                val buf = RandomAccessFile(logFile, "r").use { raf ->
                     raf.seek(watermark)
-                    val buf = ByteArray(readLen)
-                    raf.readFully(buf)
-                    String(buf, Charsets.UTF_8)
+                    val b = ByteArray(readLen)
+                    raf.readFully(b)
+                    b
                 }
+                val lastNewline = buf.lastIndexOf('\n'.code.toByte())
+                if (lastNewline < 0) {
+                    // No complete line yet — wait for the next poll.
+                    delay(POLL_INTERVAL_MS)
+                    continue
+                }
+                val consumed = lastNewline + 1
+                val text = String(buf, 0, consumed, Charsets.UTF_8)
                 // On first run, only forward the last BACKLOG_LINES_ON_START
                 // lines of the entire file (so we don't dump thousands of
                 // historical lines into the ring buffer on a fresh open).
@@ -171,8 +186,8 @@ object EngineLogTailer {
                         exception = null,
                     )
                 }
-                // Advance the watermark.
-                watermark = len
+                // Advance the watermark — only past the complete lines.
+                watermark += consumed
                 prefs.edit().putLong("watermark", watermark).apply()
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e

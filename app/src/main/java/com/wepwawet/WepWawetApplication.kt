@@ -367,6 +367,20 @@ class WepWawetApplication : Application(), Configuration.Provider, ImageLoaderFa
                 setShowBadge(false)
             }
         )
+
+        // v0.8.6: the DownloadService channel — created here too (same
+        // rationale as the pairing channel above: the channel exists even
+        // before the service's first run; creation is idempotent).
+        nm.createNotificationChannel(
+            NotificationChannel(
+                "wepwawet_downloads",
+                "Downloads",
+                NotificationManager.IMPORTANCE_LOW,
+            ).apply {
+                description = "Workshop wallpaper downloads"
+                setShowBadge(false)
+            }
+        )
     }
 
     /**
