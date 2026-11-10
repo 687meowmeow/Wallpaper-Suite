@@ -41,6 +41,45 @@ object EngineLibrary {
         }
     }
 
+    /**
+     * v0.8.8 (engine-log fix): make sure `filesDir/logs/` exists BEFORE the
+     * native engine's file logging is enabled.
+     *
+     * The engine (libscenejni.so) writes its own diagnostics — shader
+     * compile errors, texture load failures, scene-init messages — to
+     * `<internalStoragePath>/logs/applog.txt` when
+     * `SceneLib.setLogToFileEnabled(true)` is called (the path root is the
+     * `filesDir` we hand the engine in `initLibrary`). The engine does NOT
+     * create the parent directory, and NOTHING ELSE in this app creates
+     * `filesDir/logs/` (LogPersistenceWorker uses
+     * `filesDir/wepwawet/logs/`, CrashHandler uses
+     * `filesDir/wepwawet/crashes/`). The official client's Java-side
+     * `Util.log` creates the directory with mkdirs() when it opens the
+     * file — the v0.8.5 removal of our WeClientLog port (which did the
+     * same) deleted the only thing that ever created it.
+     *
+     * Result: ever since v0.8.6 turned the native engine's file logging
+     * on, every engine write to applog.txt silently failed (fopen can't
+     * create the missing directory), so EngineLogTailer had nothing to
+     * tail — zero engine-side diagnostics in the logs and crash reports
+     * (exactly what the v0.8.7/v0.8.8 xray-freeze reports show).
+     *
+     * Called from every setLogToFileEnabled(true) site. Idempotent.
+     */
+    fun ensureEngineLogDir(context: Context) {
+        runCatching {
+            val dir = java.io.File(context.applicationContext.filesDir, "logs")
+            if (!dir.isDirectory) {
+                val created = dir.mkdirs()
+                com.wepwawet.log.WepWawetLogger.appInfo(
+                    "EngineLibrary: engine log dir created",
+                    "path" to dir.absolutePath,
+                    "created" to created,
+                )
+            }
+        }
+    }
+
     // =====================================================================
     // Enumeration
     // =====================================================================

@@ -3418,3 +3418,173 @@ Reminders for future agents:
   89. WE's trend windows are 1/7/31/365 — the month is 31 days, not 30.
       Both the JavaSteam path and the HTML fallback read trendDays from
       the same enum, so one constant fixes both.
+
+---
+Task ID: v0.8.8-alpha
+Agent: main
+
+Task: User reported (1) the xray circle-disappear+freeze is STILL present
+on v0.8.7, (2) re-add the "Download logs" button ("i never wanted it
+gone"), (3) remove "Save to error log" from main Settings ("you are
+supposed to download from the logs menu"), (4) "you broke the workshop so
+undo whatever you did" (v0.8.7 returned total=0 for every browse sort),
+plus a full bug check, websearch-verified reasoning, and a release.
+
+== A. Workshop total=0 — ROOT CAUSE: v0.8.7's filetype=2 ==
+The user's log showed queryFiles OK total=0 for BOTH Most-Popular-Month
+(days=31) and Most-Popular-Year (days=365). The Year query's parameters
+were byte-identical to the working v0.8.6 request EXCEPT one: the v0.8.7
+"Ghidra parity pass" had added `filetype = 2` to QueryFilesDetails.
+
+Why filetype=2 matches nothing (the v0.8.7 analysis was wrong twice):
+  1. It read wallpaperui.exe's CreateQueryAllUGCRequest eMatchType = 2
+     and assumed 2 = k_EUGCMatchingUGCType_Items_ReadyToUse. In the
+     Steamworks SDK's actual isteamugc.h numbering, 2 =
+     k_EUGCMatchingUGCType_Items_Mtx; Items_ReadyToUse is 3.
+  2. It assumed the SDK enum maps 1:1 onto the CM proto's `filetype`
+     field. It does not — the proto field uses the SERVICE-side matching
+     enum (documented on IPublishedFileService.QueryFiles:
+     EPublishedFileInfoMatchingFileType: 0=Items, 1=Collections,
+     2=Artwork, 3=Videos, 4=Screenshots, 5=CollectionEligible, ...,
+     17=Items_Mtx). WE's workshop contains ZERO Artwork-type items →
+     filetype=2 = total 0. (Also verified live: Steam's own workshop
+     browse for app 431960 returns 30 items with the default section and
+     ~29 with excludedtags[]=Everyone — the 38 excluded tags our filter
+     sends are NOT the problem; they were identical in working v0.8.6.)
+  3. The proto value WE PC actually sends can NEVER be recovered from
+     wallpaperui.exe: the SDK forwards eMatchType to steamclient.dll
+     through an interface call — the proto field is set inside
+     steamclient, not in the EXE. Decompiling the EXE for this was
+     methodologically impossible.
+
+FIX: filetype = null again (v0.8.6 behavior — proto default 0 = Items,
+empirically correct for every release before v0.8.7). days=31 for Month
+is KEPT (the trend-window reading today=1/week=7/month=0x1f=365=0x16d is
+a clean self-consistent finding from the same EXE function, and days is
+a plain uint on the wire — it cannot zero out results the way filetype
+does).
+
+== B. "Download logs" button restored (LogsScreen) ==
+v0.8.5 removed it claiming LogPersistenceWorker made it redundant. It
+didn't — the worker persists to APP-INTERNAL storage
+(filesDir/wepwawet/logs/) the user cannot reach. Restored the v0.8.4
+implementation verbatim: Download icon button (spinner while writing),
+full ring-buffer dump + engine applog.txt tail (96 KB) →
+Downloads/WallpaperSuite/wepwawet-logs-<ts>.txt via
+PublicDownloadsWriter (MediaStore, no permission), 5-second status card,
+all the CancellationException-rethrow semantics.
+
+== C. "Save Error Log" removed from Settings ==
+The Developer section's export button (and the exportErrorLog function)
+are gone — export belongs to the Logs screen exclusively (per the user).
+The explanatory note now points at the Logs screen's Download button.
+
+== D. Engine log directory — REAL BUG FOUND+FIXED ==
+filesDir/logs/ (where the native engine writes applog.txt when
+setLogToFileEnabled(true) is on — enabled since v0.8.6) was NEVER
+created by anything: the engine does not mkdir its parent,
+LogPersistenceWorker uses filesDir/wepwawet/logs/, CrashHandler uses
+filesDir/wepwawet/crashes/, and the v0.8.5 removal of WeClientLog
+(the port of the official Util.log, which does mkdirs()) deleted the
+only creator. Every engine-side diagnostic write since v0.8.6 silently
+failed → EngineLogTailer had nothing to tail → zero engine lines in
+every log the user exported (confirmed: the Nov 9 export's engine-log
+section is empty).
+FIX: EngineLibrary.ensureEngineLogDir(context) (idempotent mkdirs)
+called before all three setLogToFileEnabled(true) sites
+(WEWallpaperService GLWallpaperEngine init + reloadApplyGeneralSettings,
+WallpaperPreviewScreen's load LaunchedEffect). NOTE for future agents:
+both WEWallpaperService sites are inside the GLWallpaperEngine INNER
+class — use this@WEWallpaperService, not this.
+
+== E. Xray freeze — investigation map + new instrumentation ==
+The user's v0.8.7 log: preview loads (16 properties, canvas 3456x2160,
+alignment flag), first GL frame drawn, three taps (DOWN/UP each), user
+backs out ~300 ms after the last tap. NO frame-spike warnings, NO
+crash, NO engine log lines, app otherwise alive. Key insight: the
+v0.8.6 spike detector can NEVER see a full stall (it only measures
+deltas between consecutive frames — if frames stop, it goes silent).
+
+Verified byte-identical / faithful (i.e. NOT the cause — do not re-check):
+  - libscenejni.so: md5 5ff85205fd17f8a5c81101de51697557 in the shipped
+    v0.8.7 APK == the official APK's.
+  - All 752 official asset files in the shipped APK: only
+    dexopt/baseline.prof{,m} differ (build artifacts) — 750/750 real
+    assets identical.
+  - SceneLib.kt JNI wrapper: every external fun signature matches the
+    official jadx decompile exactly.
+  - SceneWallpaperView touch path, loadScene property pipeline,
+    onDrawFrame pacing math, EGL config (8,8,8,0,16,0), the official
+    WEWallpaperService touch handler: all faithful ports.
+  - The packed mpkg's xray shader: the packer's insertions
+    (uniform vec4 g_PointerState; + unprojectedUVs *= CAST2(1.0/max(
+    0.00001, g_PointerState.y))) replicate the PC's own we-assets patch
+    (verified pre-v0.8.8 against the PC ground truth; idempotence
+    re-confirmed). The BrownDust2 scene has NO scripts (pure effect
+    shader + two 40 MB 4K .tex layers) — the "script hang" theory from
+    earlier rounds does not apply to it.
+  - Native sendTouchInput (disassembled, 0x111b64c): normalizes
+    (x,y) by the size at scene+0x64, stores pointer vec2 at scene+0x7c,
+    sets down-bit at scene+0x94 — same input reaches the engine in both
+    apps.
+  - g_PointerState exists in the engine's interned name pool (the
+    Android engine knows the uniform). Its exact component layout could
+    not be recovered statically (no direct code xrefs — V8-era name
+    interning).
+What the new instrumentation will decide (v0.8.8):
+  - 5-second render heartbeat (frames + avg ms) from onDrawFrame:
+    heartbeat STOPS after a touch → GL thread hung inside native code
+    (updateScene or sendTouchInput); heartbeat CONTINUES while the image
+    is frozen → scene time/animation state frozen (completely different
+    fix).
+  - sendTouchInput native enter/exit traces on the GL thread (DOWN/UP
+    always traced, MOVE rate-limited to 1/200 ms) + sceneContext logged
+    (0 = touches to a dead context).
+  - Main-thread between-touches stall check: no frames between
+    consecutive touches (≥1.5 s apart) → engineWarn names the stall.
+  - With D fixed, the engine's OWN log (shader compile errors etc.) now
+    actually reaches applog.txt → EngineLogTailer → the exported log.
+Remaining hypothesis if the heartbeat keeps beating while frozen: the
+g_PointerState.y division degenerating at specific touch positions
+(1/0.00001 = 100000× sprite-UV scale → circle invisible + extreme-UV
+sampling at 4K). If the next log shows that pattern, the fix is a
+packer-side clamp on the patched divisor — a deliberate, documented
+deviation from PC-exact bytes justified by Android-side driver safety.
+Do NOT touch the verified parity paths before the evidence arrives.
+
+== F. Other checks ==
+- v0.8.7's DownloadService notification throttle + notification-channel
+  creation in Application reviewed — correct.
+- CrashHandler reviewed: it always chains to the default handler and
+  force-kills — a GL-thread Java exception CANNOT produce a silent
+  freeze (rules that class out; consistent with the empty log).
+- No other callers of setLogToFileEnabled or writers to filesDir/logs.
+
+== Release ==
+v0.8.8-alpha, versionCode 125. Tag v0.8.8-alpha on the final commit;
+after CI green, publish the release via the API (draft:false) and
+VERIFY the APK asset is actually attached (reminder 86).
+
+Reminders for future agents:
+  90. filetype on the CM QueryFiles/proto path uses the SERVICE-side
+      matching enum (0=Items, 1=Collections, 2=Artwork, ...) — NOT the
+      Steamworks SDK EUGCMatchingUGCType (0=None, 1=Items, 2=Items_Mtx,
+      3=Items_ReadyToUse). Never map an SDK enum constant onto a proto
+      field by number. The SDK→proto translation lives inside
+      steamclient.dll and is invisible to EXE decompiles.
+  91. The engine writes applog.txt into filesDir/logs/ WITHOUT creating
+      the directory. EngineLibrary.ensureEngineLogDir must run before
+      every setLogToFileEnabled(true). If ENGINE-FILE: lines are missing
+      from user logs again, check that first.
+  92. The frame-spike detector cannot see a full render stall (no frames
+      = no deltas). The heartbeat (E) is the stall detector now; keep
+      both.
+  93. The real repo is github.com/687meowmeow/Wallpaper-Suite branch dev
+      (local: /home/z/my-project/WS). /home/z/my-project/WE-backend is
+      the OLD WE-bridge repo (v0.7.x era) — its worklog is a useful
+      history archive but is NOT this project's worklog.
+  94. The Ghidra analysis projects from v0.8.7 (in /home/z/tools) were
+      outside /home/z/my-project and were recycled with the sandbox.
+      The findings that matter are in this file; the EXEs are still in
+      /home/z/my-project/upload/ (wallpaperui.exe,
+      resourcecompiler64.exe) if a re-decompile is ever needed.

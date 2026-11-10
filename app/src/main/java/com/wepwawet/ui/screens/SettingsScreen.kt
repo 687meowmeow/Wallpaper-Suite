@@ -1230,25 +1230,18 @@ private fun EngineSettingsCard() {
             // logging: the verbose toggle (Others section) drives both the
             // in-app log viewer and the official-format engine log file
             // (WEERR / filesDir/logs/applog.txt + the native engine's own
-            // output). Only the export button remains here.
+            // output).
+            //
+            // v0.8.8: the "Save Error Log" export button was REMOVED from
+            // here — log export belongs to the Logs screen's Download button
+            // (which includes the engine log tail), per the user's request.
+            // This screen only keeps the note below.
             Text(
-                "Engine logging follows the verbose logging toggle above",
+                "Engine logging follows the verbose logging toggle above. " +
+                    "Export logs from the Logs screen (Download button).",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            OutlinedButton(
-                onClick = {
-                    scope.launch {
-                        val exported = withContext(Dispatchers.IO) {
-                            exportErrorLog(context)
-                        }
-                        snackbarResult = exported
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Save Error Log")
-            }
         }
     }
 }
@@ -1271,31 +1264,8 @@ private fun SettingToggleRow(
 }
 
 /**
- * v0.8.3: "Save Error Log" (official general_settings_export_log) — copies
- * the official-format engine log (filesDir/logs/applog.txt, shared by our
- * mirrored WEERR messages and the native engine's own output) into the
- * public Downloads folder. Returns a result line for the log/snackbar.
- *
- * v0.8.6: WeClientLog was removed in v0.8.5 — the path is hardcoded here.
- * The engine log is also auto-tailed into the main ring buffer by
- * EngineLogTailer, so this function is now a convenience for users who
- * want the raw engine log file (with its native timestamp format) rather
- * than the structured WepWawetLogger entries.
+ * v0.8.8: exportErrorLog was REMOVED — the Settings-screen "Save Error Log"
+ * button is gone. Log export happens exclusively from the Logs screen's
+ * Download button (LogsScreen.downloadLogs), which writes the full ring
+ * buffer AND the engine log tail to Downloads/WallpaperSuite/.
  */
-private fun exportErrorLog(context: Context): String {
-    val logFile = java.io.File(context.filesDir.absolutePath + "/logs/applog.txt")
-    if (!logFile.exists() || logFile.length() == 0L) {
-        return "No errors have been logged yet."
-    }
-    return try {
-        val stamp = java.text.SimpleDateFormat(
-            "yyyyMMdd-HHmmss", java.util.Locale.US
-        ).format(java.util.Date())
-        val content = logFile.readBytes()
-        val uri = com.wepwawet.log.PublicDownloadsWriter.writeBytes(
-            context, "wallpapersuite-errorlog-$stamp.txt", content)
-        if (uri != null) "Error log saved to Downloads" else "Failed to save error log"
-    } catch (t: Throwable) {
-        "Failed to save error log: ${t.message ?: t.javaClass.name}"
-    }
-}

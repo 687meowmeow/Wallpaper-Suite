@@ -11,13 +11,16 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -25,8 +28,12 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -35,30 +42,42 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.wepwawet.log.LogEntry
+import com.wepwawet.log.PublicDownloadsWriter
 import com.wepwawet.log.WepWawetLogger
 import com.wepwawet.ui.components.SlimTopBar
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.format.DateTimeFormatter
 import java.time.ZoneId
+import java.time.ZonedDateTime
 
 /**
  * In-app log viewer.
  *
- * v0.8.5: the "Download logs" button was removed — logs are auto-persisted
- * to `filesDir/wepwawet/logs/wepwawet-YYYYMMDD.log` by
- * [com.wepwawet.log.LogPersistenceWorker] (a 15-minute periodic WorkManager
- * job). The user no longer needs to manually export logs to a file; the
- * latest 14 days of logs are always on disk. The Copy button (clipboard)
- * and Clear button (wipes the in-memory ring buffer) remain for ad-hoc
- * sharing and cleanup.
+ * v0.8.8: the "Download logs" button is BACK (the user never wanted it
+ * gone — v0.8.5 removed it on the assumption that LogPersistenceWorker's
+ * auto-persist made manual export redundant; it doesn't: the persisted
+ * files live in app-internal storage the user can't reach without this
+ * export). The button writes the full ring buffer + the native engine's
+ * log tail to the public Downloads/WallpaperSuite/ directory as a
+ * timestamped .txt via [PublicDownloadsWriter] (MediaStore on Android 10+,
+ * no permission needed). The Copy (clipboard) and Clear buttons remain.
  *
- * The CrashHandler still writes crash reports (with a tail of the ring
- * buffer + the engine log) to `Downloads/WallpaperSuite/crash-*.txt` on
- * crash — that's a separate crash artifact, not a general log export.
+ * LogPersistenceWorker still auto-persists to
+ * `filesDir/wepwawet/logs/wepwawet-YYYYMMDD.log` every 15 minutes (14-day
+ * retention), and the CrashHandler still writes crash reports (with a
+ * tail of the ring buffer + the engine log) to `Downloads/WepWawet/crash-*.txt`
+ * on crash — those are separate artifacts from this manual export.
  */
 @Composable
 fun LogsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val events = remember { mutableStateListOf<LogEntry>() }
+    var isDownloading by remember { mutableStateOf(false) }
+    var downloadStatus by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         // Initial load from the ring buffer snapshot
@@ -96,17 +115,135 @@ fun LogsScreen(onBack: () -> Unit) {
         Toast.makeText(context, "Copied ${events.size} log entries", Toast.LENGTH_SHORT).show()
     }
 
+    /**
+     * Download the full log buffer to the public Downloads/WallpaperSuite/
+     * directory as a timestamped .txt file. Uses MediaStore on Android 10+
+     * (no permission needed). The file appears in the user's Downloads
+     * folder immediately — they can attach it to bug reports or share it.
+     *
+     * v0.8.8: restored from v0.8.4 (removed by mistake in v0.8.5). Includes
+     * the native engine's own log tail (filesDir/logs/applog.txt) —
+     * scene-load failures and shader compile errors live there, not in the
+     * app log.
+     */
+    fun downloadLogs() {
+        if (isDownloading) return
+        isDownloading = true
+        downloadStatus = "Writing ${events.size} log entries to Downloads/WallpaperSuite/…"
+        val snapshot = events.toList()
+        val timestamp = ZonedDateTime.now().format(
+            DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
+        )
+        val fileName = "wepwawet-logs-$timestamp.txt"
+        // Build the log text on a background thread — for thousands of entries
+        // this could be slow on the UI thread.
+        scope.launch(Dispatchers.IO) {
+            try {
+                val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
+                    .withZone(ZoneId.systemDefault())
+                val sb = StringBuilder(snapshot.size * 200)  // ~200 bytes per entry estimate
+                sb.append("=== WallpaperSuite log dump ===\n")
+                sb.append("Generated: ").append(ZonedDateTime.now()).append("\n")
+                sb.append("Entries: ").append(snapshot.size).append("\n")
+                sb.append("\n")
+                for (entry in snapshot) {  // snapshot is in oldest-first order
+                    sb.append("[${formatter.format(entry.timestamp)}] ")
+                    sb.append("[${entry.domain.tag}] ${entry.level.name}: ${entry.message}")
+                    if (entry.context.isNotEmpty()) {
+                        sb.append(" ")
+                        sb.append(entry.context.entries.joinToString(" ") { "${it.key}=${it.value ?: "null"}" })
+                    }
+                    if (entry.exceptionStackTrace != null) {
+                        sb.append("\n")
+                        sb.append(entry.exceptionStackTrace)
+                    }
+                    sb.append("\n")
+                }
+                // Append the native engine's own log tail
+                // (filesDir/logs/applog.txt) — scene-load failures and shader
+                // compile errors live there, not in the app log.
+                runCatching {
+                    val engineLog = java.io.File(context.filesDir, "logs/applog.txt")
+                    if (engineLog.exists() && engineLog.length() > 0L) {
+                        val maxBytes = 96 * 1024
+                        val len = engineLog.length()
+                        val text = if (len > maxBytes) {
+                            java.io.RandomAccessFile(engineLog, "r").use { raf ->
+                                raf.seek(len - maxBytes)
+                                val buf = ByteArray(maxBytes)
+                                raf.readFully(buf)
+                                String(buf, Charsets.UTF_8)
+                            }
+                        } else {
+                            engineLog.readText()
+                        }
+                        sb.append("\n=== Engine log (tail of ")
+                            .append(engineLog.absolutePath)
+                            .append(") ===\n")
+                        sb.append(text)
+                        sb.append("\n=== end of engine log ===\n")
+                    }
+                }
+                val text = sb.toString()
+                val uri = PublicDownloadsWriter.writeText(context, fileName, text)
+                withContext(Dispatchers.Main) {
+                    if (uri != null) {
+                        downloadStatus = "Saved ${snapshot.size} entries to Downloads/WallpaperSuite/$fileName"
+                        Toast.makeText(context,
+                            "Saved to Downloads/WallpaperSuite/$fileName",
+                            Toast.LENGTH_LONG).show()
+                        WepWawetLogger.appInfo("LogsScreen.downloadLogs success",
+                            "file" to fileName,
+                            "bytes" to text.length,
+                            "entries" to snapshot.size)
+                    } else {
+                        downloadStatus = "Failed to write log file (see logcat)"
+                        Toast.makeText(context, "Failed to write log file", Toast.LENGTH_LONG).show()
+                    }
+                    isDownloading = false
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // v0.7.23 BUG LS-1: re-throw CancellationException — was
+                // swallowed by catch (e: Exception) which showed a spurious
+                // "Error" toast when the user navigated away mid-download.
+                isDownloading = false
+                throw e
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    downloadStatus = "Error: ${e.message}"
+                    Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_LONG).show()
+                    WepWawetLogger.appError("LogsScreen.downloadLogs failed",
+                        "exception" to e.javaClass.name,
+                        "message" to (e.message ?: ""),
+                        exception = e)
+                    isDownloading = false
+                }
+            }
+        }
+    }
+
     Scaffold(
         topBar = {
             SlimTopBar(
                 title = "Logs (${events.size})",
                 onBack = onBack,
                 actions = {
-                    // v0.8.5: Download button removed — LogPersistenceWorker
-                    // auto-saves the ring buffer to
-                    // filesDir/wepwawet/logs/wepwawet-YYYYMMDD.log every 15
-                    // minutes (and prunes files older than 14 days). The user
-                    // doesn't need to manually export logs anymore.
+                    // v0.8.8: Download button RESTORED — the user never
+                    // wanted it gone. Writes the ring buffer + engine log
+                    // tail to Downloads/WallpaperSuite/ (MediaStore on 10+).
+                    IconButton(
+                        onClick = { downloadLogs() },
+                        enabled = !isDownloading && events.isNotEmpty(),
+                    ) {
+                        if (isDownloading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.padding(8.dp).size(20.dp),
+                                strokeWidth = 2.dp,
+                            )
+                        } else {
+                            Icon(Icons.Filled.Download, contentDescription = "Download logs")
+                        }
+                    }
                     IconButton(onClick = { copyLogs() }) {
                         Icon(Icons.Filled.ContentCopy, contentDescription = "Copy logs")
                     }
@@ -121,13 +258,33 @@ fun LogsScreen(onBack: () -> Unit) {
         }
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            // Status message after downloadLogs (fades away after 5s)
+            downloadStatus?.let { status ->
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(8.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    ),
+                ) {
+                    Text(
+                        status,
+                        modifier = Modifier.padding(12.dp),
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                LaunchedEffect(status) {
+                    delay(5000)
+                    downloadStatus = null
+                }
+            }
             if (events.isEmpty()) {
                 Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = androidx.compose.ui.Alignment.Center,
                 ) {
                     Text(
-                        "No logs yet. Logs are auto-saved to the app's internal storage.",
+                        "No logs yet. Use the Download button to export logs, or Copy to share them.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                         modifier = Modifier.padding(24.dp),

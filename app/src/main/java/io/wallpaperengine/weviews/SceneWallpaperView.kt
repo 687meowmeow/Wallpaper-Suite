@@ -64,6 +64,31 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
     @Volatile private var firstFrameCallback: Runnable? = null
     @Volatile private var firstFrameFired: Boolean = false
 
+    // v0.8.8 (xray-freeze diagnosis): the v0.8.6/v0.8.7 instrumentation
+    // could NOT distinguish "the render loop stopped" from "frames keep
+    // rendering but the scene is frozen": the frame-SPIKE detector only
+    // measures deltas BETWEEN consecutive onDrawFrame calls, so a full
+    // stall (updateScene never returning / the GL thread dead) logged
+    // nothing at all. These three new probes close that gap:
+    //   1. glFrameCount — @Volatile monotonic frame counter, written on the
+    //      GL thread, readable from anywhere.
+    //   2. A 5-second render heartbeat logged from onDrawFrame (frames +
+    //      average frame time). If the heartbeat stops after a touch, the
+    //      GL thread is stuck INSIDE native code (updateScene or the
+    //      sendTouchInput call itself).
+    //   3. sendTouchInput enter/exit traces on the GL thread + a
+    //      between-touches stall check on the main thread — together they
+    //      name the exact native call that never returned.
+    @Volatile var glFrameCount: Long = 0L
+        private set
+    private var heartbeatFrameBase = 0L
+    private var heartbeatLastNs = 0L
+    @Volatile private var lastTouchFrameCount = -1L
+    @Volatile private var lastTouchTimeMs = 0L
+    // v0.8.8: touch-trace rate limiting (see sendTouchInput).
+    @Volatile private var lastTracedTouchDown: Boolean? = null
+    @Volatile private var lastTouchTraceNs = 0L
+
     private var supportsAudioProcessing: Boolean = false
     private var supportsAlignment: Boolean = false
     private var alignmentPosition: Float = 50.0f
@@ -122,6 +147,7 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
             MotionEvent.ACTION_DOWN -> {
                 WepWawetLogger.engineDebug("SceneView: touch DOWN",
                     "x" to motionEvent.x.toInt(), "y" to motionEvent.y.toInt())
+                noteTouchForStallCheck("DOWN")
                 if (enablePreviewTouchInput) {
                     sendTouchInput(motionEvent.x, motionEvent.y, true)
                 }
@@ -129,6 +155,7 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
             MotionEvent.ACTION_UP -> {
                 WepWawetLogger.engineDebug("SceneView: touch UP",
                     "x" to motionEvent.x.toInt(), "y" to motionEvent.y.toInt())
+                noteTouchForStallCheck("UP")
                 if (enablePreviewTouchInput) {
                     sendTouchInput(motionEvent.x, motionEvent.y, false)
                 }
@@ -203,6 +230,34 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
             }
         }
         return true
+    }
+
+    /**
+     * v0.8.8 (xray-freeze diagnosis): between-touches render-stall check,
+     * runs on the MAIN thread (so it still fires when the GL thread is the
+     * thing that's hung). If not a single frame was drawn between the
+     * previous touch and this one (and at least 1.5 s elapsed), the render
+     * loop is stalled — with the GL-thread enter/exit traces above this
+     * names the exact native call that never returned.
+     *
+     * The 1.5 s floor avoids false positives on legitimately slow scenes
+     * (a heartbeat line with avg_frame_ms > 1500 covers that case instead).
+     */
+    private fun noteTouchForStallCheck(phase: String) {
+        val nowMs = System.currentTimeMillis()
+        val frames = glFrameCount
+        if (lastTouchFrameCount >= 0 && frames == lastTouchFrameCount &&
+            nowMs - lastTouchTimeMs >= 1500
+        ) {
+            WepWawetLogger.engineWarn(
+                "SceneView: render loop STALLED — no frames since the previous touch",
+                "phase" to phase,
+                "frames_total" to frames,
+                "gap_ms" to (nowMs - lastTouchTimeMs),
+            )
+        }
+        lastTouchFrameCount = frames
+        lastTouchTimeMs = nowMs
     }
 
     // =====================================================================
@@ -423,7 +478,31 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
 
     override fun sendTouchInput(x: Float, y: Float, down: Boolean) {
         queueEvent {
+            // v0.8.8 (xray-freeze diagnosis): trace the native call on the
+            // GL thread. If the engine never returns from sendTouchInput,
+            // the "exit" line is missing from the log — naming the hang
+            // site directly. Also logs the sceneContext: a 0 here means the
+            // touches are being delivered to a dead context (silent no-op).
+            //
+            // Rate limit: DOWN/UP transitions are ALWAYS traced (the freeze
+            // correlates with them); ACTION_MOVE is traced at most once per
+            // 200 ms so a drag doesn't flood the ring buffer at 120 Hz.
+            val trace = lastTracedTouchDown != down ||
+                System.nanoTime() - lastTouchTraceNs >= 200_000_000L
+            if (trace) {
+                lastTracedTouchDown = down
+                lastTouchTraceNs = System.nanoTime()
+                WepWawetLogger.engineDebug("SceneView: sendTouchInput native enter",
+                    "down" to down,
+                    "x" to x.toInt(),
+                    "y" to y.toInt(),
+                    "scene_context" to (sceneRenderer?.sceneContext ?: 0))
+            }
             lib?.sendTouchInput(sceneRenderer?.sceneContext ?: 0, down, x, y)
+            if (trace) {
+                WepWawetLogger.engineDebug("SceneView: sendTouchInput native exit",
+                    "down" to down)
+            }
         }
     }
 
@@ -598,6 +677,28 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
         override fun onDrawFrame(gl: GL10) {
             if (sceneContext != 0) {
                 lib?.updateScene(sceneContext)
+                glFrameCount++
+                // v0.8.8 (xray-freeze diagnosis): 5-second render heartbeat.
+                // A healthy render loop logs this continuously while the
+                // surface is visible. If these lines STOP after a touch (and
+                // the main-thread stall check fires instead), the GL thread
+                // is stuck inside native code; if they CONTINUE while the
+                // image is visually frozen, the scene's time/animation state
+                // is frozen instead — two completely different root causes,
+                // now distinguishable from the log alone.
+                val heartbeatNow = System.nanoTime()
+                if (heartbeatLastNs == 0L) {
+                    heartbeatLastNs = heartbeatNow
+                    heartbeatFrameBase = glFrameCount
+                } else if (heartbeatNow - heartbeatLastNs >= 5_000_000_000L) {
+                    val frames = glFrameCount - heartbeatFrameBase
+                    val elapsedMs = (heartbeatNow - heartbeatLastNs) / 1_000_000L
+                    WepWawetLogger.engine("SceneView: render heartbeat",
+                        "frames" to frames,
+                        "avg_frame_ms" to if (frames > 0) (elapsedMs / frames) else -1)
+                    heartbeatLastNs = heartbeatNow
+                    heartbeatFrameBase = glFrameCount
+                }
                 // v0.8.6: fire the first-frame callback after the first
                 // successful updateScene. The GL surface has now drawn
                 // something visible, so the WallpaperPreviewScreen can

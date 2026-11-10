@@ -580,14 +580,34 @@ class SteamApiService(
             // on this service path — Steam honors 365 for Year, 31 for Month, etc.
             days = if (sort.queryType == 3) sort.trendDays.toUInt() else null,
             requiredKvTags = requiredKvTags,
-            // v0.8.7 (Ghidra parity check on wallpaperui.exe 0x14050b750):
-            // WE PC passes eMatchType = 2 (k_EUGCMatchingUGCType_Items_ReadyToUse)
-            // to steam_api64's CreateQueryAllUGCRequest, which maps straight
-            // onto the proto's `filetype` field. We previously left filetype
-            // null (proto default 0 = k_EUGCMatchingUGCType_Items). For WE's
-            // workshop both sets are identical today, but 2 is what the real
-            // client sends — strict parity.
-            filetype = 2,
+            // v0.8.8 (workshop regression fix): DO NOT send `filetype`.
+            //
+            // The v0.8.7 Ghidra parity pass set filetype = 2 here, reading
+            // wallpaperui.exe's CreateQueryAllUGCRequest eMatchType = 2 and
+            // assuming it maps 1:1 onto the CM proto's `filetype` field with
+            // 2 = Items_ReadyToUse. BOTH halves of that assumption were
+            // wrong:
+            //   1. In the Steamworks SDK's EUGCMatchingUGCType numbering
+            //      (isteamugc.h), 2 = Items_Mtx — Items_ReadyToUse is 3.
+            //   2. The CM service's filetype field does NOT use the SDK
+            //      numbering anyway. The documented service-side matching
+            //      enum (IPublishedFileService.QueryFiles,
+            //      EPublishedFileInfoMatchingFileType) is 0=Items,
+            //      1=Collections, 2=Artwork, 3=Videos … — WE's workshop has
+            //      ZERO Artwork-type items, so filetype=2 matched nothing.
+            // The proto value WE PC actually puts on the wire is set inside
+            // steamclient.dll (not visible in wallpaperui.exe's decompile —
+            // the SDK forwards eMatchType through an interface call), so it
+            // CANNOT be recovered by decompiling the EXE.
+            //
+            // Empirically: filetype absent (proto default 0 = Items) is what
+            // every release up to v0.8.6 sent, and it worked. v0.8.7 with
+            // filetype=2 returned total=0 for EVERY sort (Month AND Year —
+            // Year's other params were byte-identical to the working v0.8.6
+            // query, isolating filetype as the only variable). Sending
+            // nothing is also what the workshop website's default browse
+            // section resolves to server-side.
+            filetype = null,
             returnVoteData = true,
             returnTags = true,
             returnKvTags = true,

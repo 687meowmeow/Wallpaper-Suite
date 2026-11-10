@@ -188,6 +188,11 @@ class WEWallpaperService : WallpaperService() {
             // user's explicit request: "no save to log because it should
             // automatically be in the main log"). The previous v0.8.5
             // change disabled this and lost all engine-side diagnostics.
+            // v0.8.8: create filesDir/logs/ FIRST — the engine does not
+            // create the parent directory itself, and without it every
+            // engine log write silently failed (see
+            // EngineLibrary.ensureEngineLogDir).
+            com.wepwawet.engine.EngineLibrary.ensureEngineLogDir(this@WEWallpaperService)
             lib.setLogToFileEnabled(true)
             // v0.8.2 CRITICAL FIX: do NOT call isPreview() here. The framework's
             // WallpaperService.Engine.isPreview() reads mIWallpaperEngine, which
@@ -509,6 +514,8 @@ class WEWallpaperService : WallpaperService() {
                 val oldColorsApi = generalSettings.colorsApi
                 generalSettings = WeEnginePrefs.readGeneralSettings(this@WEWallpaperService)
                 // v0.8.6: keep the engine log file enabled (see onCreate).
+                // v0.8.8: ensure filesDir/logs/ exists (see onCreate note).
+                com.wepwawet.engine.EngineLibrary.ensureEngineLogDir(this@WEWallpaperService)
                 lib.setLogToFileEnabled(true)
                 wallpaperControls?.setGeneralSettings(generalSettings)
                 updatePausedState()

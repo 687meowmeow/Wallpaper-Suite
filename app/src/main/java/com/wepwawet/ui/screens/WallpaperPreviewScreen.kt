@@ -838,6 +838,10 @@ fun WallpaperPreviewScreen(
             // on, and a one-time enable if the user opens preview before
             // ever starting the wallpaper service.
             runCatching {
+                // v0.8.8: create filesDir/logs/ before enabling the engine's
+                // file logging — without the directory the engine's writes
+                // silently fail (EngineLogTailer then has nothing to tail).
+                EngineLibrary.ensureEngineLogDir(context)
                 EngineLibrary.sceneLib(context).setLogToFileEnabled(true)
             }
             c.setLoadCallback { onLoaded() }
