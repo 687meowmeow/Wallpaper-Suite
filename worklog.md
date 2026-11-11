@@ -3588,3 +3588,79 @@ Reminders for future agents:
       The findings that matter are in this file; the EXEs are still in
       /home/z/my-project/upload/ (wallpaperui.exe,
       resourcecompiler64.exe) if a re-decompile is ever needed.
+
+== v0.9.0-alpha (66dfc8a) — 2026-11-11 ==
+Log round: wepwawet-logs-20261110-195655 (long) + -201146 (short).
+
+Fixes driven by the logs:
+- ishtar (3734403543) GIF wallpaper failed "no .pkg or media": the
+  content is preview.gif at 889 KB — UNDER findVideoFile's old 1 MB
+  floor. Content resolution is now project.json-driven ("file" field)
+  with the media fallback lowered to 64 KB. GIFs route to
+  packVideoWallpaper -> GifToMp4Transcoder as before.
+- Presets: workshop items whose project.json carries "dependency" +
+  "preset" (format confirmed via wallpaperui.exe strings: dependency /
+  ispreset / 'Missing Workshop dependency id.') now download their BASE
+  wallpaper and pack it with the preset's values merged into
+  general.properties.*.value (MpkgPacker.applyPresetToProjectJson).
+  Preset title replaces the base's title in project.json.
+- Brown Dust xray (3767714202) black preview: materials/xray_sync_1.tex
+  is format 0 RGBA8888, flags 0x22, 40 MB = FULL MIP CHAIN, shipped
+  verbatim per the PC rule -> our engine renders it black (scene init +
+  first frame drew fine; transcoded-texture wallpapers preview fine).
+  Compat override: flag-0x20 textures of format 0/1/DXT now go through
+  decode -> normalize -> single-mip rebuild (convertFormat0TexPc /
+  convertTexDxtToEtc2); verbatim fallback if decode fails.
+- Clip option regression: v0.8.1's Download->library flow packed videos
+  with NO trim prompt (only send-to-phone had it). Restored: MP4/WebM
+  downloads pause (pendingVideoMode="library"), dialog offers Clip /
+  Add Full, VideoTrimScreen has a library mode, importVideoToLibrary()
+  is the shared pack+import path.
+- Log noise: PersonaStateCallback & co. dropped from the dispatch log;
+  repeated JavaSteam onError lines collapse to first + every 10th.
+- boot.txt breadcrumb generation REMOVED (user request). Developer
+  settings section REMOVED. Enable pairing moved into the Others card.
+- Remove-from-library now sweeps cache/pkg_cache/<id>.pkg, cacheDir
+  <id>_* temp files and workshop_downloads/<id> (previously only the
+  filesDir .mpkg died — the 80 MB pkg cache resurrected on re-download).
+
+New features:
+- Library groups: LibraryPrefs gains groups + per-path assignment;
+  chip row under the Browse/Import buttons (All / groups / +New),
+  long-press a chip for rename/delete, context menu "Add to group".
+- Nyanpasu clone (package com.wepwawet.nyanpasu) based on Nyanpasu
+  Wallpaper v1.0.0 by FranklinNexus (MIT). The IMAGE-CHOICE REGRESSION
+  in later versions was identified: SearchImageQuality (v1.2.3)
+  hard-rejects GIF/<600px/sample variants and collapses each source to
+  a single portrait-biased best image; required-tags became hard
+  constraints (no-match keeps the old wallpaper); preferred fallback
+  became bounded; URL whitelist gating starved races. The clone keeps
+  the 1.0 ladder (strict -> soft-hinted 38% -> slider-only -> untagged
+  ALWAYS) and folds in only safe later fixes: TagExpander modifier
+  preservation, v1.0.1 daily-chain fix, v1.2.1 worker self-block fix,
+  v1.2.5 UPDATE-anchor ticker. UI: WYSIWYG pinch/drag preview whose
+  transform IS the applied crop, tags editor, style slider, Pure/Mix/
+  NSFW, home/lock same-or-different, history(5)+restore, save-to-
+  gallery, mascot quips + 10-tap easter egg.
+- Image folders (ImageFolderScreen): SAF OpenDocumentTree with persisted
+  grant, DocumentsContract child query (image/*), grid of subsampled
+  thumbnails, set as ENGINE wallpaper (packSceneWallpaper -> downloads/
+  -> callApplyWallpaper) or SYSTEM wallpaper.
+
+Reminders added below.
+
+Reminders for future agents:
+  95. TEXI flag 0x20 = full-mip PC texture (xray_sync_1.tex 3456x2160
+      RGBA = 29.9 MB, +mips = 40 MB). Our engine cannot render them;
+      MpkgPacker.texFlag0x20IsTranscodable gates the compat override.
+      If another flag-0x20 format renders black, extend that function.
+  96. A preset's project.json survives downloadWorkshopPkg's internal
+      cleanup() (cleanup only drops Steam/OkHttp, never the install
+      dir). The BASE download wipes workshop_downloads/<baseId> at
+      start (stale-clear) — that's a different dir from the preset's.
+  97. VideoTrimScreen's library mode calls importVideoToLibrary() which
+      reads pendingVideoItem SYNCHRONOUSLY before launching — call
+      onVideoConsumedByTrimScreen() AFTER it, never before.
+  98. Nyanpasu image choice: never add hard quality gates, GIF blocks,
+      minimum-resolution floors or required-tag hard constraints to
+      NyanpasuSearch — that is exactly what ruined later versions.
