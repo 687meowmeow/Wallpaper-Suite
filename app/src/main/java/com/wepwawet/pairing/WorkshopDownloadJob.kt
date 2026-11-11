@@ -989,8 +989,26 @@ object WorkshopDownloadJob {
                     WEPWAWET_SETTINGS_PREFS, Context.MODE_PRIVATE)
                     .getBoolean(WEPWAWET_KEY_PKG_CACHE_ENABLED, false)
                 val cachedPkg = File(File(appContext.cacheDir, "pkg_cache"), "${item.id}.pkg")
+                // v0.8.9: PKGV-magic guard (same as the library path) — a
+                // bogus cache entry (e.g. a v0.9.0 preset's preview.gif)
+                // must never be reused as scene content.
+                fun isScenePkgCache(file: File): Boolean {
+                    if (!file.exists() || file.length() < 8) return false
+                    return try {
+                        java.io.RandomAccessFile(file, "r").use { raf ->
+                            val h = ByteArray(8)
+                            raf.readFully(h)
+                            h[0] == 0x08.toByte() && h[4] == 'P'.code.toByte() &&
+                                h[5] == 'K'.code.toByte() && h[6] == 'G'.code.toByte() &&
+                                h[7] == 'V'.code.toByte()
+                        }
+                    } catch (_: Exception) {
+                        false
+                    }
+                }
                 val canReuseCache = pkgCacheEnabled && cachedPkg.exists() &&
-                    cachedPkg.length() > 0L && !detectVideoByMagicBytes(cachedPkg)
+                    cachedPkg.length() > 0L && !detectVideoByMagicBytes(cachedPkg) &&
+                    isScenePkgCache(cachedPkg)
                 val downloadedPkg: File? = if (canReuseCache) {
                     WepWawetLogger.workshop("WorkshopDownloadJob.send: reusing cached .pkg (skip Steam download)",
                         "id" to item.id,
@@ -1050,9 +1068,23 @@ object WorkshopDownloadJob {
                     "result_size" to (downloadedPkg?.length() ?: -1L))
 
                 if (downloadedPkg == null || !downloadedPkg.exists() || downloadedPkg.length() == 0L) {
-                    val err = "Failed to download .pkg via Steam (see logs)"
+                    // v0.8.9: preset items have no content of their own — the
+                    // send-to-phone flow doesn't resolve their base wallpaper;
+                    // give a clear message instead of the generic failure.
+                    val presetProject = runCatching {
+                        downloaderRef?.parseProjectJson(
+                            File(appContext.cacheDir, "workshop_downloads/${item.id}"))
+                    }.getOrNull()
+                    val err = if (presetProject?.dependency != null &&
+                        presetProject.dependency.toLongOrNull() != null) {
+                        "This is a preset wallpaper — use Download (adds it to your " +
+                            "library with its base wallpaper) instead of send-to-phone"
+                    } else {
+                        "Failed to download .pkg via Steam (see logs)"
+                    }
                     WepWawetLogger.workshopWarn("WorkshopDownloadJob.send: pkg download failed/null",
-                        "id" to item.id)
+                        "id" to item.id,
+                        "is_preset" to (presetProject?.dependency != null))
                     updateState(itemId) { s -> s.copy(
                         isRunning = false,
                         status = err,
