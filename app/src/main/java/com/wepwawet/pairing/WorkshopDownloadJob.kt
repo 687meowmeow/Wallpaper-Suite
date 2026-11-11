@@ -406,8 +406,28 @@ object WorkshopDownloadJob {
                 WEPWAWET_SETTINGS_PREFS, Context.MODE_PRIVATE)
                 .getBoolean(WEPWAWET_KEY_PKG_CACHE_ENABLED, false)
             val cachedPkg = File(File(appContext.cacheDir, "pkg_cache"), "${item.id}.pkg")
+            // v0.8.9: the cache is only valid for real SCENE packages (PKGV
+            // magic). A preset item cached by the v0.9.0 bug (the Steam
+            // preview.gif was copied here as a bogus "<id>.pkg") must never
+            // be reused — it would pack the preview image as the wallpaper
+            // again. PKGV layout: u32 marker 8, then "PKGV" at offset 4.
+            fun isScenePkgCache(file: File): Boolean {
+                if (!file.exists() || file.length() < 8) return false
+                return try {
+                    java.io.RandomAccessFile(file, "r").use { raf ->
+                        val h = ByteArray(8)
+                        raf.readFully(h)
+                        h[0] == 0x08.toByte() && h[4] == 'P'.code.toByte() &&
+                            h[5] == 'K'.code.toByte() && h[6] == 'G'.code.toByte() &&
+                            h[7] == 'V'.code.toByte()
+                    }
+                } catch (_: Exception) {
+                    false
+                }
+            }
             val canReuseCache = pkgCacheEnabled && cachedPkg.exists() &&
-                cachedPkg.length() > 0L && !detectVideoByMagicBytes(cachedPkg)
+                cachedPkg.length() > 0L && !detectVideoByMagicBytes(cachedPkg) &&
+                isScenePkgCache(cachedPkg)
             val downloadedPkg: File? = if (canReuseCache) {
                 WepWawetLogger.workshop("WorkshopDownloadJob: reusing cached .pkg (skip Steam download)",
                     "id" to item.id,
@@ -477,12 +497,19 @@ object WorkshopDownloadJob {
                 "output_path" to (downloadedPkg?.absolutePath ?: "null"))
 
             if (downloadedPkg == null || !downloadedPkg.exists() || downloadedPkg.length() == 0L) {
-                // === v0.9.0: PRESET workshop items land here. ===
+                // === v0.8.9: PRESET workshop items land here. ===
                 // A preset's own download has no .pkg/media — project.json only
                 // NAMES a base wallpaper ("dependency") + saved property values
                 // ("preset"). WE semantics: play the dependency with the preset's
-                // values. Implement the same: download the base (the downloader
-                // is still authenticated) and pack it with the values applied.
+                // values. Implement the same: download the base and pack it with
+                // the values applied.
+                //
+                // v0.8.9 BUG FIX: the v0.9.0 code reused `downloaderRef` for
+                // the base download — but downloadWorkshopPkg's finally block
+                // already ran cleanup() (Steam logoff + disconnect + callback
+                // thread teardown) before returning null, so the base download
+                // could NEVER have connected. A FRESH WorkshopDownloader is
+                // created for the base pass (new CM session, own cleanup).
                 val presetInstallDir = File(appContext.cacheDir, "workshop_downloads/${item.id}")
                 val presetProject = runCatching {
                     downloaderRef?.parseProjectJson(presetInstallDir)
@@ -504,7 +531,8 @@ object WorkshopDownloadJob {
                         status = com.wepwawet.data.DownloadStatus.DOWNLOADING,
                         statusMessage = "Preset — downloading base wallpaper…")
                     val basePkgFile = File(appContext.cacheDir, "${item.id}_${sendId}_base.pkg")
-                    val baseDownloaded = downloaderRef?.downloadWorkshopPkg(
+                    val baseDownloader = WorkshopDownloader(steamUser, steamPass)
+                    val baseDownloaded = baseDownloader.downloadWorkshopPkg(
                         context = appContext,
                         workshopId = baseId,
                         outputFile = basePkgFile,
@@ -539,6 +567,9 @@ object WorkshopDownloadJob {
                                 installDir = baseInstallDir,
                                 presetValues = presetProject.presetValues,
                                 presetTitle = presetProject.title ?: item.title,
+                                // v0.8.9: the preset's own files (anything its
+                                // values point at) layer over the base's.
+                                presetFilesDir = presetInstallDir,
                             )
                         } finally {
                             if (wakeLock2.isHeld) wakeLock2.release()

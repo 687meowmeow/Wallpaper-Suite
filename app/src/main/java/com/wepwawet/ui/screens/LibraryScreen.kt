@@ -31,9 +31,8 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.CreateNewFolder
-import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Label
 import androidx.compose.material.icons.filled.PlaylistAdd
@@ -43,7 +42,6 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -54,7 +52,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
@@ -105,14 +102,10 @@ import java.util.Locale
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun LibraryScreen(
-    onBrowse: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenWallpaper: (WallpaperInfoSparse) -> Unit,
     onOpenDownloads: () -> Unit,
     onOpenWorkshopItem: (itemId: String) -> Unit = {},
-    // v0.9.0: the two new features' entry points.
-    onOpenImageFolders: () -> Unit = {},
-    onOpenNyanpasu: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -291,6 +284,28 @@ fun LibraryScreen(
                     title = "Wallpapers",
                     onBack = null,
                     actions = {
+                        // v0.8.9: Import lives here — the two stacked button
+                        // rows that used to occupy the top of this screen are
+                        // gone (bottom navigation now carries Workshop /
+                        // Folders / Daily), which returns ~120dp of height to
+                        // the wallpaper grid.
+                        IconButton(onClick = {
+                            try {
+                                importLauncher.launch(
+                                    arrayOf(
+                                        "video/*", "image/jpg", "image/jpeg", "image/png",
+                                        "image/webp", "image/gif", "application/*",
+                                    )
+                                )
+                            } catch (t: Throwable) {
+                            }
+                        }) {
+                            Icon(
+                                Icons.Filled.Add,
+                                contentDescription = "Import wallpapers",
+                                tint = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
                         IconButton(onClick = { searching = true }) {
                             Icon(
                                 Icons.Filled.Search,
@@ -354,58 +369,7 @@ fun LibraryScreen(
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Button(
-                    onClick = onBrowse,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("Browse Workshop")
-                }
-                OutlinedButton(
-                    onClick = {
-                        try {
-                            importLauncher.launch(
-                                arrayOf(
-                                    "video/*", "image/jpg", "image/jpeg", "image/png",
-                                    "image/webp", "image/gif", "application/*",
-                                )
-                            )
-                        } catch (t: Throwable) {
-                        }
-                    },
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("Import")
-                }
-            }
-
-            // ===== v0.9.0: the new feature row — Nyanpasu + image folders. =====
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 0.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                OutlinedButton(
-                    onClick = onOpenNyanpasu,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("Auto wallpaper")
-                }
-                OutlinedButton(
-                    onClick = onOpenImageFolders,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("Image folders")
-                }
-            }
-
-            // ===== v0.9.0: Group filter chips =====
+            // ===== Group filter chips =====
             // "All" + one chip per group + a "＋" chip to create a group.
             // Tap a chip to filter; long-press a group chip to rename/delete.
             androidx.compose.foundation.layout.Row(
@@ -467,7 +431,8 @@ fun LibraryScreen(
                         Spacer(Modifier.height(8.dp))
                         Text(
                             if (filterText.isBlank())
-                                "Browse the workshop or import .mpkg / video / image files from your device."
+                                "Browse the Workshop tab or import .mpkg / video / image files " +
+                                    "with the + button up top."
                             else "Try a different search or change the sort.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,

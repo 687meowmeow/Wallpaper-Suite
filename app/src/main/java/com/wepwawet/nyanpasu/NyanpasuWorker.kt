@@ -202,8 +202,8 @@ class NyanpasuApplyWorker(context: Context, params: WorkerParameters) :
             val nm = ctx.getSystemService(NotificationManager::class.java)
             nm.createNotificationChannel(
                 NotificationChannel(
-                    "nyanpasu_auto",
-                    "Nyanpasu auto wallpaper",
+                    "daily_auto_wallpaper",
+                    "Daily auto wallpaper",
                     NotificationManager.IMPORTANCE_LOW,
                 ).apply { setShowBadge(false) })
         }
@@ -211,9 +211,9 @@ class NyanpasuApplyWorker(context: Context, params: WorkerParameters) :
 
     private fun notifyApplied(ctx: Context) = try {
         ensureChannel(ctx)
-        val notif = NotificationCompat.Builder(ctx, "nyanpasu_auto")
+        val notif = NotificationCompat.Builder(ctx, "daily_auto_wallpaper")
             .setSmallIcon(android.R.drawable.ic_menu_gallery)
-            .setContentTitle("Nyanpasu — wallpaper updated")
+            .setContentTitle("Daily wallpaper updated")
             .setContentText("A fresh image was applied to your screens.")
             .setAutoCancel(true)
             .build()
@@ -225,9 +225,9 @@ class NyanpasuApplyWorker(context: Context, params: WorkerParameters) :
 
     private fun notifyFailed(ctx: Context) = try {
         ensureChannel(ctx)
-        val notif = NotificationCompat.Builder(ctx, "nyanpasu_auto")
+        val notif = NotificationCompat.Builder(ctx, "daily_auto_wallpaper")
             .setSmallIcon(android.R.drawable.ic_menu_gallery)
-            .setContentTitle("Nyanpasu — update failed")
+            .setContentTitle("Daily wallpaper update failed")
             .setContentText("Keeping the current wallpaper. Will retry on schedule.")
             .setAutoCancel(true)
             .build()

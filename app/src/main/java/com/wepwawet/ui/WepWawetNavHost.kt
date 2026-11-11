@@ -1,14 +1,29 @@
 package com.wepwawet.ui
 
 import android.content.Context
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.LazyGridState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Explore
+import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Wallpaper
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.wepwawet.data.SteamApiService
@@ -27,17 +42,47 @@ import com.wepwawet.ui.screens.WallpaperPreviewScreen
 import com.wepwawet.ui.screens.WorkshopBrowserScreen
 
 /**
- * WepWawet navigation host. Eight destinations:
+ * A bottom-navigation tab of the main Scaffold.
  *
- *   - workshop             (default landing — WorkshopBrowserScreen, global browse)
- *   - creator/{steamId}    (WorkshopBrowserScreen scoped to a single creator)
- *   - downloads            (DownloadManagerScreen showing active + completed downloads)
- *   - detail/{itemId}     (WallpaperDetailScreen — workshop item detail)
- *   - pairing             (PairingScreen)
- *   - settings            (SettingsScreen)
- *   - logs                (LogsScreen)
- *   - favorites           (v0.7.1: placeholder screen — full saved-creators grid TBD)
+ * v0.8.9 UI/UX rework: the library screen's two stacked button rows
+ * (Browse Workshop / Import / Auto wallpaper / Image folders) are gone.
+ * Material 3's own guidance (m3.material.io/components/navigation-bar)
+ * prescribes a bottom navigation bar for "three to five destinations of
+ * equal importance" — exactly our case — which frees the entire top of
+ * every screen for content. Import moved to a top-bar "+" action on the
+ * Wallpapers tab; Settings and Downloads remain top-bar icons.
+ */
+private data class BottomTab(
+    val route: String,
+    val label: String,
+    val icon: ImageVector,
+)
+
+private val BOTTOM_TABS = listOf(
+    BottomTab("library", "Wallpapers", Icons.Filled.Wallpaper),
+    BottomTab("workshop", "Workshop", Icons.Filled.Explore),
+    BottomTab("imageFolders", "Folders", Icons.Filled.PhotoLibrary),
+    BottomTab("daily", "Daily", Icons.Filled.AutoAwesome),
+)
+
+/**
+ * WepWawet navigation host — a Material 3 bottom bar with the four
+ * top-level destinations plus the drill-down routes above it:
  *
+ *   - library            (Wallpapers tab — the device's wallpaper collection)
+ *   - workshop           (Workshop tab — global Steam Workshop browse)
+ *   - imageFolders       (Folders tab — pick a device folder of images)
+ *   - daily              (Daily tab — auto wallpaper from booru sources)
+ *   - creator/{steamId}  (WorkshopBrowserScreen scoped to a single creator)
+ *   - downloads          (DownloadManagerScreen showing active + completed)
+ *   - detail/{itemId}    (WallpaperDetailScreen — workshop item detail)
+ *   - preview            (live-rendering preview + apply + properties)
+ *   - playlist / pairing / settings / logs / favorites / videoTrim
+ *
+ * Tab switches use the canonical M3 pattern (popUpTo the start
+ * destination with saveState + launchSingleTop + restoreState) so every
+ * tab keeps its own scroll/state; drill-down routes hide the bar and get
+ * a back arrow instead.
  * A single [WorkshopRepository] is created at the NavHost level (via [remember])
  * so that the WorkshopBrowserScreen and WallpaperDetailScreen share the same
  * in-memory cache, browse session, and search session. If they each created
@@ -131,13 +176,49 @@ fun WepWawetNavHost() {
         }
     }
 
-    NavHost(navController = nav, startDestination = "library") {
+    // v0.8.9: the bottom bar shows ONLY on the four top-level tabs —
+    // drill-down routes (detail, preview, settings, …) are full-screen
+    // with a back arrow instead.
+    val backStackEntry by nav.currentBackStackEntryAsState()
+    val currentRoute = backStackEntry?.destination?.route
+    val showBottomBar = currentRoute != null && currentRoute in BOTTOM_TABS.map { it.route }
 
-        // v0.8.0: the library is the new main page — the device's wallpaper
-        // collection (engine-enumerated) + Browse Workshop + manual import.
+    fun navigateToTab(route: String) {
+        if (route == currentRoute) return
+        nav.navigate(route) {
+            popUpTo(nav.graph.startDestinationId) { saveState = true }
+            launchSingleTop = true
+            restoreState = true
+        }
+    }
+
+    Scaffold(
+        bottomBar = {
+            if (showBottomBar) {
+                NavigationBar {
+                    for (tab in BOTTOM_TABS) {
+                        NavigationBarItem(
+                            selected = currentRoute == tab.route,
+                            onClick = { navigateToTab(tab.route) },
+                            icon = { Icon(tab.icon, contentDescription = tab.label) },
+                            label = { Text(tab.label) },
+                        )
+                    }
+                }
+            }
+        },
+    ) { padding ->
+    NavHost(
+        navController = nav,
+        startDestination = "library",
+        modifier = Modifier.padding(padding),
+    ) {
+
+        // v0.8.0: the library is the main page — the device's wallpaper
+        // collection (engine-enumerated) + manual import. The Workshop /
+        // Folders / Daily entry points live in the bottom navigation bar.
         composable("library") {
             LibraryScreen(
-                onBrowse = { nav.navigate("workshop") },
                 onOpenSettings = { nav.navigate("settings") },
                 onOpenDownloads = { nav.navigate("downloads") },
                 onOpenWorkshopItem = { itemId -> nav.navigate("detail/$itemId") },
@@ -145,27 +226,21 @@ fun WepWawetNavHost() {
                     com.wepwawet.engine.PreviewRequestHolder.set(wallpaper)
                     nav.navigate("preview")
                 },
-                onOpenImageFolders = { nav.navigate("imageFolders") },
-                onOpenNyanpasu = { nav.navigate("nyanpasu") },
             )
         }
 
-        // v0.9.0: local image folders — pick a folder, grid its images,
-        // one-tap set-as-wallpaper.
+        // v0.8.9: local image folders — a bottom-nav tab: pick a folder,
+        // grid its images, one-tap set-as-wallpaper.
         composable("imageFolders") {
-            androidx.compose.runtime.LaunchedEffect(Unit) {
-                WepWawetLogger.lifecycle("NavHost navigate to imageFolders")
-            }
-            com.wepwawet.ui.screens.ImageFolderScreen(onBack = { nav.popBackStack() })
+            com.wepwawet.ui.screens.ImageFolderScreen(onBack = null)
         }
 
-        // v0.9.0: Nyanpasu — the ACG auto-wallpaper clone (1.0 image
-        // philosophy, MIT-based reimplementation).
-        composable("nyanpasu") {
-            androidx.compose.runtime.LaunchedEffect(Unit) {
-                WepWawetLogger.lifecycle("NavHost navigate to nyanpasu")
-            }
-            com.wepwawet.nyanpasu.NyanpasuScreen(onBack = { nav.popBackStack() })
+        // v0.8.9: Daily — the auto-wallpaper screen (booru sources, tag
+        // ladder, schedule). A bottom-nav tab, so no back arrow; the
+        // implementation package keeps its historical name but NO
+        // user-visible string carries it.
+        composable("daily") {
+            com.wepwawet.nyanpasu.NyanpasuScreen(onBack = null)
         }
 
         // v0.8.0: live-rendering preview + apply + properties + playlist.
@@ -197,7 +272,8 @@ fun WepWawetNavHost() {
                 onOpenFavorites = { nav.navigate("favorites") },
                 onOpenPairing = { nav.navigate("pairing") },
                 onCreatorClick = { steamId -> nav.navigate("creator/$steamId") },
-                onBack = { nav.popBackStack() },
+                // v0.8.9: the Workshop is a bottom-nav tab — no back arrow.
+                onBack = null,
                 repo = repo,
                 gridState = workshopGridState,
             )
@@ -368,4 +444,5 @@ fun WepWawetNavHost() {
             )
         }
     }
+    } // Scaffold content
 }

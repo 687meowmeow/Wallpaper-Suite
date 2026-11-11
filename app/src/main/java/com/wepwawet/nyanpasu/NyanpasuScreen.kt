@@ -24,7 +24,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.History
@@ -63,7 +62,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
@@ -79,17 +77,23 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Nyanpasu — the ACG auto-wallpaper screen.
+ * Daily — the auto-wallpaper screen.
  *
- * A clone of Nyanpasu Wallpaper v1.0.0 by FranklinNexus (MIT License),
- * re-skinned to fit WallpaperSuite's Material 3 style. The 1.0 image
- * philosophy is preserved verbatim (see [NyanpasuSearch]); the mascot's
- * commentary survives as a light status-line quip system with the
- * 10-tap easter egg.
+ * Search-engine behavior reimplemented from Nyanpasu Wallpaper v1.0.0
+ * by FranklinNexus (MIT License — attribution kept here in source only;
+ * no user-visible string carries the name). The 1.0 image philosophy is
+ * preserved verbatim (see [NyanpasuSearch]): the generous tag ladder
+ * (strict → soft-hinted → slider-only → untagged fallback) with NO
+ * quality gating — an image is ALWAYS preferred over no image.
+ *
+ * v0.8.9: renamed to "Daily wallpaper" and merged into the app's Material
+ * 3 look — a bottom-nav tab (no back arrow), auto-fetch on open (the old
+ * "Tap Refresh" black box is gone), a themed placeholder while searching,
+ * and the same cards/typography as the rest of WallpaperSuite.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun NyanpasuScreen(onBack: () -> Unit) {
+fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
@@ -234,7 +238,7 @@ fun NyanpasuScreen(onBack: () -> Unit) {
                     context, bmp, zoom, panX * scaleToScreen, panY * scaleToScreen)
             }
             val ok = NyanpasuApplier.saveToGallery(context, crop)
-            snackbar.showSnackbar(if (ok) "Saved to Pictures/Nyanpasu ✓" else "Save failed")
+            snackbar.showSnackbar(if (ok) "Saved to Pictures/WallpaperSuite ✓" else "Save failed")
         }
     }
 
@@ -242,6 +246,13 @@ fun NyanpasuScreen(onBack: () -> Unit) {
     LaunchedEffect(scheduleMode) {
         NyanpasuPrefs.writeSchedule(context, scheduleMode)
         NyanpasuScheduler.reschedule(context)
+    }
+
+    // v0.8.9: auto-fetch on open — the screen used to show a black box
+    // with "Tap Refresh to find a wallpaper" until the user acted; a
+    // wallpaper app should present a wallpaper.
+    LaunchedEffect(Unit) {
+        if (previewBitmap == null && !fetching) fetchNew()
     }
 
     val transformState = rememberTransformableState { zoomChange, panChange, _ ->
@@ -254,7 +265,7 @@ fun NyanpasuScreen(onBack: () -> Unit) {
     Scaffold(
         topBar = {
             SlimTopBar(
-                title = "Nyanpasu",
+                title = "Daily wallpaper",
                 onBack = onBack,
             )
         },
@@ -269,12 +280,14 @@ fun NyanpasuScreen(onBack: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             // ===== WYSIWYG preview =====
+            // v0.8.9: the placeholder is themed (surfaceVariant + icon) —
+            // the old plain-Color.Black box read as a broken screen.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(screenAspect.coerceIn(0.4f, 1f))
                     .clip(RoundedCornerShape(12.dp))
-                    .background(Color.Black)
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
                     .onSizeChanged { previewBoxSize = it }
                     .transformable(transformState),
                 contentAlignment = Alignment.Center,
@@ -290,16 +303,34 @@ fun NyanpasuScreen(onBack: () -> Unit) {
                             .graphicsLayerZoom(zoom, panX, panY),
                     )
                 } else {
-                    Text(
-                        if (fetching) "Searching…" else "Tap Refresh to find a wallpaper",
-                        color = Color.White.copy(alpha = 0.7f),
-                        textAlign = TextAlign.Center,
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier.padding(24.dp),
-                    )
-                }
-                if (fetching) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.align(Alignment.Center).size(40.dp))
+                    ) {
+                        if (fetching) {
+                            CircularProgressIndicator(modifier = Modifier.size(36.dp))
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                "Finding a wallpaper…",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        } else {
+                            Icon(
+                                Icons.Filled.Refresh,
+                                contentDescription = null,
+                                modifier = Modifier.size(36.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                statusLine ?: "Tap Refresh to find a wallpaper",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                    }
                 }
             }
             Text(
@@ -324,7 +355,7 @@ fun NyanpasuScreen(onBack: () -> Unit) {
                     mascotTaps++
                     if (mascotTaps >= 10) {
                         mascotTaps = 0
-                        statusLine = "✨ Nyanpasu~! (10 taps — the mascot is pleased)"
+                        statusLine = "✨ You found the easter egg — the wallpaper gods smile upon you."
                     }
                 },
             )
@@ -548,8 +579,8 @@ fun NyanpasuScreen(onBack: () -> Unit) {
             }
 
             Text(
-                "Search engine cloned from Nyanpasu Wallpaper 1.0 (MIT) — " +
-                    "the generous 1.0 tag ladder: strict → soft → untagged, always an image.",
+                "Fresh wallpapers from anime image boards — strict tags first, " +
+                    "soft tags as hints, always something new.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
@@ -650,20 +681,16 @@ private fun HistoryThumb(entry: NyanpasuApplier.HistoryEntry) {
     }
 }
 
-/** A light homage to the 1.0 mascot's commentary. */
+/** Light status flavor for the quip line. */
 private val QUIPS = listOf(
-    "Nyanpasu~ The mascot approves of your tags.",
-    "Fresh pixels incoming — the mascot is excited.",
-    "The mascot says: zoom in, the good part is always in the crop.",
+    "Fresh pixels incoming.",
+    "Zoom in — the good part is always in the crop.",
     "Locked and loaded. Home screen, that is.",
-    "The mascot counted 131 Steam licenses once. Very proud.",
     "Soft tags are like seasoning — 38% of the time, perfect.",
-    "The mascot recommends Blue Archive tags today.",
     "One Refresh a day keeps the boring wallpaper away.",
-    "The mascot saved your crop. You're welcome.",
-    "Wallpapers are temporary. Nyanpasu is forever.",
-    "The mascot is buffering… just like your tags.",
-    "Late night refresh? The mascot won't judge.",
+    "Your crop was saved. You're welcome.",
+    "Late night refresh? No judgment.",
+    "A new wallpaper a day keeps monotony away.",
 )
 
 private fun quip(): String = QUIPS.random()

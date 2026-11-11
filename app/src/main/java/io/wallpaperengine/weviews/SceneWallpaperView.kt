@@ -64,6 +64,27 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
     @Volatile private var firstFrameCallback: Runnable? = null
     @Volatile private var firstFrameFired: Boolean = false
 
+    // v0.8.9: black-render detection. Some scene wallpapers render a solid
+    // black frame in the in-app preview (e.g. Brown Dust x-ray 3767714202 —
+    // its TEXI-flag-0x20 full-mip textures render fine as the APPLIED
+    // wallpaper but black in the preview's GL surface; the v0.9.0 attempt
+    // to rebuild those textures broke the applied wallpaper and was
+    // reverted). Instead of touching the packed bytes, the renderer now
+    // PROBES its own framebuffer on frames 30 and 180: if every sampled
+    // pixel is (near-)black on BOTH probes, the registered callback fires
+    // so the preview screen can fall back to the static preview image.
+    // A scene that draws any content disarms the probe immediately.
+    @Volatile private var blackFrameCallback: Runnable? = null
+
+    /**
+     * Register the fallback to invoke when the live GL preview renders
+     * nothing but black. Pass null to disarm. Probing is cheap: two
+     * one-shot 12-patch (8×8 px) glReadPixels sweeps.
+     */
+    fun setBlackFrameCallback(callback: Runnable?) {
+        blackFrameCallback = callback
+    }
+
     // v0.8.8 (xray-freeze diagnosis): the v0.8.6/v0.8.7 instrumentation
     // could NOT distinguish "the render loop stopped" from "frames keep
     // rendering but the scene is frozen": the frame-SPIKE detector only
@@ -712,6 +733,23 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
                     WepWawetLogger.engine("SceneView: first frame drawn")
                     getActiveHandler()?.post { firstFrameCallback?.run() }
                 }
+                // v0.8.9: black-render probe (see setBlackFrameCallback).
+                // Runs on frames 30 (~0.5 s) and 180 (~3 s) — the second
+                // probe gives slow async texture uploads time to land.
+                if (blackFrameCallback != null && wallpaperWidth > 0 && wallpaperHeight > 0 &&
+                    (glFrameCount == 30L || glFrameCount == 180L)) {
+                    val black = isFramebufferBlack()
+                    WepWawetLogger.engine("SceneView: black-render probe",
+                        "frame" to glFrameCount,
+                        "black" to black)
+                    if (!black) {
+                        blackFrameCallback = null // scene draws content — disarm
+                    } else if (glFrameCount >= 180L) {
+                        val cb = blackFrameCallback
+                        blackFrameCallback = null
+                        getActiveHandler()?.post { cb?.run() }
+                    }
+                }
                 if (bitmapCallbackDelay > 0) {
                     bitmapCallbackDelay--
                     if (bitmapCallbackDelay <= 0 && bitmapCallback != null &&
@@ -776,6 +814,49 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
                     loadScene(it)
                     pendingScene = null
                 }
+            }
+        }
+
+        /**
+         * v0.8.9: sample the current framebuffer on a 4×3 grid of 8×8 px
+         * patches and report whether EVERY sampled pixel is near-black
+         * (< 10 per channel — generous enough for faint vignettes, strict
+         * enough that a letterboxed scene or a single bright particle
+         * counts as content). Runs on the GL thread inside onDrawFrame,
+         * where glReadPixels against the just-presented frame is legal.
+         */
+        private fun isFramebufferBlack(): Boolean {
+            return try {
+                val patch = 8
+                val buf = java.nio.ByteBuffer.allocateDirect(patch * patch * 4)
+                    .order(java.nio.ByteOrder.nativeOrder())
+                var blackPixels = 0
+                var totalPixels = 0
+                for (gy in 0 until 3) {
+                    for (gx in 0 until 4) {
+                        val x = (((gx + 0.5) / 4.0) * wallpaperWidth).toInt()
+                            .coerceIn(0, (wallpaperWidth - patch).coerceAtLeast(0))
+                        val y = (((gy + 0.5) / 3.0) * wallpaperHeight).toInt()
+                            .coerceIn(0, (wallpaperHeight - patch).coerceAtLeast(0))
+                        buf.rewind()
+                        android.opengl.GLES20.glReadPixels(
+                            x, y, patch, patch,
+                            android.opengl.GLES20.GL_RGBA,
+                            android.opengl.GLES20.GL_UNSIGNED_BYTE, buf)
+                        buf.rewind()
+                        while (buf.remaining() >= 4) {
+                            val r = buf.get().toInt() and 0xFF
+                            val g = buf.get().toInt() and 0xFF
+                            val b = buf.get().toInt() and 0xFF
+                            buf.get() // alpha — ignored
+                            totalPixels++
+                            if (r < 10 && g < 10 && b < 10) blackPixels++
+                        }
+                    }
+                }
+                totalPixels > 0 && (blackPixels * 100L / totalPixels) >= 98L
+            } catch (t: Throwable) {
+                false
             }
         }
 

@@ -435,12 +435,97 @@ object WeEnginePrefs {
                 }
             }
         }
-        val bytes = lib.getWallpaperInfoPreviewBitmap(wallpaper.filePath) ?: return null
+        val bytes = lib.getWallpaperInfoPreviewBitmap(wallpaper.filePath)
+            // v0.8.9: Kotlin .mpkg fallback. The native engine's preview
+            // lookup misses some packages (e.g. a preview.gif-only scene —
+            // Brown Dust x-ray 3767714202), which left a BLANK card in the
+            // library ("missing its preview"). The .mpkg VFS is a format
+            // WE control (MpkgPacker writes it), so parse it directly and
+            // hand BitmapFactory the entry — it decodes GIF (first frame),
+            // JPEG, PNG, WebP and BMP.
+            ?: readMpkgPreviewEntry(context, wallpaper.filePath)
+            ?: return null
         return try {
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
         } catch (e: Exception) {
+            // v0.8.9: the native bytes failed to decode — try the VFS
+            // fallback bytes too before giving up.
+            val fallback = readMpkgPreviewEntry(context, wallpaper.filePath) ?: return null
+            try {
+                BitmapFactory.decodeByteArray(fallback, 0, fallback.size)
+            } catch (e2: Exception) {
+                null
+            }
+        }
+    }
+
+    /**
+     * v0.8.9: read a preview entry straight out of a packed .mpkg.
+     *
+     * Format (MpkgPacker.streamPack): [LE u32 marker=8]["PKGMdddd" 8-byte
+     * ASCII][LE u32 entryCount] then per entry [LE u32 nameLen][UTF-8 name]
+     * [LE u32 dataOffset][LE u32 size], followed by the data section.
+     * Candidate order mirrors the PC's preview variants: preview.jpg,
+     * preview.jpeg, preview.png, preview.webp, preview.gif.
+     */
+    private fun readMpkgPreviewEntry(context: Context, relativePath: String): ByteArray? {
+        return try {
+            val file = File(context.filesDir, relativePath)
+            if (!file.isFile || file.length() < 16L) return null
+            RandomAccessFile(file, "r").use { raf ->
+                val header = ByteArray(16)
+                raf.readFully(header)
+                if (!String(header, 4, 8, Charsets.US_ASCII).startsWith("PKGM")) return null
+                val count = readLeU32(header, 12)
+                if (count <= 0 || count > 100_000) return null
+                val candidates = arrayOf(
+                    "preview.jpg", "preview.jpeg", "preview.png", "preview.webp", "preview.gif"
+                )
+                var bestName: String? = null
+                var bestOffset = -1L
+                var bestSize = 0
+                var dataStart = 16L
+                for (i in 0 until count) {
+                    val nameLen = readLeU32At(raf) ?: return null
+                    if (nameLen <= 0 || nameLen > 4096) return null
+                    val nameBytes = ByteArray(nameLen)
+                    raf.readFully(nameBytes)
+                    val offset = readLeU32At(raf)?.toLong() ?: return null
+                    val size = readLeU32At(raf) ?: return null
+                    val name = String(nameBytes, Charsets.UTF_8)
+                    if (name in candidates) {
+                        if (bestName == null ||
+                            candidates.indexOf(name) < candidates.indexOf(bestName!!)) {
+                            bestName = name
+                            bestOffset = offset
+                            bestSize = size
+                        }
+                    }
+                    dataStart += 4 + nameLen + 4 + 4
+                }
+                if (bestOffset < 0 || bestSize <= 0) return null
+                raf.seek(dataStart + bestOffset)
+                val out = ByteArray(bestSize)
+                raf.readFully(out)
+                out
+            }
+        } catch (t: Throwable) {
             null
         }
+    }
+
+    private fun readLeU32(b: ByteArray, offset: Int): Int =
+        (b[offset].toInt() and 0xFF) or
+            ((b[offset + 1].toInt() and 0xFF) shl 8) or
+            ((b[offset + 2].toInt() and 0xFF) shl 16) or
+            ((b[offset + 3].toInt() and 0xFF) shl 24)
+
+    private fun readLeU32At(raf: RandomAccessFile): Int? = try {
+        val b = ByteArray(4)
+        raf.readFully(b)
+        readLeU32(b, 0)
+    } catch (t: Throwable) {
+        null
     }
 
     fun cropBitmap(bitmap: Bitmap, croppedSize: Int): Bitmap? {

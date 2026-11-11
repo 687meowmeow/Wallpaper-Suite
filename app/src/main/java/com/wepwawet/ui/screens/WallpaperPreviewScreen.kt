@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
@@ -150,6 +151,10 @@ fun WallpaperPreviewScreen(
     var propertiesRevision by remember { mutableStateOf(0) }
     var backgroundPreview by remember { mutableStateOf<Bitmap?>(null) }
     var showBackground by remember { mutableStateOf(true) }
+    // v0.8.9: the live GL scene rendered nothing but black (see
+    // SceneWallpaperView.setBlackFrameCallback) — the static preview is
+    // re-shown with a retry chip instead of leaving a black screen.
+    var livePreviewBlack by remember { mutableStateOf(false) }
 
     // ----- UI state -----
     var applied by remember {
@@ -300,6 +305,18 @@ fun WallpaperPreviewScreen(
                 WepWawetLogger.engine("Preview: first GL frame drawn — hiding static preview")
                 showBackground = false
             })
+            // v0.8.9: if the scene still renders only black ~3 s in (e.g.
+            // Brown Dust x-ray's TEXI-flag-0x20 textures render fine as
+            // the applied wallpaper but black in the preview surface),
+            // fall back to the static preview image with a retry chip —
+            // the wallpaper itself is unaffected.
+            sceneView.setBlackFrameCallback(Runnable {
+                if (backgroundPreview != null && !livePreviewBlack) {
+                    WepWawetLogger.engine("Preview: live scene renders black — showing static preview")
+                    livePreviewBlack = true
+                    showBackground = true
+                }
+            })
         } else {
             // Video wallpaper — no first-frame callback. Hide the bitmap
             // immediately (the video player's first frame appears within
@@ -445,6 +462,29 @@ fun WallpaperPreviewScreen(
                             contentDescription = null,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+                }
+                // v0.8.9: black live-render fallback chip — tap to give the
+                // GL scene another chance (it keeps running underneath).
+                if (livePreviewBlack) {
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 24.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(Color(0xCC1B1B20))
+                            .clickable {
+                                livePreviewBlack = false
+                                showBackground = false
+                            }
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "Live preview shows nothing — tap to retry",
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodySmall,
                         )
                     }
                 }
@@ -852,6 +892,9 @@ fun WallpaperPreviewScreen(
                         context, EngineLibrary.sceneLib(context), wallpaper)
                 }.getOrNull()
             }
+            // v0.8.9: reset the black-fallback state for this load.
+            livePreviewBlack = false
+            showBackground = true
             c.loadWallpaper(wallpaper.filePath)
             // details (resolved off the main thread)
             details = withContext(Dispatchers.IO) {

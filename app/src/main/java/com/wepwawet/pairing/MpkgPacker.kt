@@ -146,17 +146,7 @@ object MpkgPacker {
     }
 
     /**
-     * v0.9.0: Is a TEXI-flag-0x20 texture one we can decode + re-encode?
-     * Format 0 (RGBA8888, incl. PNG/JPEG bodies), 1 (RGB888) and the
-     * DXT/BC family all have working converters ([convertFormat0TexPc] /
-     * [convertTexDxtToEtc2]). Everything else (RG88/R8 masks, ETC2
-     * sources, exotic formats) keeps the PC verbatim rule.
-     */
-    private fun texFlag0x20IsTranscodable(texiFormat: Int): Boolean =
-        texiFormat == 0 || texiFormat == 1 || texiFormat in PcTexTranscoder.DXT_SOURCE_FORMATS
-
-    /**
-     * v0.9.0: Apply a PRESET's saved property values to a packed
+     * v0.8.9: Apply a PRESET's saved property values to a packed
      * project.json. The preset map is flat ({name: value}) — exactly how
      * WE stores user property overrides. Matching names under
      * general.properties get their "value" replaced; the preset title
@@ -415,8 +405,16 @@ object MpkgPacker {
          * wallpaper with the preset's values).
          */
         presetValues: Map<String, Any>? = null,
-        /** v0.9.0: preset title — replaces the base's project.json title. */
+        /** v0.8.9: preset title — replaces the base's project.json title. */
         presetTitle: String? = null,
+        /**
+         * v0.8.9: the PRESET item's own install dir. WE presets can ship
+         * extra files their values point at (e.g. files/clip.mp4); the
+         * renderer reads them BESIDE the base's content (same VFS paths),
+         * and same-path files OVERRIDE the base's. project.json / preview.*
+         * / the .DepotDownloader bookkeeping dir are never layered in.
+         */
+        presetFilesDir: File? = null,
     ): Long {
         WepWawetLogger.proxy("MpkgPacker.packFromPkg START",
             "item_id" to item.id,
@@ -510,7 +508,7 @@ object MpkgPacker {
             }
         }
 
-        // === v0.9.0: PRESET value application. ===
+        // === v0.8.9: PRESET value application. ===
         // Merge the preset's saved property values into the (base)
         // wallpaper's project.json general.properties.*.value, and swap in
         // the preset's title. Applied BEFORE any other project.json
@@ -535,6 +533,54 @@ object MpkgPacker {
             } else {
                 WepWawetLogger.proxyWarn("MpkgPacker.packFromPkg: preset given but no project.json entry found",
                     "entry_count" to entries.size)
+            }
+        }
+
+        // === v0.8.9: PRESET file layering. ===
+        // WE preset semantics (verified against WallpaperMachine's published
+        // behavior): the assembled wallpaper is "the base's manifest with
+        // the preset's title, description, tags, rating, PREVIEW and
+        // Workshop id" — and the preset's own files land BESIDE the base's
+        // content ("a scene mounts its folder under its package, so a
+        // property naming files/clip.mp4 finds the clip"). In the
+        // single-VFS .mpkg we model that as: every non-bookkeeping file
+        // from the preset's install dir is added at its relative path,
+        // OVERRIDING a base entry of the same path; when the preset ships
+        // its own preview, ONLY that preview survives (the preset's
+        // preview represents the preset, not the base).
+        if (presetFilesDir != null && presetFilesDir.isDirectory) {
+            val layered = mutableListOf<Pair<String, ByteArray>>()
+            var presetHasPreview = false
+            presetFilesDir.walkTopDown().forEach { file ->
+                if (!file.isFile) return@forEach
+                val rel = file.relativeTo(presetFilesDir).invariantSeparatorsPath
+                if (rel.startsWith(".DepotDownloader/")) return@forEach
+                if (rel.equals("project.json", true)) return@forEach
+                if (rel.substringAfterLast('/', "").startsWith("preview.")) presetHasPreview = true
+                runCatching {
+                    val bytes = file.readBytes()
+                    if (bytes.isNotEmpty()) layered.add(rel to bytes)
+                }
+            }
+            for ((path, bytes) in layered) {
+                val existing = entries.indexOfFirst { it.first.equals(path, true) }
+                if (existing >= 0) {
+                    entries[existing] = path to bytes
+                } else {
+                    entries.add(path to bytes)
+                }
+            }
+            if (presetHasPreview) {
+                entries.removeAll { (name, _) ->
+                    name.substringAfterLast('/', "").startsWith("preview.") &&
+                        layered.none { it.first.equals(name, true) }
+                }
+            }
+            if (layered.isNotEmpty()) {
+                WepWawetLogger.proxy("MpkgPacker.packFromPkg: preset files layered over base",
+                    "count" to layered.size,
+                    "preset_preview_wins" to presetHasPreview,
+                    "paths" to layered.joinToString(", ") { it.first }.take(300))
             }
         }
 
@@ -699,28 +745,17 @@ object MpkgPacker {
             val pcCopyThrough = texInfo == null ||
                 texiFormat == 8 || texiFormat == 9 ||
                 (texInfo.imageCount > 1) ||
-                ((texInfo.flags and 0x20) != 0 && !texFlag0x20IsTranscodable(texiFormat)) ||
+                (texInfo.flags and 0x20) != 0 ||
                 (texiFormat == 1 && !pcForcesEtc2(name))
 
-            // === v0.9.0 ENGINE-COMPAT OVERRIDE (the xray black-screen fix). ===
-            // PC parity says a .tex with TEXI flag 0x20 ships VERBATIM — the
-            // PC transcoder copies it through, and WE Android's native
-            // engine can render what it produces. OUR engine clone cannot:
-            // workshop item 3767714202 (BrownDust2 x-ray 4K) carries
-            // materials/xray_sync_1.tex — format 0 RGBA8888, flags 0x22,
-            // 40 MB body = a FULL MIPMAP CHAIN (3456×2160 × 4/3) — which
-            // passed through verbatim and rendered a solid BLACK preview
-            // (scene init + first frame drew fine; every other wallpaper
-            // whose textures went through the normal transcode previewed
-            // correctly). For RGBA8888/RGB888 sources with flag 0x20 we now
-            // run the SAME decode → normalize → rebuild pipeline the PC
-            // transcoder uses for handled formats (single mip, TEXB0004):
-            // the pixel data survives unchanged in a layout our engine
-            // provably renders. If the decode fails we keep the verbatim
-            // bytes (PC behavior) — no regression for exotic bodies.
-            val texFlag0x20Compat = texInfo != null &&
-                (texInfo.flags and 0x20) != 0 &&
-                texFlag0x20IsTranscodable(texiFormat)
+            // v0.8.9: the v0.9.0 "engine-compat override" that transcoded
+            // TEXI-flag-0x20 RGBA8888/RGB888 textures (decode → normalize →
+            // rebuild) is REVERTED. Ground truth from the device: the
+            // verbatim bytes render CORRECTLY as the applied live wallpaper
+            // (that is exactly how the PC transcoder ships them — flag-0x20
+            // files copy through unchanged), while the rebuilt texture
+            // rendered a solid black wallpaper. PC parity is also the safe
+            // rule: keep flag-0x20 .tex files byte-identical.
 
             // ---- The formats the PC tool errors on (original bytes ship) ----
             val pcErrorsOnIt = !pcCopyThrough &&
@@ -745,31 +780,10 @@ object MpkgPacker {
                         texInfo == null -> "unparseable header"
                         texiFormat == 8 || texiFormat == 9 -> "RG88/R8 (format $texiFormat)"
                         texInfo.imageCount > 1 -> "animated/multi-image (imageCount=${texInfo.imageCount})"
-                        (texInfo.flags and 0x20) != 0 -> "TEXI flag 0x20 (untranscodable format $texiFormat)"
+                        (texInfo.flags and 0x20) != 0 -> "TEXI flag 0x20"
                         texiFormat == 1 -> "RGB888 without -c force"
                         else -> "?"
                     })
-                processedEntries.add(texEntry)
-                continue
-            }
-            if (texFlag0x20Compat) {
-                WepWawetLogger.proxy("MpkgPacker.packFromPkg: TEXI flag 0x20 compat override — transcoding to normalized single-mip",
-                    "name" to name,
-                    "texi_format" to texiFormat,
-                    "tex_size" to blob.size,
-                    "note" to "verbatim pass-through rendered black in our engine (full-mip PC texture)")
-                val compatConverted = if (texiFormat in PcTexTranscoder.DXT_SOURCE_FORMATS) {
-                    convertTexDxtToEtc2(blob, name)
-                } else {
-                    convertFormat0TexPc(blob, name)
-                }
-                if (compatConverted != null) {
-                    processedEntries.add(Pair(name, compatConverted))
-                    continue
-                }
-                WepWawetLogger.proxyWarn("MpkgPacker.packFromPkg: flag-0x20 compat transcode FAILED — falling back to verbatim bytes",
-                    "name" to name,
-                    "texi_format" to texiFormat)
                 processedEntries.add(texEntry)
                 continue
             }

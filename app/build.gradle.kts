@@ -599,8 +599,8 @@ android {
         //     hardcoded "Android 13" user-agent; M-U7 favorites LazyColumn
         //     keys; M-U12 10Hz recomposition storm while paused; M-A10 dead
         //     ic_launcher_background color (now referenced by the new icon).
-        versionCode = 126
-        versionName = "0.9.0-alpha"
+        versionCode = 127
+        versionName = "0.8.9-alpha"
         // Native ABI filter — only build for arm64-v8a (WE app targets Snapdragon 8 Gen 2+)
         ndk {
             abiFilters += "arm64-v8a"

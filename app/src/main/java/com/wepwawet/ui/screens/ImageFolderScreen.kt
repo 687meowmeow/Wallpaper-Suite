@@ -25,13 +25,13 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material.icons.filled.Wallpaper
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -55,8 +55,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.wepwawet.data.model.WorkshopItem
 import com.wepwawet.data.model.WallpaperType
 import com.wepwawet.engine.EngineLibrary
@@ -70,8 +73,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
- * v0.9.0: Image folders — pick a folder from the device (SAF), browse its
- * images in a grid, and set any of them as the live wallpaper.
+ * Folders — pick a folder from the device (SAF), browse its images in a
+ * grid, and set any of them as the live wallpaper.
  *
  * "Set as wallpaper" packs the image into a Scene .mpkg via the SAME
  * packer used for image-type workshop downloads ([MpkgPacker.packSceneWallpaper]
@@ -79,10 +82,21 @@ import java.io.File
  * library, and applies it through the standard WallpaperSuite flow.
  * A secondary action sets it as the plain SYSTEM wallpaper for people
  * who want the image outside the engine too.
+ *
+ * v0.8.9 (the "extremely bare bones" rework):
+ *  - a bottom-nav tab (no back arrow) with the folder + count in a header;
+ *  - memory-efficient thumbnails (two-pass stream decode with
+ *    inSampleSize — the old code read WHOLE image byte arrays per cell);
+ *  - tap opens a fullscreen preview dialog (what you see is what gets
+ *    applied) instead of a bare confirmation alert;
+ *  - idempotent imports: the library entry is keyed by the image's
+ *    document id + last-modified, so re-setting the same image REUSES
+ *    the packed .mpkg instead of stacking duplicates in downloads/;
+ *  - sort by Newest / Name.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ImageFolderScreen(onBack: () -> Unit) {
+fun ImageFolderScreen(onBack: (() -> Unit)? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
@@ -92,6 +106,8 @@ fun ImageFolderScreen(onBack: () -> Unit) {
     var loading by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf<ImageEntry?>(null) }
     var working by remember { mutableStateOf(false) }
+    var sortNewest by remember { mutableStateOf(true) }
+    var sortMenuOpen by remember { mutableStateOf(false) }
 
     val folderPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -109,16 +125,25 @@ fun ImageFolderScreen(onBack: () -> Unit) {
         }
     }
 
-    // Load the folder's images whenever the folder changes.
-    LaunchedEffect(folderUri) {
+    // Load the folder's images whenever the folder or sort changes.
+    LaunchedEffect(folderUri, sortNewest) {
         val uriStr = folderUri ?: return@LaunchedEffect
         loading = true
-        images = withContext(Dispatchers.IO) { enumerateFolderImages(context, uriStr) }
+        images = withContext(Dispatchers.IO) {
+            val list = enumerateFolderImages(context, uriStr)
+            if (sortNewest) list.sortedByDescending { it.lastModified }
+            else list.sortedBy { it.displayName.lowercase() }
+        }
         loading = false
         WepWawetLogger.appInfo("ImageFolderScreen: enumerated",
             "count" to images.size)
     }
 
+    /**
+     * Pack (or reuse) + import + apply. v0.8.9: the library entry is
+     * keyed by the image identity, so setting the same image again
+     * applies the EXISTING library file — no duplicate .mpkg churn.
+     */
     fun setAsEngineWallpaper(entry: ImageEntry) {
         if (working) return
         working = true
@@ -151,11 +176,7 @@ fun ImageFolderScreen(onBack: () -> Unit) {
         scope.launch {
             try {
                 val ok = withContext(Dispatchers.IO) {
-                    val bytes = context.contentResolver.openInputStream(Uri.parse(entry.uri))?.use { it.readBytes() }
-                    val bmp = bytes?.let {
-                        android.graphics.BitmapFactory.decodeByteArray(it, 0, it.size)
-                    }
-                    if (bmp == null) return@withContext false
+                    val bmp = decodeBitmapScaled(context, entry.uri, 4096) ?: return@withContext false
                     val crop = com.wepwawet.nyanpasu.NyanpasuApplier.cropForScreen(context, bmp)
                     val result = com.wepwawet.nyanpasu.NyanpasuApplier.apply(
                         context, crop, homeOn = true, lockOn = true)
@@ -172,9 +193,27 @@ fun ImageFolderScreen(onBack: () -> Unit) {
     Scaffold(
         topBar = {
             SlimTopBar(
-                title = "Image folders",
+                title = "Folders",
                 onBack = onBack,
                 actions = {
+                    Box {
+                        IconButton(onClick = { sortMenuOpen = true }) {
+                            Icon(Icons.Filled.Sort, contentDescription = "Sort")
+                        }
+                        DropdownMenu(
+                            expanded = sortMenuOpen,
+                            onDismissRequest = { sortMenuOpen = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text(if (sortNewest) "✓ Newest first" else "Newest first") },
+                                onClick = { sortNewest = true; sortMenuOpen = false },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (!sortNewest) "✓ Name (A–Z)" else "Name (A–Z)") },
+                                onClick = { sortNewest = false; sortMenuOpen = false },
+                            )
+                        }
+                    }
                     IconButton(onClick = {
                         try {
                             folderPicker.launch(null)
@@ -211,13 +250,14 @@ fun ImageFolderScreen(onBack: () -> Unit) {
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Spacer(Modifier.height(16.dp))
-                        Text("Pick a folder of images", style = MaterialTheme.typography.titleMedium)
+                        Text("Turn a folder into wallpapers", style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            "Choose any folder on your device — its images show up here " +
+                            "Pick any folder on your device — its images show up here " +
                                 "and can be set as your wallpaper with one tap.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
                         )
                         Spacer(Modifier.height(16.dp))
                         Button(onClick = { folderPicker.launch(null) }) {
@@ -252,6 +292,30 @@ fun ImageFolderScreen(onBack: () -> Unit) {
                     }
                 }
                 else -> {
+                    // Folder header: name + count (compact, single line).
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                folderDisplayName(folderUri!!),
+                                style = MaterialTheme.typography.titleSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                "${images.size} images",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        TextButton(onClick = { folderPicker.launch(null) }) {
+                            Text("Change")
+                        }
+                    }
                     LazyVerticalGrid(
                         columns = GridCells.Adaptive(minSize = 120.dp),
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(
@@ -269,53 +333,78 @@ fun ImageFolderScreen(onBack: () -> Unit) {
         }
     }
 
-    // The set-as-wallpaper choice dialog.
+    // ===== Fullscreen preview + set-as-wallpaper dialog =====
     selected?.let { entry ->
-        AlertDialog(
+        var fullBitmap by remember(entry.uri) { mutableStateOf<Bitmap?>(null) }
+        LaunchedEffect(entry.uri) {
+            fullBitmap = withContext(Dispatchers.IO) {
+                decodeBitmapScaled(context, entry.uri, 2048)
+            }
+        }
+        Dialog(
             onDismissRequest = { if (!working) selected = null },
-            title = { Text("Set as wallpaper") },
-            text = {
-                Column {
-                    Text(
-                        entry.displayName,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "Engine wallpaper packs the image as a Scene and plays it through " +
-                            "WallpaperSuite (with all engine features). System wallpaper " +
-                            "sets it as a plain Android wallpaper.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(vertical = 48.dp, horizontal = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    val bmp = fullBitmap
+                    if (bmp != null) {
+                        Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = entry.displayName,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    } else {
+                        CircularProgressIndicator()
+                    }
                 }
-            },
-            confirmButton = {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    entry.displayName,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(
+                    OutlinedButton(
                         onClick = { setAsSystemWallpaper(entry) },
                         enabled = !working,
-                    ) { Text("System") }
+                        modifier = Modifier.weight(1f),
+                    ) { Text("System wallpaper") }
                     Button(
                         onClick = { setAsEngineWallpaper(entry) },
-                        enabled = !working,
+                        enabled = !working && fullBitmap != null,
+                        modifier = Modifier.weight(1f),
                     ) {
                         if (working) {
                             CircularProgressIndicator(modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
+                        } else {
+                            Icon(Icons.Filled.Wallpaper, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
                         }
-                        Icon(Icons.Filled.Wallpaper, contentDescription = null)
-                        Spacer(Modifier.width(6.dp))
                         Text("Set as wallpaper")
                     }
                 }
-            },
-            dismissButton = {
-                TextButton(onClick = { if (!working) selected = null }) { Text("Cancel") }
-            },
-        )
+                Spacer(Modifier.height(4.dp))
+                TextButton(onClick = { if (!working) selected = null }) { Text("Close") }
+            }
+        }
     }
 }
 
@@ -331,6 +420,7 @@ data class ImageEntry(
 
 private const val PREFS = "wallpapersuite_image_folders"
 private const val KEY_FOLDER = "folder_uri"
+private const val KEY_IMPORTS = "imported_images"
 
 private fun readSavedFolder(context: Context): String? =
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_FOLDER, null)
@@ -340,7 +430,15 @@ private fun writeSavedFolder(context: Context, uri: String) {
         .edit().putString(KEY_FOLDER, uri).apply()
 }
 
-/** Query a SAF tree folder for image-kind files, newest first, capped at 500. */
+/** "content://…/tree/primary%3APictures%2FWallpapers" → "Pictures/Wallpapers". */
+private fun folderDisplayName(treeUriStr: String): String = try {
+    val docId = android.provider.DocumentsContract.getTreeDocumentId(Uri.parse(treeUriStr))
+    docId.substringAfter(':').ifBlank { docId }
+} catch (t: Throwable) {
+    "Folder"
+}
+
+/** Query a SAF tree folder for image-kind files, capped at 500. */
 private fun enumerateFolderImages(context: Context, folderUriStr: String): List<ImageEntry> {
     return try {
         val folder = Uri.parse(folderUriStr)
@@ -368,7 +466,7 @@ private fun enumerateFolderImages(context: Context, folderUriStr: String): List<
                 ))
             }
         }
-        result.sortedByDescending { it.lastModified }
+        result
     } catch (t: Throwable) {
         WepWawetLogger.appWarn("ImageFolderScreen: enumerate failed",
             "exception" to t.javaClass.name)
@@ -377,19 +475,70 @@ private fun enumerateFolderImages(context: Context, folderUriStr: String): List<
 }
 
 /**
+ * v0.8.9: memory-efficient decode — two passes over a STREAM (bounds,
+ * then subsampled pixels) with inSampleSize targeting [maxDim]. The old
+ * code read the entire image into a ByteArray per grid cell, which cost
+ * tens of MB of heap per thumbnail on modern phone cameras.
+ */
+private fun decodeBitmapScaled(context: Context, uriStr: String, maxDim: Int): Bitmap? {
+    return try {
+        val uri = Uri.parse(uriStr)
+        val bounds = android.graphics.BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+        context.contentResolver.openInputStream(uri)?.use {
+            android.graphics.BitmapFactory.decodeStream(it, null, bounds)
+        } ?: return null
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > maxDim) sample *= 2
+        val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+        context.contentResolver.openInputStream(uri)?.use {
+            android.graphics.BitmapFactory.decodeStream(it, null, opts)
+        }
+    } catch (t: Throwable) {
+        null
+    }
+}
+
+/**
  * Pack a SAF image into the engine library: copy to cache → packSceneWallpaper
  * → import into filesDir/downloads → return the WallpaperInfoSparse for the
  * caller to apply. Mirrors the image-type workshop download path exactly.
+ *
+ * v0.8.9: IDEMPOTENT — the itemId is a stable hash of the image's document
+ * uri + last-modified, and the last import is remembered in prefs. Setting
+ * the same image again reuses (or overwrites) the SAME library entry
+ * instead of stacking duplicate .mpkg files in downloads/.
  */
 private fun packAndImportImage(context: Context, entry: ImageEntry): WallpaperInfoSparse? {
     return try {
-        val cacheFile = File(context.cacheDir, "image_folder_${System.currentTimeMillis()}")
+        val title = entry.displayName.substringBeforeLast('.').take(40).ifEmpty { "image" }
+        val stableKey = (entry.uri + "|" + entry.lastModified).hashCode().toLong() and 0xFFFFFFFFL
+        val itemId = "img_$stableKey"
+
+        // Reuse path: the same image was imported before and its library
+        // file is still on disk — just hand back that entry.
+        val remembered = rememberedImport(context, entry)
+        if (remembered != null) {
+            val existing = File(context.filesDir, remembered)
+            if (existing.exists() && existing.length() > 0L) {
+                WepWawetLogger.appInfo("ImageFolderScreen: reusing packed import",
+                    "file" to remembered)
+                return WallpaperInfoSparse().apply {
+                    this.title = title
+                    this.filePath = remembered
+                    this.type = "Scene"
+                    this.lastModifiedDate = existing.lastModified()
+                }
+            }
+        }
+
+        val cacheFile = File(context.cacheDir, "image_folder_${itemId}")
         context.contentResolver.openInputStream(Uri.parse(entry.uri))?.use { input ->
             cacheFile.outputStream().use { output -> input.copyTo(output) }
         } ?: return null
 
-        val itemId = "img_${System.currentTimeMillis()}"
-        val title = entry.displayName.substringBeforeLast('.').take(40).ifEmpty { "image" }
         val mpkgFile = File(context.cacheDir, "${itemId}_pack.mpkg")
         val size = com.wepwawet.pairing.MpkgPacker.packSceneWallpaper(
             item = com.wepwawet.data.model.WorkshopItemTyped(
@@ -407,6 +556,7 @@ private fun packAndImportImage(context: Context, entry: ImageEntry): WallpaperIn
         }
 
         // Import into the library (same layout as workshop downloads).
+        // The stable itemId makes a re-import overwrite the same file.
         val sanitized = title.replace(Regex("[^\\w \\-()]", RegexOption.IGNORE_CASE), "")
             .trim().take(40).ifEmpty { "image" }
         val target = File(context.filesDir, "downloads/$itemId - $sanitized.mpkg")
@@ -419,6 +569,7 @@ private fun packAndImportImage(context: Context, entry: ImageEntry): WallpaperIn
             target.delete()
             return null
         }
+        rememberImport(context, entry, "downloads/${target.name}")
         WepWawetLogger.appInfo("ImageFolderScreen: image packed + imported",
             "file" to target.name,
             "size" to target.length())
@@ -436,28 +587,29 @@ private fun packAndImportImage(context: Context, entry: ImageEntry): WallpaperIn
     }
 }
 
+/** The prefs map key for an image's remembered import. */
+private fun importKey(entry: ImageEntry): String =
+    (entry.uri + "|" + entry.lastModified).hashCode().toString(16)
+
+private fun rememberedImport(context: Context, entry: ImageEntry): String? =
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        .getString(KEY_IMPORTS + ":" + importKey(entry), null)
+
+private fun rememberImport(context: Context, entry: ImageEntry, libraryPath: String) {
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        .edit().putString(KEY_IMPORTS + ":" + importKey(entry), libraryPath).apply()
+}
+
 @Composable
 private fun ImageGridCell(entry: ImageEntry, onClick: () -> Unit) {
     val context = LocalContext.current
     var bitmap by remember(entry.uri) { mutableStateOf<Bitmap?>(null) }
     var loaded by remember(entry.uri) { mutableStateOf(false) }
 
-    // Subsampled thumbnail decode (inSampleSize targets ~512 px).
+    // v0.8.9: subsampled stream decode (max ~512 px) — see decodeBitmapScaled.
     LaunchedEffect(entry.uri) {
         withContext(Dispatchers.IO) {
-            runCatching {
-                val opts = android.graphics.BitmapFactory.Options().apply {
-                    inJustDecodeBounds = true
-                }
-                contextBytes(context, entry.uri)?.let { bytes ->
-                    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-                    var sample = 1
-                    while (maxOf(opts.outWidth, opts.outHeight) / sample > 512) sample *= 2
-                    bitmap = android.graphics.BitmapFactory.decodeByteArray(
-                        bytes, 0, bytes.size,
-                        android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
-                }
-            }
+            bitmap = decodeBitmapScaled(context, entry.uri, 512)
             loaded = true
         }
     }
@@ -486,10 +638,3 @@ private fun ImageGridCell(entry: ImageEntry, onClick: () -> Unit) {
         }
     }
 }
-
-private fun contextBytes(context: android.content.Context, uriStr: String): ByteArray? =
-    try {
-        context.contentResolver.openInputStream(Uri.parse(uriStr))?.use { it.readBytes() }
-    } catch (t: Throwable) {
-        null
-    }

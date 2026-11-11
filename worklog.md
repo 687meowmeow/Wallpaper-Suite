@@ -3664,3 +3664,96 @@ Reminders for future agents:
   98. Nyanpasu image choice: never add hard quality gates, GIF blocks,
       minimum-resolution floors or required-tag hard constraints to
       NyanpasuSearch — that is exactly what ruined later versions.
+
+## v0.8.9-alpha (build 127) — the v0.9.0 regression round (ishtar preset, Brown Dust revert, M3 bottom nav)
+
+Driven by the user's device report on the v0.9.0 build:
+
+- ISHTAR (3734403543) PREVIEW-AS-WALLPAPER — root cause: the item is
+  tagged "Preset" (Steam API: Scene/Anime/Other resolution/Mature/
+  Preset); its depot holds ONLY project.json + preview.gif. The v0.9.0
+  content resolution trusted project.json's "file" field FIRST — for a
+  preset that field names the Steam PREVIEW image, so the preview.gif
+  got packed as the wallpaper. Verified the real preset format against
+  WallpaperMachine's published docs (raw.githubusercontent.com/
+  MMFoundation/WallpaperMachine main docs/features/workshop-downloads.md):
+  "its project.json has no type, only dependency and, under preset,
+  values for the base's properties" + "the preset's files over [the
+  base's content]" + "the base's manifest with the preset's title,
+  description, tags, rating, preview and Workshop id". Fixes:
+  WorkshopDownloader resolves presets FIRST (numeric "dependency" ->
+  return null so the job's preset branch runs); the job builds the base
+  download on a FRESH WorkshopDownloader (the v0.9.0 code reused the
+  disconnected instance — cleanup() had already torn Steam down, so the
+  base download could never connect); MpkgPacker.packFromPkg gained
+  presetFilesDir (the preset's own files layer over the base's VFS
+  entries, preset's preview wins over the base's); the pkg cache is now
+  PKGV-magic-validated (a v0.9.0-cached preview.gif "<id>.pkg" can never
+  be reused as scene content).
+- BROWN DUST (3767714202) BLACK APPLIED WALLPAPER — the v0.9.0
+  TEXI-flag-0x20 decode->normalize->rebuild override produced textures
+  the engine renders BLACK; the VERBATIM bytes (what the PC transcoder
+  ships, and what v0.8.8 packed) render CORRECTLY as the applied live
+  wallpaper. REVERTED the override wholesale (pcCopyThrough once again
+  passes flag-0x20 .tex byte-identical).
+- BROWN DUST MISSING PREVIEW (thumbnail + preview-screen static) — the
+  packed mpkg's only preview is a 985 KB preview.gif the native
+  getWallpaperInfoPreviewBitmap does not return. WeEnginePrefs gained a
+  Kotlin .mpkg VFS fallback (readMpkgPreviewEntry: marker-8 + PKGMdddd
+  magic + count + name/offset/size table, exactly what
+  MpkgPacker.streamPack writes) that reads preview.jpg/.jpeg/.png/
+  .webp/.gif and hands the bytes to BitmapFactory (decodes GIF first
+  frame). Fixes the library card AND the preview screen's static
+  background.
+- BROWN DUST BLACK GL PREVIEW — SceneWallpaperView now PROBES its own
+  framebuffer (glReadPixels, 12 patches of 8x8, frames 30 + 180): if
+  every sampled pixel is near-black the registered blackFrameCallback
+  fires and WallpaperPreviewScreen re-shows the static preview with a
+  "Live preview shows nothing — tap to retry" chip (the GL scene keeps
+  running underneath). The wallpaper itself is untouched — only the
+  in-app preview presentation falls back.
+- UI/UX REWORK ("4 buttons at the top is not good") — per Material 3
+  navigation-bar guidance (m3.material.io/components/navigation-bar:
+  "three to five destinations of equal importance", bottom of the
+  window) the app now has a bottom NavigationBar with four tabs —
+  Wallpapers / Workshop / Folders / Daily — using the canonical
+  popUpTo(startDestination){saveState}+launchSingleTop+restoreState
+  pattern. The library's two stacked button rows are GONE (~120dp back
+  to the grid); Import is a "+" top-bar action; drill-down routes hide
+  the bar and show back arrows.
+- DAILY (was "Nyanpasu") — every user-visible string de-branded: screen
+  title "Daily wallpaper", route daily, notifications "Daily wallpaper
+  updated", gallery saves to Pictures/WallpaperSuite, neutral quips,
+  no footer attribution in UI (MIT attribution stays in source
+  comments). The screen AUTO-FETCHES on open (the black
+  "Tap Refresh to find a wallpaper" box is replaced by a themed
+  surfaceVariant placeholder with spinner/icon), and it blends into the
+  app as a proper tab (no back arrow).
+- FOLDERS (ImageFolderScreen) de-bare-boned: two-pass STREAM decode
+  with inSampleSize (the old code read entire image ByteArrays per
+  grid cell — tens of MB heap each), tap opens a fullscreen preview
+  dialog (Dialog, usePlatformDefaultWidth=false) with the image +
+  Set-as-wallpaper / System-wallpaper actions, idempotent imports
+  (library entry keyed by uri+lastModified hash + remembered in prefs,
+  so re-setting the same image reuses the packed .mpkg instead of
+  stacking duplicates in downloads/), folder header with name + count +
+  Change, Newest/Name sort.
+- Version: user mandate — stay on 0.8.x. 0.8.9-alpha, versionCode 127
+  (monotonic > 126 so the device accepts it as an update).
+
+Reminders updated/added:
+  95. CORRECTED: TEXI flag 0x20 verbatim bytes render FINE as the
+      applied wallpaper (that is exactly what the PC ships). Only the
+      in-app GL PREVIEW surface renders them black; the answer is the
+      black-frame probe + static-preview fallback, NEVER touching the
+      packed bytes (the v0.9.0 rebuild blackened the applied wallpaper).
+  99. Preset resolution order is NON-NEGOTIABLE: dependency FIRST, then
+      project.json "file", then media sniffing. A preset's "file" field
+      is the Steam preview image, not content.
+  100. A WorkshopDownloader instance is DEAD after downloadWorkshopPkg
+      returns (finally{cleanup()} logs off Steam). Any second download
+      needs a fresh instance.
+  101. The bottom NavigationBar shows only on the four tab routes; any
+      new top-level destination must be added to BOTTOM_TABS and gets
+      saveState/restoreState semantics for free. Drill-downs get a back
+      arrow and no bar.

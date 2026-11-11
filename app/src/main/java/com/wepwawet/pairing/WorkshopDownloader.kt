@@ -972,15 +972,36 @@ class WorkshopDownloader(
                 onStatusUpdate("Downloaded ${formatBytes(outputFile.length())} .pkg (Scene wallpaper)")
                 outputFile
             } else {
-                // === v0.9.0: project.json-driven content resolution. ===
-                // Some workshop types have NO .pkg and NO >1MB media file:
+                // === v0.8.9: content resolution — PRESET FIRST. ===
+                // A preset workshop item (e.g. ishtar 3734403543, tagged
+                // "Preset") has NO content of its own: its install dir is
+                // just project.json + preview.gif, where project.json names
+                // the BASE wallpaper under "dependency" and the saved
+                // property values under "preset" (format verified against
+                // WallpaperMachine's published preset behavior: "its
+                // project.json has no type, only dependency and, under
+                // preset, values for the base's properties"). The v0.9.0
+                // code resolved project.json's "file" field FIRST — for a
+                // preset that field names the Steam PREVIEW image
+                // (preview.gif), so the PREVIEW BECAME THE WALLPAPER.
+                // Presets must return null here so the caller's preset
+                // branch downloads the base and applies the values.
+                val project = parseProjectJson(installDir)
+                if (project?.dependency != null && project.dependency.toLongOrNull() != null) {
+                    WepWawetLogger.proxy("$TAG: PRESET item — no direct content, base wallpaper is dependency",
+                        "dependency" to project.dependency,
+                        "preset_values" to project.presetValues.size,
+                        "file_field_ignored" to (project.file ?: "none"))
+                    onStatusUpdate("Preset — needs its base wallpaper ${project.dependency}")
+                    return@withContext null
+                }
+                // Non-preset items: some types have NO .pkg and NO >1MB
+                // media file:
                 //   • GIF wallpapers ship project.json ("type":"gif",
-                //     "file":"preview.gif") + the gif itself — often < 1 MB,
-                //     which the old findVideoFile(>1MB) filter skipped
-                //     (workshop item 3734403543 "ishtar" = 889 KB gif).
+                //     "file":"xxx.gif") + the gif itself — often < 1 MB,
+                //     which the old findVideoFile(>1MB) filter skipped.
                 //   • Image/video wallpapers name their content file in
                 //     project.json's "file" field — trust it over heuristics.
-                val project = parseProjectJson(installDir)
                 val declaredFile = project?.file
                     ?.let { File(installDir, it) }
                     ?.takeIf { it.exists() && it.length() > 0 }
