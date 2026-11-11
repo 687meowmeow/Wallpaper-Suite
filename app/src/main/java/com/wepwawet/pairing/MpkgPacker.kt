@@ -145,6 +145,67 @@ object MpkgPacker {
         return parent == "materials" || parent == "materials/masks"
     }
 
+    /**
+     * v0.9.0: Is a TEXI-flag-0x20 texture one we can decode + re-encode?
+     * Format 0 (RGBA8888, incl. PNG/JPEG bodies), 1 (RGB888) and the
+     * DXT/BC family all have working converters ([convertFormat0TexPc] /
+     * [convertTexDxtToEtc2]). Everything else (RG88/R8 masks, ETC2
+     * sources, exotic formats) keeps the PC verbatim rule.
+     */
+    private fun texFlag0x20IsTranscodable(texiFormat: Int): Boolean =
+        texiFormat == 0 || texiFormat == 1 || texiFormat in PcTexTranscoder.DXT_SOURCE_FORMATS
+
+    /**
+     * v0.9.0: Apply a PRESET's saved property values to a packed
+     * project.json. The preset map is flat ({name: value}) — exactly how
+     * WE stores user property overrides. Matching names under
+     * general.properties get their "value" replaced; the preset title
+     * replaces the base's title so the library card shows the preset's
+     * name. Returns the rewritten bytes, or null when the JSON can't be
+     * parsed (caller keeps the original).
+     */
+    private fun applyPresetToProjectJson(
+        projectJsonBytes: ByteArray,
+        presetValues: Map<String, Any>,
+        presetTitle: String?,
+    ): ByteArray? {
+        return try {
+            val root = JsonParser.parseString(String(projectJsonBytes, Charsets.UTF_8)).asJsonObject
+            var applied = 0
+            val general = root.get("general")?.takeIf { it.isJsonObject }?.asJsonObject
+            val properties = general?.get("properties")?.takeIf { it.isJsonObject }?.asJsonObject
+            if (properties != null) {
+                for ((name, value) in presetValues) {
+                    val prop = properties.get(name)?.takeIf { it.isJsonObject } ?: continue
+                    prop.remove("value")
+                    prop.add("value", when (value) {
+                        is Boolean -> com.google.gson.JsonPrimitive(value)
+                        is Double -> com.google.gson.JsonPrimitive(value)
+                        is Float -> com.google.gson.JsonPrimitive(value)
+                        is Int -> com.google.gson.JsonPrimitive(value)
+                        is Long -> com.google.gson.JsonPrimitive(value)
+                        else -> com.google.gson.JsonPrimitive(value.toString())
+                    })
+                    applied++
+                }
+            }
+            if (presetTitle != null && presetTitle.isNotBlank()) {
+                root.remove("title")
+                root.add("title", com.google.gson.JsonPrimitive(presetTitle))
+            }
+            WepWawetLogger.proxy("MpkgPacker.applyPresetToProjectJson",
+                "offered" to presetValues.size,
+                "applied" to applied,
+                "has_properties_section" to (properties != null))
+            root.toString().toByteArray(Charsets.UTF_8)
+        } catch (e: Exception) {
+            WepWawetLogger.proxyWarn("MpkgPacker.applyPresetToProjectJson failed",
+                "exception" to e.javaClass.name,
+                "message" to (e.message ?: ""))
+            null
+        }
+    }
+
     // ══════════════════════════════════════════════════════════════════════
     // v0.7.4 (parity G9): video wallpaper alignment position. The PC writes
     // the device-configured alignment into project.json as
@@ -345,6 +406,17 @@ object MpkgPacker {
         pkgFile: File,
         outputFile: File,
         installDir: File? = null,
+        /**
+         * v0.9.0: PRESET support — a flat name → value map from a preset
+         * workshop item's project.json "preset" object. Each key that
+         * matches a property under general.properties gets its "value"
+         * overwritten, so the packed wallpaper plays with the preset's
+         * saved settings (WE PC semantics: a preset plays its dependency
+         * wallpaper with the preset's values).
+         */
+        presetValues: Map<String, Any>? = null,
+        /** v0.9.0: preset title — replaces the base's project.json title. */
+        presetTitle: String? = null,
     ): Long {
         WepWawetLogger.proxy("MpkgPacker.packFromPkg START",
             "item_id" to item.id,
@@ -435,6 +507,34 @@ object MpkgPacker {
                         "size" to blob.size,
                         "source" to standaloneFile.absolutePath)
                 }
+            }
+        }
+
+        // === v0.9.0: PRESET value application. ===
+        // Merge the preset's saved property values into the (base)
+        // wallpaper's project.json general.properties.*.value, and swap in
+        // the preset's title. Applied BEFORE any other project.json
+        // rewriting so downstream fixes (workshopurl append, mobile
+        // rewrite) see the final values.
+        if (presetValues != null && presetValues.isNotEmpty()) {
+            val idx = entries.indexOfFirst { it.first.equals("project.json", true) }
+            if (idx >= 0) {
+                val originalSize = entries[idx].second.size
+                val rewritten = applyPresetToProjectJson(entries[idx].second, presetValues, presetTitle)
+                if (rewritten != null) {
+                    entries[idx] = "project.json" to rewritten
+                    WepWawetLogger.proxy("MpkgPacker.packFromPkg: preset values applied",
+                        "values_offered" to presetValues.size,
+                        "title" to (presetTitle ?: "(unchanged)"),
+                        "original_size" to originalSize,
+                        "rewritten_size" to rewritten.size)
+                } else {
+                    WepWawetLogger.proxyWarn("MpkgPacker.packFromPkg: preset application failed — packing base values",
+                        "values_offered" to presetValues.size)
+                }
+            } else {
+                WepWawetLogger.proxyWarn("MpkgPacker.packFromPkg: preset given but no project.json entry found",
+                    "entry_count" to entries.size)
             }
         }
 
@@ -599,8 +699,28 @@ object MpkgPacker {
             val pcCopyThrough = texInfo == null ||
                 texiFormat == 8 || texiFormat == 9 ||
                 (texInfo.imageCount > 1) ||
-                (texInfo.flags and 0x20) != 0 ||
+                ((texInfo.flags and 0x20) != 0 && !texFlag0x20IsTranscodable(texiFormat)) ||
                 (texiFormat == 1 && !pcForcesEtc2(name))
+
+            // === v0.9.0 ENGINE-COMPAT OVERRIDE (the xray black-screen fix). ===
+            // PC parity says a .tex with TEXI flag 0x20 ships VERBATIM — the
+            // PC transcoder copies it through, and WE Android's native
+            // engine can render what it produces. OUR engine clone cannot:
+            // workshop item 3767714202 (BrownDust2 x-ray 4K) carries
+            // materials/xray_sync_1.tex — format 0 RGBA8888, flags 0x22,
+            // 40 MB body = a FULL MIPMAP CHAIN (3456×2160 × 4/3) — which
+            // passed through verbatim and rendered a solid BLACK preview
+            // (scene init + first frame drew fine; every other wallpaper
+            // whose textures went through the normal transcode previewed
+            // correctly). For RGBA8888/RGB888 sources with flag 0x20 we now
+            // run the SAME decode → normalize → rebuild pipeline the PC
+            // transcoder uses for handled formats (single mip, TEXB0004):
+            // the pixel data survives unchanged in a layout our engine
+            // provably renders. If the decode fails we keep the verbatim
+            // bytes (PC behavior) — no regression for exotic bodies.
+            val texFlag0x20Compat = texInfo != null &&
+                (texInfo.flags and 0x20) != 0 &&
+                texFlag0x20IsTranscodable(texiFormat)
 
             // ---- The formats the PC tool errors on (original bytes ship) ----
             val pcErrorsOnIt = !pcCopyThrough &&
@@ -625,10 +745,31 @@ object MpkgPacker {
                         texInfo == null -> "unparseable header"
                         texiFormat == 8 || texiFormat == 9 -> "RG88/R8 (format $texiFormat)"
                         texInfo.imageCount > 1 -> "animated/multi-image (imageCount=${texInfo.imageCount})"
-                        (texInfo.flags and 0x20) != 0 -> "TEXI flag 0x20"
+                        (texInfo.flags and 0x20) != 0 -> "TEXI flag 0x20 (untranscodable format $texiFormat)"
                         texiFormat == 1 -> "RGB888 without -c force"
                         else -> "?"
                     })
+                processedEntries.add(texEntry)
+                continue
+            }
+            if (texFlag0x20Compat) {
+                WepWawetLogger.proxy("MpkgPacker.packFromPkg: TEXI flag 0x20 compat override — transcoding to normalized single-mip",
+                    "name" to name,
+                    "texi_format" to texiFormat,
+                    "tex_size" to blob.size,
+                    "note" to "verbatim pass-through rendered black in our engine (full-mip PC texture)")
+                val compatConverted = if (texiFormat in PcTexTranscoder.DXT_SOURCE_FORMATS) {
+                    convertTexDxtToEtc2(blob, name)
+                } else {
+                    convertFormat0TexPc(blob, name)
+                }
+                if (compatConverted != null) {
+                    processedEntries.add(Pair(name, compatConverted))
+                    continue
+                }
+                WepWawetLogger.proxyWarn("MpkgPacker.packFromPkg: flag-0x20 compat transcode FAILED — falling back to verbatim bytes",
+                    "name" to name,
+                    "texi_format" to texiFormat)
                 processedEntries.add(texEntry)
                 continue
             }

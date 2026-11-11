@@ -123,8 +123,11 @@ import java.io.File
  * @param videoFile The downloaded video file (already exists on disk).
  * @param itemTitle Wallpaper title.
  * @param itemId Workshop item ID.
+ * @param mode v0.9.0 — "send" (classic: trim → queue to the paired phone)
+ *   or "library" (Download-button flow: trim → import into this app's
+ *   integrated engine library).
  * @param onBack Navigate back.
- * @param onSendComplete Called after the video has been queued.
+ * @param onSendComplete Called after the video has been queued/imported.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -134,7 +137,9 @@ fun VideoTrimScreen(
     itemId: String,
     onBack: () -> Unit,
     onSendComplete: () -> Unit,
+    mode: String = "send",
 ) {
+    val isLibraryMode = mode == "library"
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
@@ -797,49 +802,79 @@ fun VideoTrimScreen(
                     onClick = {
                         if (isTrimming) return@Button
                         isTrimming = true
-                        trimStatus = "Trimming video…"
+                        trimStatus = if (isLibraryMode) "Clipping video…" else "Trimming video…"
                         scope.launch {
                             withContext(Dispatchers.IO) {
                                 var success = false
                                 try {
-                                    val trimmedFile = File(context.cacheDir, "${itemId}_trimmed.mp4")
-                                    trimStatus = "Trimming ${formatTime(startMs)}–${formatTime(endMs)}…"
-                                    val trimSuccess = VideoTrimmer.trim(videoFile, trimmedFile, startMs, endMs)
-                                    // v0.7.23 BUG VT-2: check if cancelled after trim
-                                    if (!isActive) return@withContext
-                                    val packedFile = if (trimSuccess) trimmedFile else videoFile
-                                    trimStatus = if (trimSuccess) "Packing trimmed video…" else "Trim failed — packing full video…"
-
-                                    val mpkgFile = File(context.cacheDir, "${itemId}_${System.currentTimeMillis()}_send.mpkg")
-                                    val item = WorkshopItemTyped(
-                                        item = WorkshopItem(publishedfileid = itemId, title = itemTitle),
-                                        type = WallpaperType.VIDEO,
-                                    )
-                                    val installDir = File(context.cacheDir, "workshop_downloads/$itemId")
-                                    val previewFile = File(installDir, "preview.jpg").takeIf { it.exists() }
-                                        ?: File(installDir, "preview.gif").takeIf { it.exists() }
-                                    com.wepwawet.pairing.MpkgPacker.packVideoWallpaper(
-                                        item = item, videoFile = packedFile,
-                                        outputFile = mpkgFile, previewFile = previewFile,
-                                    )
-                                    // v0.7.23 BUG VT-2: check if cancelled after pack
-                                    if (!isActive) return@withContext
-                                    trimStatus = "Queuing for transfer…"
-                                    PairingService.queueWallpaper(mpkgFile, itemTitle)
-                                    PairingService.launchWallpaperEngineApp(context)
-                                    runCatching { trimmedFile.delete() }
-                                    // v0.7.23 BUG VT-3: only delete source video if
-                                    // queueWallpaper succeeded (server is running).
-                                    // We can't check queueWallpaper's return, but we
-                                    // can check PairingService.isPaired().
-                                    if (PairingService.isPaired() || PairingService.pairingServer != null) {
+                                    if (isLibraryMode) {
+                                        // === v0.9.0 LIBRARY mode: trim → import into ===
+                                        // === this app's engine library.           ===
+                                        val trimmedFile = File(context.cacheDir, "${itemId}_trimmed.mp4")
+                                        trimStatus = "Clipping ${formatTime(startMs)}–${formatTime(endMs)}…"
+                                        val trimSuccess = VideoTrimmer.trim(videoFile, trimmedFile, startMs, endMs)
+                                        if (!isActive) return@withContext
+                                        val packedFile = if (trimSuccess) trimmedFile else videoFile
+                                        trimStatus = if (trimSuccess)
+                                            "Adding clipped video to your library…"
+                                        else
+                                            "Clip failed — adding full video…"
+                                        // The import (pack + library write + state
+                                        // updates) runs in WorkshopDownloadJob's
+                                        // own scope; we surface its progress via
+                                        // the per-item state flow on the detail
+                                        // screen after popping back.
+                                        com.wepwawet.pairing.WorkshopDownloadJob
+                                            .importVideoToLibrary(context, itemId, packedFile)
+                                        if (trimSuccess) runCatching { trimmedFile.delete() }
                                         runCatching { videoFile.delete() }
+                                        com.wepwawet.pairing.WorkshopDownloadJob
+                                            .onVideoConsumedByTrimScreen(itemId)
+                                        WepWawetLogger.workshop("VideoTrimScreen: clip + library import complete",
+                                            "item_id" to itemId,
+                                            "clipped" to trimSuccess,
+                                            "range" to "${formatTime(startMs)}-${formatTime(endMs)}")
+                                        success = true
+                                    } else {
+                                        val trimmedFile = File(context.cacheDir, "${itemId}_trimmed.mp4")
+                                        trimStatus = "Trimming ${formatTime(startMs)}–${formatTime(endMs)}…"
+                                        val trimSuccess = VideoTrimmer.trim(videoFile, trimmedFile, startMs, endMs)
+                                        // v0.7.23 BUG VT-2: check if cancelled after trim
+                                        if (!isActive) return@withContext
+                                        val packedFile = if (trimSuccess) trimmedFile else videoFile
+                                        trimStatus = if (trimSuccess) "Packing trimmed video…" else "Trim failed — packing full video…"
+
+                                        val mpkgFile = File(context.cacheDir, "${itemId}_${System.currentTimeMillis()}_send.mpkg")
+                                        val item = WorkshopItemTyped(
+                                            item = WorkshopItem(publishedfileid = itemId, title = itemTitle),
+                                            type = WallpaperType.VIDEO,
+                                        )
+                                        val installDir = File(context.cacheDir, "workshop_downloads/$itemId")
+                                        val previewFile = File(installDir, "preview.jpg").takeIf { it.exists() }
+                                            ?: File(installDir, "preview.gif").takeIf { it.exists() }
+                                        com.wepwawet.pairing.MpkgPacker.packVideoWallpaper(
+                                            item = item, videoFile = packedFile,
+                                            outputFile = mpkgFile, previewFile = previewFile,
+                                        )
+                                        // v0.7.23 BUG VT-2: check if cancelled after pack
+                                        if (!isActive) return@withContext
+                                        trimStatus = "Queuing for transfer…"
+                                        PairingService.queueWallpaper(mpkgFile, itemTitle)
+                                        PairingService.launchWallpaperEngineApp(context)
+                                        runCatching { trimmedFile.delete() }
+                                        // v0.7.23 BUG VT-3: only delete source video if
+                                        // queueWallpaper succeeded (server is running).
+                                        // We can't check queueWallpaper's return, but we
+                                        // can check PairingService.isPaired().
+                                        if (PairingService.isPaired() || PairingService.pairingServer != null) {
+                                            runCatching { videoFile.delete() }
+                                        }
+                                        runCatching { installDir.deleteRecursively() }
+                                        com.wepwawet.pairing.WorkshopDownloadJob.onVideoConsumedByTrimScreen(itemId)
+                                        WepWawetLogger.workshop("VideoTrimScreen: trim + send complete",
+                                            "item_id" to itemId, "mpkg_size" to mpkgFile.length())
+                                        success = true
                                     }
-                                    runCatching { installDir.deleteRecursively() }
-                                    com.wepwawet.pairing.WorkshopDownloadJob.onVideoConsumedByTrimScreen(itemId)
-                                    WepWawetLogger.workshop("VideoTrimScreen: trim + send complete",
-                                        "item_id" to itemId, "mpkg_size" to mpkgFile.length())
-                                    success = true
                                 } catch (e: kotlinx.coroutines.CancellationException) {
                                     throw e
                                 } catch (e: Exception) {
@@ -863,42 +898,55 @@ fun VideoTrimScreen(
                     enabled = !isTrimming && durationMs > 0,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text(if (isTrimming) "Processing…" else "Trim & Send")
+                    Text(when {
+                        isTrimming -> "Processing…"
+                        isLibraryMode -> "Clip & Add"
+                        else -> "Trim & Send"
+                    })
                 }
 
                 Button(
                     onClick = {
                         if (isTrimming) return@Button
                         isTrimming = true
-                        trimStatus = "Packing full video…"
+                        trimStatus = if (isLibraryMode) "Adding full video…" else "Packing full video…"
                         scope.launch {
                             withContext(Dispatchers.IO) {
                                 var success = false
                                 try {
-                                    val mpkgFile = File(context.cacheDir, "${itemId}_${System.currentTimeMillis()}_send.mpkg")
-                                    val item = WorkshopItemTyped(
-                                        item = WorkshopItem(publishedfileid = itemId, title = itemTitle),
-                                        type = WallpaperType.VIDEO,
-                                    )
-                                    val installDir = File(context.cacheDir, "workshop_downloads/$itemId")
-                                    val previewFile = File(installDir, "preview.jpg").takeIf { it.exists() }
-                                        ?: File(installDir, "preview.gif").takeIf { it.exists() }
-                                    com.wepwawet.pairing.MpkgPacker.packVideoWallpaper(
-                                        item = item, videoFile = videoFile,
-                                        outputFile = mpkgFile, previewFile = previewFile,
-                                    )
-                                    // v0.7.23 BUG VT-2: check if cancelled after pack
-                                    if (!isActive) return@withContext
-                                    trimStatus = "Queuing for transfer…"
-                                    PairingService.queueWallpaper(mpkgFile, itemTitle)
-                                    PairingService.launchWallpaperEngineApp(context)
-                                    // v0.7.23 BUG VT-3: only delete source video if paired.
-                                    if (PairingService.isPaired() || PairingService.pairingServer != null) {
-                                        runCatching { videoFile.delete() }
+                                    if (isLibraryMode) {
+                                        // === v0.9.0 LIBRARY mode: full video → library. ===
+                                        com.wepwawet.pairing.WorkshopDownloadJob
+                                            .importVideoToLibrary(context, itemId, videoFile)
+                                        com.wepwawet.pairing.WorkshopDownloadJob
+                                            .onVideoConsumedByTrimScreen(itemId)
+                                        success = true
+                                    } else {
+                                        val mpkgFile = File(context.cacheDir, "${itemId}_${System.currentTimeMillis()}_send.mpkg")
+                                        val item = WorkshopItemTyped(
+                                            item = WorkshopItem(publishedfileid = itemId, title = itemTitle),
+                                            type = WallpaperType.VIDEO,
+                                        )
+                                        val installDir = File(context.cacheDir, "workshop_downloads/$itemId")
+                                        val previewFile = File(installDir, "preview.jpg").takeIf { it.exists() }
+                                            ?: File(installDir, "preview.gif").takeIf { it.exists() }
+                                        com.wepwawet.pairing.MpkgPacker.packVideoWallpaper(
+                                            item = item, videoFile = videoFile,
+                                            outputFile = mpkgFile, previewFile = previewFile,
+                                        )
+                                        // v0.7.23 BUG VT-2: check if cancelled after pack
+                                        if (!isActive) return@withContext
+                                        trimStatus = "Queuing for transfer…"
+                                        PairingService.queueWallpaper(mpkgFile, itemTitle)
+                                        PairingService.launchWallpaperEngineApp(context)
+                                        // v0.7.23 BUG VT-3: only delete source video if paired.
+                                        if (PairingService.isPaired() || PairingService.pairingServer != null) {
+                                            runCatching { videoFile.delete() }
+                                        }
+                                        runCatching { installDir.deleteRecursively() }
+                                        com.wepwawet.pairing.WorkshopDownloadJob.onVideoConsumedByTrimScreen(itemId)
+                                        success = true
                                     }
-                                    runCatching { installDir.deleteRecursively() }
-                                    com.wepwawet.pairing.WorkshopDownloadJob.onVideoConsumedByTrimScreen(itemId)
-                                    success = true
                                 } catch (e: kotlinx.coroutines.CancellationException) {
                                     throw e
                                 } catch (e: Exception) {
@@ -921,7 +969,7 @@ fun VideoTrimScreen(
                     enabled = !isTrimming,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("Send Full Video")
+                    Text(if (isLibraryMode) "Add Full Video" else "Send Full Video")
                 }
             }
 

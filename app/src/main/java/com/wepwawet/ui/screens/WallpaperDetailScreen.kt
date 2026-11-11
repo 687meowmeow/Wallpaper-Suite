@@ -644,8 +644,13 @@ fun WallpaperDetailScreen(
     // Video trim dialog — pops up when the download detects the file is a
     // video (downloadState.pendingVideoFile != null). The user can choose
     // to trim, send the full video, or close (X in the corner).
+    // v0.9.0: mode-aware — the Download (library) flow asks "clip before
+    // adding to your library", the send-to-phone flow keeps the classic
+    // "trim before sending" wording. The clip option was accidentally lost
+    // from the library flow in v0.8.1 and is now restored.
     val pendingVideoFile = downloadState.pendingVideoFile
     val pendingVideoItem = downloadState.pendingVideoItem
+    val pendingVideoIsLibrary = downloadState.pendingVideoMode == "library"
     if (pendingVideoFile != null && pendingVideoItem != null) {
         androidx.compose.material3.AlertDialog(
             onDismissRequest = {
@@ -672,7 +677,14 @@ fun WallpaperDetailScreen(
                     }
                 }
             },
-            text = { Text("Do you want to trim this video before sending it to your phone?") },
+            text = {
+                Text(
+                    if (pendingVideoIsLibrary)
+                        "Do you want to clip this video before adding it to your library?"
+                    else
+                        "Do you want to trim this video before sending it to your phone?"
+                )
+            },
             confirmButton = {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     androidx.compose.material3.TextButton(
@@ -683,12 +695,18 @@ fun WallpaperDetailScreen(
                                 pendingVideoItem.id,
                             )
                         },
-                    ) { Text("Trim Video") }
+                    ) { Text(if (pendingVideoIsLibrary) "Clip Video" else "Trim Video") }
                     androidx.compose.material3.TextButton(
                         onClick = {
-                            com.wepwawet.pairing.WorkshopDownloadJob.continueVideoSend(context, itemId)
+                            if (pendingVideoIsLibrary) {
+                                com.wepwawet.pairing.WorkshopDownloadJob
+                                    .continueVideoToLibrary(context, itemId)
+                            } else {
+                                com.wepwawet.pairing.WorkshopDownloadJob
+                                    .continueVideoSend(context, itemId)
+                            }
                         },
-                    ) { Text("Send Full Video") }
+                    ) { Text(if (pendingVideoIsLibrary) "Add Full Video" else "Send Full Video") }
                 }
             },
         )

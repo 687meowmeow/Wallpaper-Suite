@@ -8,6 +8,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,6 +30,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.DriveFileMove
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Label
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
@@ -40,6 +46,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -101,6 +108,9 @@ fun LibraryScreen(
     onOpenWallpaper: (WallpaperInfoSparse) -> Unit,
     onOpenDownloads: () -> Unit,
     onOpenWorkshopItem: (itemId: String) -> Unit = {},
+    // v0.9.0: the two new features' entry points.
+    onOpenImageFolders: () -> Unit = {},
+    onOpenNyanpasu: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -122,6 +132,17 @@ fun LibraryScreen(
     var contextMenuFor by remember { mutableStateOf<WallpaperInfoSparse?>(null) }
     var playlistTarget by remember { mutableStateOf<WallpaperInfoSparse?>(null) }
 
+    // ===== v0.9.0: Groups =====
+    var groups by remember { mutableStateOf<List<String>>(emptyList()) }
+    var groupOf by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var activeGroup by remember { mutableStateOf<String?>(null) }
+    // The wallpaper whose "Add to group" dialog is open.
+    var groupTarget by remember { mutableStateOf<WallpaperInfoSparse?>(null) }
+    // New-group creation dialog (from the "＋" chip).
+    var showNewGroupDialog by remember { mutableStateOf(false) }
+    // Rename/delete dialog for a group (long-press a group chip).
+    var manageGroupName by remember { mutableStateOf<String?>(null) }
+
     fun reload() {
         scope.launch {
             loading = true
@@ -129,6 +150,8 @@ fun LibraryScreen(
             wallpapers = EngineLibrary.enumerateWallpapers(context)
             selectedPath = EngineLibrary.getSelectedWallpaper(context)
             pinned = LibraryPrefs.readPinned(context)
+            groups = LibraryPrefs.readGroups(context)
+            groupOf = LibraryPrefs.readGroupOf(context)
             loading = false
         }
     }
@@ -205,12 +228,16 @@ fun LibraryScreen(
     }
 
     // The official BrowseFragment filter: trim + lowercase title contains.
-    val visibleWallpapers = remember(wallpapers, filterText, sortMethod, pinned) {
+    // v0.9.0: plus the GROUP filter (activeGroup == null → all wallpapers).
+    val visibleWallpapers = remember(wallpapers, filterText, sortMethod, pinned, activeGroup, groupOf) {
         val query = filterText.trim().lowercase(Locale.ROOT)
-        val filtered = if (query.isEmpty()) {
-            wallpapers
-        } else {
-            wallpapers.filter {
+        val filtered = when {
+            query.isEmpty() && activeGroup == null -> wallpapers
+            activeGroup != null -> wallpapers.filter {
+                (query.isEmpty() || it.title.lowercase(Locale.ROOT).contains(query)) &&
+                    groupOf[it.filePath] == activeGroup
+            }
+            else -> wallpapers.filter {
                 it.title.lowercase(Locale.ROOT).contains(query)
             }
         }
@@ -355,6 +382,65 @@ fun LibraryScreen(
                 }
             }
 
+            // ===== v0.9.0: the new feature row — Nyanpasu + image folders. =====
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 0.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                OutlinedButton(
+                    onClick = onOpenNyanpasu,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Auto wallpaper")
+                }
+                OutlinedButton(
+                    onClick = onOpenImageFolders,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Image folders")
+                }
+            }
+
+            // ===== v0.9.0: Group filter chips =====
+            // "All" + one chip per group + a "＋" chip to create a group.
+            // Tap a chip to filter; long-press a group chip to rename/delete.
+            androidx.compose.foundation.layout.Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                FilterChip(
+                    selected = activeGroup == null,
+                    onClick = { activeGroup = null },
+                    label = { Text("All (${wallpapers.size})") },
+                )
+                for (group in groups) {
+                    val count = groupOf.count { it.value == group }
+                    FilterChip(
+                        selected = activeGroup == group,
+                        // Tap = filter (via the modifier so long-press works too).
+                        onClick = null,
+                        modifier = Modifier.combinedClickable(
+                            onClick = { activeGroup = if (activeGroup == group) null else group },
+                            onLongClick = { manageGroupName = group },
+                        ),
+                        label = { Text("$group ($count)") },
+                        leadingIcon = if (activeGroup == group) {
+                            { Icon(Icons.Filled.Folder, contentDescription = null, modifier = Modifier.height(16.dp)) }
+                        } else null,
+                    )
+                }
+                FilterChip(
+                    selected = false,
+                    onClick = { showNewGroupDialog = true },
+                    label = { Text("＋ New group") },
+                )
+            }
+
             when {
                 loading -> {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -459,6 +545,22 @@ fun LibraryScreen(
                             "pinned" to !isPinned)
                     }
                 }
+                // ===== v0.9.0: Add to group =====
+                val targetGroup = groupOf[target.filePath]
+                ContextAction(
+                    icon = {
+                        Icon(
+                            Icons.Filled.Label, contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                    },
+                    label = if (targetGroup != null)
+                        "Group: $targetGroup (change)"
+                    else "Add to group",
+                ) {
+                    contextMenuFor = null
+                    groupTarget = target
+                }
                 // Workshop page when the import filename carries the item id
                 Regex("^downloads/(\\d{6,}) - ").find(target.filePath)?.groupValues
                     ?.get(1)?.let { itemId ->
@@ -540,6 +642,7 @@ fun LibraryScreen(
                             // a deleted wallpaper must not stay pinned
                             withContext(Dispatchers.IO) {
                                 LibraryPrefs.setPinned(context, victim.filePath, false)
+                                LibraryPrefs.assignToGroup(context, victim.filePath, null)
                             }
                             pendingDelete = null
                             reload()
@@ -549,6 +652,174 @@ fun LibraryScreen(
             },
             dismissButton = {
                 TextButton(onClick = { pendingDelete = null }) { Text("Cancel") }
+            },
+        )
+    }
+
+    // ===== v0.9.0: Group dialogs =====
+
+    // New group creation (the "＋ New group" chip).
+    if (showNewGroupDialog) {
+        var newGroupName by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showNewGroupDialog = false },
+            title = { Text("New group") },
+            text = {
+                OutlinedTextField(
+                    value = newGroupName,
+                    onValueChange = { newGroupName = it.take(30) },
+                    singleLine = true,
+                    label = { Text("Group name") },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val created = LibraryPrefs.createGroup(context, newGroupName)
+                        if (created) {
+                            groups = LibraryPrefs.readGroups(context)
+                            activeGroup = newGroupName.trim().take(30)
+                        }
+                        showNewGroupDialog = false
+                    },
+                ) { Text("Create") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNewGroupDialog = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    // Assign a wallpaper to a group (context menu → "Add to group").
+    groupTarget?.let { target ->
+        val currentGroup = groupOf[target.filePath]
+        AlertDialog(
+            onDismissRequest = { groupTarget = null },
+            title = { Text("Add to group") },
+            text = {
+                Column {
+                    Text(
+                        target.title.ifEmpty { target.filePath.substringAfterLast('/') },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    if (groups.isEmpty()) {
+                        Text("No groups yet — create one below.")
+                    } else {
+                        for (group in groups) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        LibraryPrefs.assignToGroup(context, target.filePath, group)
+                                        groupOf = LibraryPrefs.readGroupOf(context)
+                                        groupTarget = null
+                                        WepWawetLogger.engine("LibraryScreen: assigned to group",
+                                            "file" to target.filePath,
+                                            "group" to group)
+                                    }
+                                    .padding(vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                RadioButton(
+                                    selected = currentGroup == group,
+                                    onClick = null,
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(group, style = MaterialTheme.typography.bodyLarge)
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    var inlineNewGroup by remember { mutableStateOf("") }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = inlineNewGroup,
+                            onValueChange = { inlineNewGroup = it.take(30) },
+                            singleLine = true,
+                            label = { Text("New group") },
+                            modifier = Modifier.weight(1f),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(
+                            onClick = {
+                                if (LibraryPrefs.createGroup(context, inlineNewGroup)) {
+                                    val name = inlineNewGroup.trim().take(30)
+                                    LibraryPrefs.assignToGroup(context, target.filePath, name)
+                                    groups = LibraryPrefs.readGroups(context)
+                                    groupOf = LibraryPrefs.readGroupOf(context)
+                                    groupTarget = null
+                                }
+                            },
+                        ) { Text("Add") }
+                    }
+                }
+            },
+            confirmButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (currentGroup != null) {
+                        TextButton(
+                            onClick = {
+                                LibraryPrefs.assignToGroup(context, target.filePath, null)
+                                groupOf = LibraryPrefs.readGroupOf(context)
+                                groupTarget = null
+                            },
+                        ) { Text("Remove from group") }
+                    }
+                    TextButton(onClick = { groupTarget = null }) { Text("Done") }
+                }
+            },
+        )
+    }
+
+    // Rename / delete a group (long-press a group chip).
+    manageGroupName?.let { group ->
+        var renameTo by remember(group) { mutableStateOf(group) }
+        AlertDialog(
+            onDismissRequest = { manageGroupName = null },
+            title = { Text("Group \"$group\"") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = renameTo,
+                        onValueChange = { renameTo = it.take(30) },
+                        singleLine = true,
+                        label = { Text("Rename group") },
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "Deleting the group keeps its wallpapers — they just return to \"All\".",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(
+                        onClick = {
+                            if (LibraryPrefs.renameGroup(context, group, renameTo)) {
+                                if (activeGroup == group) activeGroup = renameTo.trim().take(30)
+                                groups = LibraryPrefs.readGroups(context)
+                                groupOf = LibraryPrefs.readGroupOf(context)
+                            }
+                            manageGroupName = null
+                        },
+                    ) { Text("Rename") }
+                    TextButton(
+                        onClick = {
+                            LibraryPrefs.deleteGroup(context, group)
+                            if (activeGroup == group) activeGroup = null
+                            groups = LibraryPrefs.readGroups(context)
+                            groupOf = LibraryPrefs.readGroupOf(context)
+                            manageGroupName = null
+                        },
+                    ) { Text("Delete group") }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { manageGroupName = null }) { Text("Cancel") }
             },
         )
     }
@@ -567,6 +838,14 @@ private object LibraryPrefs {
     private const val PREFS = "wallpapersuite_library"
     private const val KEY_PINNED = "pinned_wallpapers"
 
+    // ===== v0.9.0: wallpaper GROUPS (user request: "to the wallpaper =====
+    // ===== menu add the ability to make groups").                   =====
+    // A group is just a name; each wallpaper maps to at most one group
+    // (filePath → groupName). Stored with one prefs key per wallpaper —
+    // simple, and removing a deleted wallpaper is a one-line remove().
+    private const val KEY_GROUPS = "wallpaper_groups"
+    private const val KEY_GROUP_OF_PREFIX = "wallpaper_group_of:"
+
     fun readPinned(context: android.content.Context): Set<String> =
         context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
             .getStringSet(KEY_PINNED, emptySet()) ?: emptySet()
@@ -576,6 +855,83 @@ private object LibraryPrefs {
         val current = (prefs.getStringSet(KEY_PINNED, emptySet()) ?: emptySet()).toMutableSet()
         if (pinned) current.add(filePath) else current.remove(filePath)
         prefs.edit().putStringSet(KEY_PINNED, current).apply()
+    }
+
+    fun readGroups(context: android.content.Context): List<String> =
+        (context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+            .getStringSet(KEY_GROUPS, emptySet()) ?: emptySet())
+            .filter { it.isNotBlank() }
+            .sorted()
+
+    private fun writeGroups(context: android.content.Context, groups: Collection<String>) {
+        context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+            .edit().putStringSet(KEY_GROUPS, groups.toSet()).apply()
+    }
+
+    fun createGroup(context: android.content.Context, name: String): Boolean {
+        val trimmed = name.trim().take(30)
+        if (trimmed.isEmpty()) return false
+        val groups = readGroups(context).toMutableSet()
+        if (groups.contains(trimmed)) return false
+        groups.add(trimmed)
+        writeGroups(context, groups)
+        return true
+    }
+
+    fun renameGroup(context: android.content.Context, oldName: String, newName: String): Boolean {
+        val trimmed = newName.trim().take(30)
+        if (trimmed.isEmpty() || trimmed == oldName) return false
+        val groups = readGroups(context).toMutableSet()
+        if (groups.contains(trimmed)) return false
+        groups.remove(oldName)
+        groups.add(trimmed)
+        val prefs = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+        val edit = prefs.edit().putStringSet(KEY_GROUPS, groups)
+        // Re-key every member's assignment.
+        for ((key, value) in prefs.all) {
+            if (key.startsWith(KEY_GROUP_OF_PREFIX) && value == oldName) {
+                edit.putString(key, trimmed)
+            }
+        }
+        edit.apply()
+        return true
+    }
+
+    fun deleteGroup(context: android.content.Context, name: String) {
+        val groups = readGroups(context).toMutableSet()
+        groups.remove(name)
+        val prefs = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+        val edit = prefs.edit().putStringSet(KEY_GROUPS, groups)
+        for ((key, value) in prefs.all) {
+            if (key.startsWith(KEY_GROUP_OF_PREFIX) && value == name) {
+                edit.remove(key)
+            }
+        }
+        edit.apply()
+    }
+
+    fun readGroupOf(context: android.content.Context): Map<String, String> {
+        val prefs = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+        val result = mutableMapOf<String, String>()
+        for ((key, value) in prefs.all) {
+            if (key.startsWith(KEY_GROUP_OF_PREFIX) && value is String) {
+                result[key.removePrefix(KEY_GROUP_OF_PREFIX)] = value
+            }
+        }
+        return result
+    }
+
+    fun groupOf(context: android.content.Context, filePath: String): String? =
+        context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+            .getString(KEY_GROUP_OF_PREFIX + filePath, null)
+
+    fun assignToGroup(context: android.content.Context, filePath: String, group: String?) {
+        val prefs = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+        if (group == null) {
+            prefs.edit().remove(KEY_GROUP_OF_PREFIX + filePath).apply()
+        } else {
+            prefs.edit().putString(KEY_GROUP_OF_PREFIX + filePath, group).apply()
+        }
     }
 }
 

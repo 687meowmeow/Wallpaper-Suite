@@ -267,17 +267,31 @@ object EngineLibrary {
     // Delete
     // =====================================================================
 
-    /** Deletes an imported wallpaper (file on disk or SAF registration). */
+    /**
+     * Deletes an imported wallpaper (file on disk or SAF registration).
+     *
+     * v0.9.0: a removal now takes EVERY trace of the item with it —
+     * previously only the filesDir .mpkg was deleted, while
+     *   • the cached scene .pkg under cache/pkg_cache/<id>.pkg (up to
+     *     80 MB each, kept when "Cache .pkg files" is enabled), and
+     *     • stale cacheDir temp files (<id>_<sendId>_debug.pkg/.mpkg,
+     *     <id>_trimmed.mp4) from interrupted pack/trim runs
+     * survived on disk. The user saw storage fill up (and re-downloading
+     * the same item instantly "resurrected" from the .pkg cache) even
+     * though the wallpaper was gone from the library.
+     */
     suspend fun deleteWallpaper(context: Context, info: WallpaperInfoSparse): Boolean =
         withContext(Dispatchers.IO) {
             try {
+                var deletedMain = false
                 if (info.isLocal) {
                     val locals = WeEnginePrefs.readLocalWallpapers(context)
                     locals.removeAll { it.uri == info.filePath }
                     WeEnginePrefs.storeLocalWallpapers(context, locals)
+                    deletedMain = true
                 } else {
                     val file = File(context.filesDir, info.filePath)
-                    if (file.exists()) file.delete()
+                    if (file.exists()) deletedMain = file.delete()
                     if (WeEnginePrefs.getStoredString(context, WeEnginePrefs.PREF_KEY_SELECTED_WALLPAPER) ==
                         info.filePath
                     ) {
@@ -288,12 +302,48 @@ object EngineLibrary {
                         )
                     }
                 }
+
+                // === v0.9.0: sweep every on-disk trace of the same item. ===
+                // Workshop imports are named "<itemId> - title.mpkg" — parse
+                // the leading id the same way the "Open workshop page"
+                // context action does.
+                val itemId = Regex("downloads/(\\d{6,}) - ").find(info.filePath)
+                    ?.groupValues?.get(1)
+                if (itemId != null) {
+                    // 1. The cached scene .pkg (set by "Cache .pkg files").
+                    val cachedPkg = File(File(context.cacheDir, "pkg_cache"), "$itemId.pkg")
+                    if (cachedPkg.exists()) {
+                        val ok = runCatching { cachedPkg.delete() }.getOrDefault(false)
+                        WepWawetLogger.engine("Library: deleted cached .pkg",
+                            "file" to cachedPkg.name,
+                            "ok" to ok)
+                    }
+                    // 2. Leftover cache temp files from pack/trim runs:
+                    //    <id>_<sendId>_debug.pkg / _debug.mpkg / _send.mpkg /
+                    //    <id>_trimmed.mp4, plus any interrupted install dir.
+                    runCatching {
+                        context.cacheDir.listFiles()?.forEach { f ->
+                            if (f.isFile && f.name.startsWith("$itemId")) {
+                                f.delete()
+                            }
+                        }
+                    }
+                    val installDir = File(context.cacheDir, "workshop_downloads/$itemId")
+                    if (installDir.exists()) {
+                        runCatching { installDir.deleteRecursively() }
+                    }
+                }
+
                 // remove from playlist
                 val playlist = WeEnginePrefs.readPlaylist(context)
                 val changed = playlist.wallpapers.removeAll { it.filepath == info.filePath }
                 if (changed) {
                     WeEnginePrefs.storePlaylist(context, playlist)
                 }
+                WepWawetLogger.engine("Library: deleteWallpaper complete",
+                    "file" to info.filePath,
+                    "main_deleted" to deletedMain,
+                    "item_id" to (itemId ?: "n/a"))
                 true
             } catch (t: Throwable) {
                 WepWawetLogger.engineError("Library: deleteWallpaper failed", exception = t)

@@ -237,21 +237,9 @@ fun SettingsScreen(
                 EngineSettingsCard()
             }
 
-            // ===== 0.5 Send to phone — the pairing subsystem toggle (v0.8.1) =====
-            // OFF by default: no pairing foreground service, no discovery
-            // broadcasts, no boot restart, no Bluetooth button in the
-            // workshop browser, no "Send to phone" button on detail pages.
-            // The Download button is the default flow. Turning this ON brings
-            // all of that back and starts the pairing service immediately.
-            item {
-                PairingToggleCard(
-                    enabled = pairingEnabled,
-                    onEnabledChange = { enabled ->
-                        pairingEnabled = enabled
-                        com.wepwawet.pairing.PairingService.setPairingEnabled(context, enabled)
-                    },
-                )
-            }
+            // ===== 0.5 (v0.9.0) — the pairing subsystem master switch now =====
+            // ===== lives INSIDE the Others card (user request: "move the  =====
+            // ===== enable pairing to other").                                  =====
 
             // ===== 1. Steam Account =====
             item {
@@ -401,6 +389,13 @@ fun SettingsScreen(
                             "settings_page_size_changed",
                             "page_size" to size,
                         )
+                    },
+                    // v0.9.0: the pairing toggle moved INTO Others (was its own
+                    // card above Steam Account — user request).
+                    pairingEnabled = pairingEnabled,
+                    onPairingEnabledChange = { enabled ->
+                        pairingEnabled = enabled
+                        com.wepwawet.pairing.PairingService.setPairingEnabled(context, enabled)
                     },
                 )
             }
@@ -676,40 +671,36 @@ private fun SteamWebApiCard(
  *     slider shown only while pagination is on.
  */
 /**
- * v0.8.1 — the pairing subsystem master switch. OFF by default: the app is
- * a self-contained Wallpaper Engine client (Download button → integrated
- * engine library). ON: the pairing foreground service starts immediately,
- * the Bluetooth button appears in the workshop browser, "Send to phone"
- * returns on detail pages, and the service auto-restarts after boot.
+ * v0.9.0 — the pairing subsystem master switch, as a row inside Others.
+ * OFF by default: the app is a self-contained Wallpaper Engine client
+ * (Download button → integrated engine library). ON: the pairing
+ * foreground service starts immediately, the Bluetooth button appears in
+ * the workshop browser, "Send to phone" returns on detail pages, and the
+ * service auto-restarts after boot.
  */
 @Composable
-private fun PairingToggleCard(
+private fun PairingToggleRow(
     enabled: Boolean,
     onEnabledChange: (Boolean) -> Unit,
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text("Send to phone", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(4.dp))
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text("Enable pairing (send to phone)", style = MaterialTheme.typography.bodyLarge)
             Text(
-                "Enable the PC-pairing subsystem to send wallpapers straight to " +
-                    "the official Wallpaper Engine app on this device over the " +
-                    "pairing protocol. While OFF, nothing pairing-related runs " +
-                    "(no service, no broadcasts, no boot restart) — the Download " +
-                    "button puts wallpapers straight into this app's engine.",
-                style = MaterialTheme.typography.bodySmall,
+                "Send wallpapers straight to the official Wallpaper Engine app " +
+                    "over the pairing protocol. While OFF, nothing pairing-related " +
+                    "runs — the Download button puts wallpapers straight into this " +
+                    "app's engine.",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
             )
-            Spacer(Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Enable pairing (send to phone)")
-                Switch(checked = enabled, onCheckedChange = onEnabledChange)
-            }
         }
+        Spacer(Modifier.width(12.dp))
+        Switch(checked = enabled, onCheckedChange = onEnabledChange)
     }
 }
 
@@ -723,6 +714,8 @@ private fun OthersCard(
     pageSize: Int,
     onPaginationChange: (Boolean) -> Unit,
     onPageSizeChange: (Int) -> Unit,
+    pairingEnabled: Boolean,
+    onPairingEnabledChange: (Boolean) -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -795,6 +788,13 @@ private fun OthersCard(
                     steps = 17, // 10, 15, 20, ..., 100 (19 stops → 17 intermediate steps)
                 )
             }
+
+            // ---- Enable pairing (v0.9.0: moved here from its own card) ----
+            Spacer(Modifier.height(16.dp))
+            PairingToggleRow(
+                enabled = pairingEnabled,
+                onEnabledChange = onPairingEnabledChange,
+            )
         }
     }
 }
@@ -1219,29 +1219,10 @@ private fun EngineSettingsCard() {
                 )
             }
 
-            // ===== Developer section (official general_settings_developer) =====
-            Text(
-                "Developer",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(top = 12.dp),
-            )
-            // v0.8.4: the separate "Write Errors to Log" switch is GONE —
-            // the Wallpaper Engine logging is integrated into the app's main
-            // logging: the verbose toggle (Others section) drives both the
-            // in-app log viewer and the official-format engine log file
-            // (WEERR / filesDir/logs/applog.txt + the native engine's own
-            // output).
-            //
-            // v0.8.8: the "Save Error Log" export button was REMOVED from
-            // here — log export belongs to the Logs screen's Download button
-            // (which includes the engine log tail), per the user's request.
-            // This screen only keeps the note below.
-            Text(
-                "Engine logging follows the verbose logging toggle above. " +
-                    "Export logs from the Logs screen (Download button).",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            // ===== v0.9.0: the Developer section is REMOVED (user request — =====
+            // ===== "remove the developer section … its not necessary").    =====
+            // ===== Engine logging follows the verbose toggle in Others;    =====
+            // ===== log export lives on the Logs screen's Download button.  =====
         }
     }
 }

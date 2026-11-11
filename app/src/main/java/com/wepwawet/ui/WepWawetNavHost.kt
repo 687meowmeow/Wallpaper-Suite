@@ -145,7 +145,27 @@ fun WepWawetNavHost() {
                     com.wepwawet.engine.PreviewRequestHolder.set(wallpaper)
                     nav.navigate("preview")
                 },
+                onOpenImageFolders = { nav.navigate("imageFolders") },
+                onOpenNyanpasu = { nav.navigate("nyanpasu") },
             )
+        }
+
+        // v0.9.0: local image folders — pick a folder, grid its images,
+        // one-tap set-as-wallpaper.
+        composable("imageFolders") {
+            androidx.compose.runtime.LaunchedEffect(Unit) {
+                WepWawetLogger.lifecycle("NavHost navigate to imageFolders")
+            }
+            com.wepwawet.ui.screens.ImageFolderScreen(onBack = { nav.popBackStack() })
+        }
+
+        // v0.9.0: Nyanpasu — the ACG auto-wallpaper clone (1.0 image
+        // philosophy, MIT-based reimplementation).
+        composable("nyanpasu") {
+            androidx.compose.runtime.LaunchedEffect(Unit) {
+                WepWawetLogger.lifecycle("NavHost navigate to nyanpasu")
+            }
+            com.wepwawet.nyanpasu.NyanpasuScreen(onBack = { nav.popBackStack() })
         }
 
         // v0.8.0: live-rendering preview + apply + properties + playlist.
@@ -340,6 +360,11 @@ fun WepWawetNavHost() {
                 itemId = trimItemId,
                 onBack = { nav.popBackStack() },
                 onSendComplete = { nav.popBackStack() },
+                // v0.9.0: library mode when the Download button paused the
+                // video for a clip decision; send mode for the classic
+                // send-to-phone flow (default, back-compat).
+                mode = com.wepwawet.pairing.WorkshopDownloadJob
+                    .pendingVideoModeFor(trimItemId),
             )
         }
     }

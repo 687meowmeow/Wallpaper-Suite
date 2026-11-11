@@ -59,6 +59,8 @@ import `in`.dragonbra.javasteam.util.log.LogManager
  */
 private object JavaSteamLogBridge : LogListener {
     private val installed = AtomicBoolean(false)
+    /** v0.9.0: repeat-collapsing for onError (see onError). */
+    private val repeatedErrorCounts = java.util.concurrent.ConcurrentHashMap<String, Int>()
     /**
      * v0.7.24 (C-D1 BUG FIX): the bridge held ONE callback — a single global.
      * v0.7.20 added CONCURRENT downloads (each item gets its own
@@ -126,9 +128,20 @@ private object JavaSteamLogBridge : LogListener {
     }
     override fun onError(clazz: Class<*>, message: String?, throwable: Throwable?) {
         val msg = message ?: ""
-        WepWawetLogger.proxyError("JavaSteam ERROR: ${clazz.simpleName}",
-            "msg" to msg.take(200),
-            "exception" to (throwable?.javaClass?.name ?: "null"))
+        // === v0.9.0: collapse REPEATED connection errors to a single line + ===
+        // === counter. While the device network is flapping, JavaSteam's     ===
+        // === SmartCMServerList retries every ~2 s and each failure logged a ===
+        // === full ERROR line (16 UnresolvedAddressException lines in a row  ===
+        // === in the 2026-11-10 log). The first occurrence logs normally;    ===
+        // === repeats log every 10th with the running count.                 ===
+        val errorKey = "${clazz.simpleName}:${msg.take(60)}:${throwable?.javaClass?.name ?: ""}"
+        val count = repeatedErrorCounts.merge(errorKey, 1, Int::plus) ?: 1
+        if (count == 1 || count % 10 == 0) {
+            WepWawetLogger.proxyError("JavaSteam ERROR: ${clazz.simpleName}",
+                "msg" to msg.take(200),
+                "exception" to (throwable?.javaClass?.name ?: "null"),
+                "repeat_count" to count)
+        }
         // === Detect known library bugs that cause silent download hangs ===
         // BUG 1: "Published file X has unsupported file type Y. Skipping file"
         //   - Library logs this when fileType isn't in SupportedWorkshopFileTypes
@@ -184,6 +197,22 @@ class WorkshopDownloader(
         private const val APP_ID_WE = 431960
         private const val PREF_NAME = "wepwawet_steam_token"
         private const val KEY_REFRESH_TOKEN = "refresh_token"
+
+        /**
+         * v0.9.0: callbacks that fire in bursts (friends list streaming in,
+         * notification state churn) and carry no diagnostic value for
+         * workshop downloads. Suppressed from the verbose dispatch LOG only —
+         * the callbacks themselves still dispatch to their subscribers.
+         */
+        private val QUIET_CALLBACKS = setOf(
+            "PersonaStateCallback",
+            "UserNotificationsCallback",
+            "FriendsListCallback",
+            "NicknameListCallback",
+            "AccountInfoCallback",
+            "EmailAddrInfoCallback",
+            "WalletInfoCallback",
+        )
         private const val KEY_ACCOUNT_NAME = "account_name"
 
         // v0.5.32 (audit M7): Previously loginID was hardcoded to 149 at
@@ -943,37 +972,64 @@ class WorkshopDownloader(
                 onStatusUpdate("Downloaded ${formatBytes(outputFile.length())} .pkg (Scene wallpaper)")
                 outputFile
             } else {
-                // No .pkg found — try .mp4 (video wallpaper)
-                WepWawetLogger.proxy("$TAG: no .pkg found, checking for video file",
-                    "dir" to installDir.absolutePath)
-                val videoFile = findVideoFile(installDir)
-                if (videoFile != null) {
-                    val isVideo = isVideoWallpaper(installDir)
-                    WepWawetLogger.proxy("$TAG: video file found",
-                        "file" to videoFile.absolutePath,
-                        "size" to videoFile.length(),
-                        "is_video_wallpaper" to isVideo,
-                        "files_done" to filesCompleted.get(),
-                        "chunks_done" to chunksCompleted.get(),
-                        "depots_done" to depotsCompleted.get())
-                    videoFile.copyTo(outputFile, overwrite = true)
-                    WepWawetLogger.proxy("$TAG COMPLETE (Video .mp4)",
+                // === v0.9.0: project.json-driven content resolution. ===
+                // Some workshop types have NO .pkg and NO >1MB media file:
+                //   • GIF wallpapers ship project.json ("type":"gif",
+                //     "file":"preview.gif") + the gif itself — often < 1 MB,
+                //     which the old findVideoFile(>1MB) filter skipped
+                //     (workshop item 3734403543 "ishtar" = 889 KB gif).
+                //   • Image/video wallpapers name their content file in
+                //     project.json's "file" field — trust it over heuristics.
+                val project = parseProjectJson(installDir)
+                val declaredFile = project?.file
+                    ?.let { File(installDir, it) }
+                    ?.takeIf { it.exists() && it.length() > 0 }
+                if (declaredFile != null) {
+                    WepWawetLogger.proxy("$TAG: content file resolved from project.json",
+                        "file" to declaredFile.name,
+                        "size" to declaredFile.length(),
+                        "project_type" to (project?.type ?: "?"))
+                    declaredFile.copyTo(outputFile, overwrite = true)
+                    WepWawetLogger.proxy("$TAG COMPLETE (project.json content)",
                         "output" to outputFile.name,
                         "size" to outputFile.length(),
-                        "is_video" to isVideo,
+                        "type" to (project?.type ?: "?"),
                         "total_elapsed_ms" to (System.currentTimeMillis() - downloadStartMs))
-                    onStatusUpdate("Downloaded ${formatBytes(outputFile.length())} .mp4 (Video wallpaper)")
+                    onStatusUpdate("Downloaded ${formatBytes(outputFile.length())} ${project?.type ?: ""} content")
                     outputFile
                 } else {
-                    // Neither .pkg nor media found — list directory contents so we can debug
-                    val listing = installDir.walkTopDown().toList().take(20).joinToString("\n  ") { f ->
-                        "${if (f.isDirectory) "[DIR] " else ""}${f.name} (${f.length()} B)"
+                    // No .pkg, no project.json-declared file — try media (video wallpaper)
+                    WepWawetLogger.proxy("$TAG: no .pkg found, checking for video file",
+                        "dir" to installDir.absolutePath)
+                    val videoFile = findVideoFile(installDir)
+                    if (videoFile != null) {
+                        val isVideo = isVideoWallpaper(installDir)
+                        WepWawetLogger.proxy("$TAG: video file found",
+                            "file" to videoFile.absolutePath,
+                            "size" to videoFile.length(),
+                            "is_video_wallpaper" to isVideo,
+                            "files_done" to filesCompleted.get(),
+                            "chunks_done" to chunksCompleted.get(),
+                            "depots_done" to depotsCompleted.get())
+                        videoFile.copyTo(outputFile, overwrite = true)
+                        WepWawetLogger.proxy("$TAG COMPLETE (Video .mp4)",
+                            "output" to outputFile.name,
+                            "size" to outputFile.length(),
+                            "is_video" to isVideo,
+                            "total_elapsed_ms" to (System.currentTimeMillis() - downloadStartMs))
+                        onStatusUpdate("Downloaded ${formatBytes(outputFile.length())} .mp4 (Video wallpaper)")
+                        outputFile
+                    } else {
+                        // Neither .pkg nor media found — list directory contents so we can debug
+                        val listing = installDir.walkTopDown().toList().take(20).joinToString("\n  ") { f ->
+                            "${if (f.isDirectory) "[DIR] " else ""}${f.name} (${f.length()} B)"
+                        }
+                        WepWawetLogger.proxyWarn("$TAG: no .pkg or media file found",
+                            "dir" to installDir.absolutePath,
+                            "dir_listing" to listing)
+                        onStatusUpdate("No .pkg or media file found after download (see logs for directory listing)")
+                        return@withContext null
                     }
-                    WepWawetLogger.proxyWarn("$TAG: no .pkg or media file found",
-                        "dir" to installDir.absolutePath,
-                        "dir_listing" to listing)
-                    onStatusUpdate("No .pkg or media file found after download (see logs for directory listing)")
-                    return@withContext null
                 }
             }
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -1122,9 +1178,17 @@ class WorkshopDownloader(
             subscriptions.add(callbackManager!!.subscribe(
                 `in`.dragonbra.javasteam.steam.steamclient.callbackmgr.CallbackMsg::class.java
             ) { msg ->
-                WepWawetLogger.proxy("$TAG: callback dispatched",
-                    "class" to msg.javaClass.simpleName,
-                    "job_id" to (msg.jobID?.toString() ?: "null"))
+                // === v0.9.0: high-frequency callbacks are dropped from the LOG ===
+                // (not from the dispatch). PersonaStateCallback alone accounted
+                // for 72 of ~180 non-JavaSteam lines in a typical session log —
+                // one burst of ~30 fires right after logon when the friends
+                // list streams in. Keeping them made real events hard to find.
+                val name = msg.javaClass.simpleName
+                if (name !in QUIET_CALLBACKS) {
+                    WepWawetLogger.proxy("$TAG: callback dispatched",
+                        "class" to name,
+                        "job_id" to (msg.jobID?.toString() ?: "null"))
+                }
             })
             WepWawetLogger.proxy("$TAG: subscribed to CallbackMsg (base) for verbose dispatch logging")
         } catch (e: Exception) {
@@ -1658,11 +1722,17 @@ class WorkshopDownloader(
         // [VideoContainerSniffer] — no extension trust, no per-format magic
         // re-implementation. The largest video-kind or image-kind file wins
         // (the largest file is the content, not a preview).
+        //
+        // v0.9.0: threshold lowered 1 MB → 64 KB. The 1 MB floor was meant to
+        // skip tiny junk, but it also skipped legitimately small content
+        // (a 889 KB GIF wallpaper). 64 KB still skips manifests/preview
+        // thumbnails while keeping real content in play. (The primary path
+        // is now project.json's "file" field — this is just the fallback.)
         if (!searchDir.exists()) return null
         var largestMedia: File? = null
         var largestSize = 0L
         searchDir.walkTopDown().forEach { file ->
-            if (file.isFile && file.length() > 1024 * 1024) {  // > 1MB to skip tiny files
+            if (file.isFile && file.length() > 64 * 1024) {  // > 64KB to skip tiny files
                 val kind = VideoContainerSniffer.sniff(file)
                 val isMedia = VideoContainerSniffer.isVideoKind(kind) ||
                     VideoContainerSniffer.isImageKind(kind)
@@ -1700,6 +1770,73 @@ class WorkshopDownloader(
         } catch (_: Exception) {
             false
         }
+    }
+
+    /**
+     * === v0.9.0: Parsed workshop project.json — the WE PC fields we care about. ===
+     *
+     * GIF-type wallpapers: { "type": "gif", "file": "preview.gif", ... } —
+     * the "file" field names the content (the workshop preview doubles as
+     * the wallpaper itself, so the gif is often well under 1 MB).
+     *
+     * PRESETS (verified from wallpaperui.exe strings: "dependency",
+     * "ispreset", 'Missing Workshop dependency id.'): a preset workshop item
+     * only NAMES another wallpaper — project.json carries a "dependency"
+     * (the base wallpaper's workshop id) plus the preset's saved property
+     * values. Per WE semantics the preset plays the dependency wallpaper
+     * with the preset's values. WallpaperSuite implements the same: the job
+     * downloads the dependency and packs it with the preset values applied.
+     */
+    data class WorkshopProject(
+        val type: String?,
+        val file: String?,
+        val title: String?,
+        val dependency: String?,
+        /** Flat name → value map from the preset's "preset" object. */
+        val presetValues: Map<String, Any>,
+    )
+
+    /** Parse installDir/project.json; null when missing/unreadable. */
+    fun parseProjectJson(installDir: File): WorkshopProject? {
+        val projectJson = java.io.File(installDir, "project.json")
+        if (!projectJson.exists() || projectJson.length() == 0L) return null
+        return try {
+            val obj = com.google.gson.JsonParser.parseString(projectJson.readText()).asJsonObject
+            val presetValues = mutableMapOf<String, Any>()
+            obj.get("preset")?.takeIf { it.isJsonObject }?.asJsonObject?.entrySet()?.forEach { (key, value) ->
+                when {
+                    value.isJsonPrimitive -> {
+                        val p = value.asJsonPrimitive
+                        presetValues[key] = when {
+                            p.isBoolean -> p.asBoolean
+                            p.isNumber -> p.asDouble
+                            else -> p.asString
+                        }
+                    }
+                    value.isJsonArray -> presetValues[key] = value.toString()
+                }
+            }
+            WorkshopProject(
+                type = obj.get("type")?.takeIf { it.isJsonPrimitive }?.asString,
+                file = obj.get("file")?.takeIf { it.isJsonPrimitive }?.asString,
+                title = obj.get("title")?.takeIf { it.isJsonPrimitive }?.asString,
+                dependency = obj.get("dependency")?.takeIf { it.isJsonPrimitive }?.asString,
+                presetValues = presetValues,
+            )
+        } catch (e: Exception) {
+            WepWawetLogger.proxyWarn("$TAG.parseProjectJson failed",
+                "exception" to e.javaClass.name)
+            null
+        }
+    }
+
+    /**
+     * v0.9.0: Is this install dir a PRESET item (references a base wallpaper)?
+     * Exposed for WorkshopDownloadJob — it downloads the dependency itself.
+     */
+    fun isPresetInstall(installDir: File): Boolean {
+        val project = parseProjectJson(installDir) ?: return false
+        return project.dependency != null && project.dependency.toLongOrNull() != null
     }
 
     // v0.7.24 (M-D2): Locale.US — String.format with the default locale

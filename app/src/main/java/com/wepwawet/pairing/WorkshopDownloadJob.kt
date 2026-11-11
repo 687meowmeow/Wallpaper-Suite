@@ -83,6 +83,15 @@ object WorkshopDownloadJob {
         val pendingVideoFile: String? = null,
         /** v0.7.1 (round 10): The workshop item associated with pendingVideoFile. */
         val pendingVideoItem: WorkshopItemTyped? = null,
+        /**
+         * v0.9.0: What happens when the user finishes the pending-video
+         * dialog. "send" = the classic send-to-phone flow (pack → queue to
+         * the paired phone). "library" = the integrated-engine flow (pack →
+         * import into this app's library) — the Download button's path,
+         * which lost its trim prompt when the library flow was introduced
+         * in v0.8.1 and the user explicitly asked for it back.
+         */
+        val pendingVideoMode: String = "send",
     )
 
     private val _state = MutableStateFlow(State())
@@ -142,6 +151,10 @@ object WorkshopDownloadJob {
         val item = s.pendingVideoItem ?: return null
         return path to item
     }
+
+    /** v0.9.0: The pending-video mode for an item ("send" | "library"). */
+    fun pendingVideoModeFor(itemId: String): String =
+        _states.value[itemId]?.pendingVideoMode ?: "send"
 
     /**
      * v0.7.20: Update a specific item's state.
@@ -464,6 +477,128 @@ object WorkshopDownloadJob {
                 "output_path" to (downloadedPkg?.absolutePath ?: "null"))
 
             if (downloadedPkg == null || !downloadedPkg.exists() || downloadedPkg.length() == 0L) {
+                // === v0.9.0: PRESET workshop items land here. ===
+                // A preset's own download has no .pkg/media — project.json only
+                // NAMES a base wallpaper ("dependency") + saved property values
+                // ("preset"). WE semantics: play the dependency with the preset's
+                // values. Implement the same: download the base (the downloader
+                // is still authenticated) and pack it with the values applied.
+                val presetInstallDir = File(appContext.cacheDir, "workshop_downloads/${item.id}")
+                val presetProject = runCatching {
+                    downloaderRef?.parseProjectJson(presetInstallDir)
+                }.getOrNull()
+                if (presetProject?.dependency != null &&
+                    presetProject.dependency.toLongOrNull() != null) {
+                    val baseId = presetProject.dependency
+                    WepWawetLogger.workshop("WorkshopDownloadJob: PRESET detected — downloading base wallpaper",
+                        "preset_id" to item.id,
+                        "dependency" to baseId,
+                        "preset_values" to presetProject.presetValues.size,
+                        "type" to (presetProject.type ?: "?"))
+                    updateState(itemId) { s -> s.copy(
+                        status = "Preset — downloading base wallpaper $baseId…",
+                        progress = 0.2f) }
+                    onDownloadProgress(
+                        itemId = item.id,
+                        progress = 0.2f,
+                        status = com.wepwawet.data.DownloadStatus.DOWNLOADING,
+                        statusMessage = "Preset — downloading base wallpaper…")
+                    val basePkgFile = File(appContext.cacheDir, "${item.id}_${sendId}_base.pkg")
+                    val baseDownloaded = downloaderRef?.downloadWorkshopPkg(
+                        context = appContext,
+                        workshopId = baseId,
+                        outputFile = basePkgFile,
+                        onProgress = { pct ->
+                            val coerced = pct.coerceIn(0f, 1f)
+                            updateState(itemId) { s -> s.copy(progress = coerced) }
+                            onDownloadProgress(
+                                itemId = item.id,
+                                progress = coerced,
+                                status = com.wepwawet.data.DownloadStatus.DOWNLOADING,
+                                statusMessage = "Downloading base wallpaper… ${(coerced * 100).toInt()}%")
+                        },
+                        onStatusUpdate = { status ->
+                            updateState(itemId) { s -> s.copy(status = "Base: $status") }
+                        },
+                    )
+                    if (baseDownloaded != null && baseDownloaded.exists() && baseDownloaded.length() > 0L) {
+                        val baseInstallDir = File(appContext.cacheDir, "workshop_downloads/$baseId")
+                        val baseMpkg = File(appContext.cacheDir, "${item.id}_${sendId}_base.mpkg")
+                        updateState(itemId) { s -> s.copy(
+                            status = "Packing preset (base + values) → .mpkg…",
+                            progress = 0.85f) }
+                        val pm2 = appContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+                        val wakeLock2 = pm2.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WepWawet:MpkgPacker")
+                        wakeLock2.setReferenceCounted(false)
+                        wakeLock2.acquire(10 * 60 * 1000L)
+                        val presetMpkgSize = try {
+                            com.wepwawet.pairing.MpkgPacker.packFromPkg(
+                                item = item,
+                                pkgFile = baseDownloaded,
+                                outputFile = baseMpkg,
+                                installDir = baseInstallDir,
+                                presetValues = presetProject.presetValues,
+                                presetTitle = presetProject.title ?: item.title,
+                            )
+                        } finally {
+                            if (wakeLock2.isHeld) wakeLock2.release()
+                        }
+                        runCatching { baseDownloaded.delete() }
+                        runCatching { baseInstallDir.deleteRecursively() }
+                        runCatching { presetInstallDir.deleteRecursively() }
+                        if (presetMpkgSize > 0L && baseMpkg.exists()) {
+                            val importOk = autoImportToLibrary(appContext, baseMpkg, item.id, item.title)
+                            runCatching { baseMpkg.delete() }
+                            if (importOk) {
+                                val msg = "Preset added to your library ✓ (${formatBytes(presetMpkgSize)}) — base wallpaper $baseId with preset values"
+                                WepWawetLogger.workshop("WorkshopDownloadJob: preset added to library",
+                                    "preset_id" to item.id,
+                                    "base_id" to baseId,
+                                    "values_applied" to presetProject.presetValues.size,
+                                    "size" to presetMpkgSize)
+                                updateState(itemId) { s -> s.copy(
+                                    isRunning = false,
+                                    progress = 1f,
+                                    status = msg,
+                                    resultMessage = msg,
+                                    endedAt = System.currentTimeMillis(),
+                                ) }
+                                onDownloadCompleted(item, presetMpkgSize, "Library")
+                                return@launchSafely
+                            } else {
+                                val err = "Failed to import preset into the wallpaper library (see logs)"
+                                updateState(itemId) { s -> s.copy(
+                                    isRunning = false,
+                                    status = err,
+                                    errorMessage = err,
+                                    endedAt = System.currentTimeMillis()) }
+                                onDownloadFailed(item, err)
+                                return@launchSafely
+                            }
+                        } else {
+                            val err = "Failed to pack the preset's base wallpaper → .mpkg"
+                            updateState(itemId) { s -> s.copy(
+                                isRunning = false,
+                                status = err,
+                                errorMessage = err,
+                                endedAt = System.currentTimeMillis()) }
+                            onDownloadFailed(item, err)
+                            return@launchSafely
+                        }
+                    } else {
+                        val err = "Preset's base wallpaper ($baseId) could not be downloaded"
+                        WepWawetLogger.workshopWarn("WorkshopDownloadJob: preset base download failed",
+                            "preset_id" to item.id,
+                            "dependency" to baseId)
+                        updateState(itemId) { s -> s.copy(
+                            isRunning = false,
+                            status = err,
+                            errorMessage = err,
+                            endedAt = System.currentTimeMillis()) }
+                        onDownloadFailed(item, err)
+                        return@launchSafely
+                    }
+                }
                 val err = "Failed to download .pkg via Steam (see logs)"
                 WepWawetLogger.workshopWarn("WorkshopDownloadJob: pkg download failed/null",
                     "id" to item.id)
@@ -499,6 +634,34 @@ object WorkshopDownloadJob {
             // pack as a Scene via packSceneWallpaper instead of failing the
             // .pkg parse.
             val isImage = !isVideo && detectImageByMagicBytes(downloadedPkg)
+
+            // === v0.9.0: the clip option is BACK in the library flow. ===
+            // v0.8.1 redirected the Download button into the integrated
+            // engine library but kept the trim prompt ONLY on the send-to-phone
+            // path — so video wallpapers lost their "clip before adding"
+            // option entirely. Pause here (exactly like the send path does)
+            // and let the detail screen's dialog offer Clip / Add Full.
+            // Offered only for containers the trim UI can actually play +
+            // cut (ExoPlayer + MediaExtractor): MP4 family and WebM/MKV.
+            // GIF/AVI/WMV go straight to their transcoders instead.
+            if (isVideo && isTrimmableVideo(downloadedPkg)) {
+                WepWawetLogger.workshop("WorkshopDownloadJob: video paused for clip decision (library flow)",
+                    "id" to item.id,
+                    "file" to downloadedPkg.name,
+                    "size" to downloadedPkg.length())
+                updateState(itemId) { s -> s.copy(
+                    pendingVideoFile = downloadedPkg.absolutePath,
+                    pendingVideoItem = item,
+                    pendingVideoMode = "library",
+                    isRunning = false,
+                    status = "Video downloaded — clip it or add the full video",
+                ) }
+                // The finally block below calls downloader.cleanup() but the
+                // video file must SURVIVE for the trim screen — it lives in
+                // cacheDir, not the install dir, so cleanup() is safe.
+                return@launchSafely
+            }
+
             WepWawetLogger.workshop("WorkshopDownloadJob: packing content → .mpkg",
                 "input_file" to downloadedPkg.absolutePath,
                 "input_size" to downloadedPkg.length(),
@@ -1268,6 +1431,147 @@ object WorkshopDownloadJob {
     }
 
     /**
+     * v0.9.0: Continue a LIBRARY-mode pending video — the "Add Full Video"
+     * button on the detail screen's clip dialog. Packs + imports the full
+     * video into the integrated engine library instead of queueing for the
+     * pairing transfer.
+     */
+    fun continueVideoToLibrary(context: Context, itemId: String) {
+        val pendingFile = _states.value[itemId]?.pendingVideoFile
+        val pendingItem = _states.value[itemId]?.pendingVideoItem
+        if (pendingFile == null || pendingItem == null) {
+            WepWawetLogger.workshopWarn("WorkshopDownloadJob.continueVideoToLibrary: no pending video",
+                "id" to itemId)
+            return
+        }
+        val videoFile = File(pendingFile)
+        if (!videoFile.exists()) {
+            WepWawetLogger.workshopWarn("WorkshopDownloadJob.continueVideoToLibrary: video file gone",
+                "path" to pendingFile)
+            updateState(itemId) { it.copy(
+                pendingVideoFile = null,
+                pendingVideoItem = null,
+                pendingVideoMode = "send",
+                errorMessage = "Video file not found",
+            ) }
+            return
+        }
+        updateState(itemId) { it.copy(
+            pendingVideoFile = null,
+            pendingVideoItem = null,
+            pendingVideoMode = "send",
+            isRunning = true,
+            status = "Packing video → .mpkg…",
+        ) }
+        importVideoToLibrary(context, itemId, videoFile, deleteSource = true)
+    }
+
+    /**
+     * v0.9.0: Pack a (full or trimmed) video into the integrated engine
+     * library and update the download state accordingly. Shared by
+     * [continueVideoToLibrary] ("Add Full Video") and VideoTrimScreen's
+     * library mode ("Clip & Add").
+     *
+     * @param deleteSource delete the source video + install dir afterwards
+     *   (the trim screen passes deleteSource=false for a FAILED trim where
+     *   the original may still be wanted, and runs its own cleanup).
+     */
+    fun importVideoToLibrary(context: Context, itemId: String, videoFile: File, deleteSource: Boolean = true) {
+        val appContext = context.applicationContext
+        val pendingItem = _states.value[itemId]?.pendingVideoItem
+            // Fallback for a direct call after the pending state was cleared:
+            ?: WorkshopItemTyped(
+                item = com.wepwawet.data.model.WorkshopItem(publishedfileid = itemId),
+                type = com.wepwawet.data.model.WallpaperType.VIDEO,
+            )
+        val item = pendingItem
+        // Surface the pack phase immediately (the coroutine below takes a
+        // moment to spin up; without this the state shows nothing happening).
+        updateState(itemId) { it.copy(
+            isRunning = true,
+            status = "Packing video → .mpkg…",
+        ) }
+        onDownloadProgress(
+            itemId = itemId,
+            progress = 0.85f,
+            status = com.wepwawet.data.DownloadStatus.PACKING,
+            statusMessage = "Packing video → .mpkg…",
+        )
+        val sendId = System.currentTimeMillis()
+        val cacheMpkg = File(appContext.cacheDir, "${itemId}_${sendId}_debug.mpkg")
+        val installDir = File(appContext.cacheDir, "workshop_downloads/$itemId")
+        jobs[itemId]?.cancel()
+        jobs[itemId] = WepWawetApplication.appScope.launchSafely(itemId) {
+            try {
+                val pm = appContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+                val wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WepWawet:MpkgPacker")
+                wakeLock.setReferenceCounted(false)
+                wakeLock.acquire(10 * 60 * 1000L)
+                val mpkgSize = try {
+                    val previewFile = File(installDir, "preview.jpg")
+                        .takeIf { it.exists() }
+                        ?: File(installDir, "preview.gif")
+                            .takeIf { it.exists() }
+                    com.wepwawet.pairing.MpkgPacker.packVideoWallpaper(
+                        item = item,
+                        videoFile = videoFile,
+                        outputFile = cacheMpkg,
+                        previewFile = previewFile,
+                    )
+                } finally {
+                    if (wakeLock.isHeld) wakeLock.release()
+                }
+                if (mpkgSize <= 0L || !cacheMpkg.exists()) {
+                    throw IllegalStateException("packVideoWallpaper produced no output")
+                }
+                updateState(itemId) { s -> s.copy(
+                    status = "Importing into your wallpaper library…",
+                    progress = 0.95f) }
+                val importOk = autoImportToLibrary(appContext, cacheMpkg, itemId, item.title)
+                if (deleteSource) {
+                    runCatching { videoFile.delete() }
+                    runCatching { installDir.deleteRecursively() }
+                }
+                runCatching { cacheMpkg.delete() }
+                if (importOk) {
+                    val msg = "Added to your wallpaper library ✓ (${formatBytes(mpkgSize)}) — open it on the main page"
+                    WepWawetLogger.workshop("WorkshopDownloadJob.importVideoToLibrary: added to library",
+                        "file" to "$itemId - ${item.title}.mpkg",
+                        "size" to mpkgSize)
+                    updateState(itemId) { s -> s.copy(
+                        isRunning = false,
+                        progress = 1f,
+                        status = msg,
+                        resultMessage = msg,
+                        endedAt = System.currentTimeMillis(),
+                    ) }
+                    onDownloadCompleted(item, mpkgSize, "Library")
+                } else {
+                    val err = "Failed to import into the wallpaper library (see logs)"
+                    updateState(itemId) { s -> s.copy(
+                        isRunning = false,
+                        status = err,
+                        errorMessage = err,
+                        endedAt = System.currentTimeMillis()) }
+                    onDownloadFailed(item, err)
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                WepWawetLogger.workshopWarn("WorkshopDownloadJob.importVideoToLibrary: failed",
+                    "exception" to e.javaClass.name, "message" to (e.message ?: ""))
+                updateState(itemId) { s -> s.copy(
+                    isRunning = false,
+                    status = "Failed: ${e.message}",
+                    errorMessage = "Failed: ${e.message}",
+                    endedAt = System.currentTimeMillis(),
+                ) }
+                onDownloadFailed(item, "Failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
      * v0.7.1 (round 10): Cancel a pending video send (user tapped the X
      * in the trim dialog corner). Deletes the downloaded video file and
      * resets state.
@@ -1306,6 +1610,7 @@ object WorkshopDownloadJob {
             isRunning = false,
             pendingVideoFile = null,
             pendingVideoItem = null,
+            pendingVideoMode = "send",
             progress = 0f,  // Reset — was sitting at 0.85f from the trim-wait state
             status = "Cancelled",
             // v0.7.3: Clear stale result/error messages so the next
@@ -1330,6 +1635,7 @@ object WorkshopDownloadJob {
             updateState(itemId) { it.copy(
                 pendingVideoFile = null,
                 pendingVideoItem = null,
+                pendingVideoMode = "send",
             ) }
             WepWawetLogger.workshop("WorkshopDownloadJob.onVideoConsumedByTrimScreen: pending video state cleared")
         }
@@ -1451,6 +1757,25 @@ private fun detectVideoByMagicBytes(file: File): Boolean {
         "sniffed" to VideoContainerSniffer.label(kind),
         "is_video" to isVideo)
     return isVideo
+}
+
+/**
+ * v0.9.0: Can this video be offered to the trim/clip screen? The trim UI
+ * plays the file with ExoPlayer and cuts it with MediaExtractor/MediaMuxer
+ * — both handle the MP4 family and WebM/MKV containers. GIF/AVI/WMV/FLV/TS
+ * must flow straight to their transcoders instead (GifToMp4Transcoder /
+ * VideoTranscoder), where trimming isn't offered.
+ */
+private fun isTrimmableVideo(file: File): Boolean {
+    if (!file.exists() || file.length() < 12) return false
+    val kind = VideoContainerSniffer.sniff(file)
+    val trimmable = kind == VideoContainerSniffer.Kind.MP4 ||
+        kind == VideoContainerSniffer.Kind.WEBM_MKV
+    WepWawetLogger.workshop("isTrimmableVideo",
+        "file" to file.name,
+        "sniffed" to VideoContainerSniffer.label(kind),
+        "trimmable" to trimmable)
+    return trimmable
 }
 
 /**

@@ -3,11 +3,7 @@ package com.wepwawet
 import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.content.ContentValues
-import android.net.Uri
 import android.os.Build
-import android.os.Environment
-import android.provider.MediaStore
 import android.util.Log
 import androidx.work.Configuration
 import coil.ImageLoader
@@ -23,7 +19,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import java.io.File
 
 /**
  * WepWawet Application entry point.
@@ -87,7 +82,7 @@ class WepWawetApplication : Application(), Configuration.Provider, ImageLoaderFa
         // v0.5.32 (audit M4): Initialize appScope FIRST, before any
         // other initialization step. Previously appScope was initialized
         // at line 159 (the very LAST step of onCreate) — if any earlier
-        // step (CrashHandler.install, writeBootBreadcrumb, WepWawetLogger.init,
+        // step (CrashHandler.install, WepWawetLogger.init,
         // createNotificationChannels) ever touched appScope (directly or
         // transitively), the app would crash with
         // UninitializedPropertyAccessException *before* the user-visible
@@ -155,27 +150,10 @@ class WepWawetApplication : Application(), Configuration.Provider, ImageLoaderFa
             Log.e(TAG, "SteamApiService.initPageSize failed", t)
         }
 
-        // Step 2: Write a boot breadcrumb to public Downloads/WepWawet/boot.txt
-        // so the user can verify the app actually reached onCreate — if even
-        // this file is missing, the crash is happening BEFORE Application.onCreate
-        // (which means class-loading failure, manifest merge issue, or native
-        // init crash — none of which the Java CrashHandler can capture).
-        //
-        // v0.7.24 (C-U2 BUG FIX): writeBootBreadcrumb does a MediaStore
-        // query + insert + openOutputStream + write — IPC to MediaProvider
-        // that can block for hundreds of ms under load, all on the MAIN
-        // thread inside onCreate (ANR on slow devices). Hop to the IO
-        // dispatcher (appScope was created above); the write is best-effort
-        // and its ordering vs. the later appendToBootBreadcrumb calls is
-        // preserved by writing the "onCreate complete" line through the
-        // same scope below.
-        appScope.launch {
-            runCatching {
-                writeBootBreadcrumb()
-            }.onFailure { t ->
-                Log.e(TAG, "writeBootBreadcrumb failed", t)
-            }
-        }
+        // v0.9.0: the public-Downloads boot.txt breadcrumb is GONE (user
+        // request — "remove the boot txt making"). The in-app logger + the
+        // Logs screen's Download button cover diagnostics; a boot.txt in
+        // the user's Downloads folder was noise.
 
         // Step 3: Initialize the logger. If this fails, we can't use WepWawetLogger
         // for the rest of onCreate — fall back to logcat.
@@ -217,135 +195,13 @@ class WepWawetApplication : Application(), Configuration.Provider, ImageLoaderFa
                 "version=${BuildConfig.VERSION_NAME} sha=${BuildConfig.GIT_SHA}")
         }
 
-        // Final breadcrumb: confirm we got to the end of onCreate
-        // (v0.7.24, C-U2: same IO scope as the initial breadcrumb write.)
-        appScope.launch {
-            runCatching {
-                appendToBootBreadcrumb("onCreate complete\n")
-            }
-        }
         // NOTE: appScope was initialized at the TOP of onCreate (audit M4).
         // The old init at this point has been removed.
     }
 
-    /**
-     * Write a boot breadcrumb to Downloads/WepWawet/boot.txt. This proves the
-     * app actually reached Application.onCreate() — if this file is missing,
-     * the crash is happening BEFORE the Application class even runs (class
-     * loading failure, manifest merge issue, or native init crash).
-     */
-    private fun writeBootBreadcrumb() {
-        val ts = System.currentTimeMillis()
-        val sb = StringBuilder(2048)
-        sb.append("=== WepWawet boot ===\n")
-        sb.append("Time: ").append(java.time.Instant.ofEpochMilli(ts)).append("\n")
-        sb.append("Device: ").append(Build.MANUFACTURER).append(" ")
-            .append(Build.MODEL).append(" (").append(Build.DEVICE).append(")\n")
-        sb.append("Android: ").append(Build.VERSION.RELEASE)
-            .append(" (SDK ").append(Build.VERSION.SDK_INT).append(")\n")
-        sb.append("ABI: ").append(Build.SUPPORTED_ABIS.joinToString(",")).append("\n")
-        runCatching {
-            sb.append("App version: ").append(BuildConfig.VERSION_NAME)
-                .append(" (").append(BuildConfig.VERSION_CODE).append(")\n")
-            sb.append("Git sha: ").append(BuildConfig.GIT_SHA).append("\n")
-            sb.append("Build time: ").append(BuildConfig.BUILD_TIME).append("\n")
-        }
-        sb.append("--- onCreate starting ---\n")
-
-        val content = sb.toString()
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // Android 10+ — MediaStore.Downloads collection (no permission)
-            runCatching {
-                val resolver = contentResolver
-                val values = ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, "boot.txt")
-                    put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/WepWawet")
-                    put(MediaStore.MediaColumns.IS_PENDING, 0)
-                }
-                val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
-                // Try to find an existing boot.txt and overwrite; if not found, insert
-                val existing = findBootFile(collection)
-                val uri: Uri = if (existing != null) {
-                    // Overwrite by writing a fresh row with the same display name
-                    // (we delete + re-insert to avoid IS_PENDING update issues on
-                    // legacy Android 10 implementations)
-                    runCatching { resolver.delete(existing, null, null) }
-                    resolver.insert(collection, values) ?: return@runCatching
-                } else {
-                    resolver.insert(collection, values) ?: return@runCatching
-                }
-                resolver.openOutputStream(uri, "w")?.use { out ->
-                    out.write(content.toByteArray(Charsets.UTF_8))
-                    out.flush()
-                }
-            }
-        } else {
-            // Android 9 and below — legacy File API to public Downloads
-            @Suppress("DEPRECATION")
-            runCatching {
-                val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                val dir = File(downloads, "WallpaperSuite").apply { mkdirs() }
-                File(dir, "boot.txt").writeText(content)
-            }
-        }
-    }
-
-    private fun appendToBootBreadcrumb(extra: String) {
-        runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val resolver = contentResolver
-                val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
-                val existing = findBootFile(collection) ?: return@runCatching
-                resolver.openOutputStream(existing, "wa")?.use { out ->
-                    out.write(extra.toByteArray(Charsets.UTF_8))
-                    out.flush()
-                }
-            } else {
-                @Suppress("DEPRECATION")
-                val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                val file = File(downloads, "WepWawet/boot.txt")
-                if (file.exists()) {
-                    file.appendText(extra)
-                }
-            }
-        }
-    }
-
-    private fun findBootFile(collection: Uri): Uri? {
-        val resolver = contentResolver
-        val projection = arrayOf(MediaStore.MediaColumns._ID)
-        // v0.5.32 (audit M5): filter by RELATIVE_PATH too — otherwise
-        // this query matches any file named "boot.txt" anywhere in the
-        // user's Downloads collection (including unrelated apps' files).
-        // If another app also writes a boot.txt to Downloads, we'd
-        // return that app's URI instead of WepWawet's, then
-        // appendToBootBreadcrumb would write WepWawet's "onCreate
-        // complete" line into the OTHER app's file, and the user's
-        // Downloads/WepWawet/boot.txt would stop getting updates.
-        // NOTE: Android's MediaStore trims leading/trailing slashes from
-        // RELATIVE_PATH on both write and store (per Android docs:
-        // https://developer.android.com/reference/android/provider/MediaStore.MediaColumns#RELATIVE_PATH
-        // — "trims leading/trailing slashes before being stored"). The
-        // write-side code at line 207 uses "Download/WepWawet" (no trailing
-        // slash), and the stored value is also normalized to that form.
-        // The query selection must therefore also use "Download/WepWawet"
-        // (no trailing slash) — using "Download/WepWawet/" would cause the
-        // SQL comparison `RELATIVE_PATH = 'Download/WepWawet/'` to fail to
-        // match the stored "Download/WepWawet" value, and we'd fall through
-        // to the createNewFile path on every onCreate call.
-        val selection = "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND " +
-            "${MediaStore.MediaColumns.RELATIVE_PATH} = ?"
-        val args = arrayOf("boot.txt", "Download/WepWawet")
-        resolver.query(collection, projection, selection, args, null)?.use { c ->
-            if (c.moveToFirst()) {
-                val id = c.getLong(0)
-                return Uri.withAppendedPath(collection, id.toString())
-            }
-        }
-        return null
-    }
+    // v0.9.0: writeBootBreadcrumb / appendToBootBreadcrumb / findBootFile were
+    // REMOVED — the public-Downloads boot.txt breadcrumb is gone (user request).
+    // Crash-before-onCreate diagnostics come from logcat + the CrashHandler.
 
     private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
