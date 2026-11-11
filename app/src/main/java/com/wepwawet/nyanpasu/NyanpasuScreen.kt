@@ -168,7 +168,7 @@ fun NyanpasuScreen(onBack: () -> Unit) {
 
     fun applyCurrent(useLockBitmap: Bitmap? = null) {
         val bmp = previewBitmap ?: run {
-            snackbar.showSnackbar("Fetch an image first")
+            scope.launch { snackbar.showSnackbar("Fetch an image first") }
             return
         }
         if (applying) return
@@ -223,7 +223,7 @@ fun NyanpasuScreen(onBack: () -> Unit) {
 
     fun saveCurrentToGallery() {
         val bmp = previewBitmap ?: run {
-            snackbar.showSnackbar("Nothing to save yet")
+            scope.launch { snackbar.showSnackbar("Nothing to save yet") }
             return
         }
         scope.launch {

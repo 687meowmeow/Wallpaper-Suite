@@ -176,7 +176,7 @@ object MpkgPacker {
             val properties = general?.get("properties")?.takeIf { it.isJsonObject }?.asJsonObject
             if (properties != null) {
                 for ((name, value) in presetValues) {
-                    val prop = properties.get(name)?.takeIf { it.isJsonObject } ?: continue
+                    val prop = properties.get(name)?.takeIf { it.isJsonObject }?.asJsonObject ?: continue
                     prop.remove("value")
                     prop.add("value", when (value) {
                         is Boolean -> com.google.gson.JsonPrimitive(value)

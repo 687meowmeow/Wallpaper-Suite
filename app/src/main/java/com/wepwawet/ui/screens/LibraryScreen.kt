@@ -422,12 +422,14 @@ fun LibraryScreen(
                     val count = groupOf.count { it.value == group }
                     FilterChip(
                         selected = activeGroup == group,
-                        // Tap = filter (via the modifier so long-press works too).
-                        onClick = null,
-                        modifier = Modifier.combinedClickable(
-                            onClick = { activeGroup = if (activeGroup == group) null else group },
-                            onLongClick = { manageGroupName = group },
-                        ),
+                        onClick = { activeGroup = if (activeGroup == group) null else group },
+                        // Long-press → rename/delete dialog. detectTapGestures
+                        // with only onLongPress doesn't consume taps, so the
+                        // chip's own onClick keeps handling those (M3 1.3's
+                        // FilterChip onClick is non-nullable).
+                        modifier = Modifier.pointerInput(group) {
+                            detectTapGestures(onLongPress = { manageGroupName = group })
+                        },
                         label = { Text("$group ($count)") },
                         leadingIcon = if (activeGroup == group) {
                             { Icon(Icons.Filled.Folder, contentDescription = null, modifier = Modifier.height(16.dp)) }
