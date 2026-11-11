@@ -340,7 +340,7 @@ private fun writeSavedFolder(context: Context, uri: String) {
         .edit().putString(KEY_FOLDER, uri).apply()
 }
 
-/** Query a SAF tree folder for image/* files, newest first, capped at 500. */
+/** Query a SAF tree folder for image-kind files, newest first, capped at 500. */
 private fun enumerateFolderImages(context: Context, folderUriStr: String): List<ImageEntry> {
     return try {
         val folder = Uri.parse(folderUriStr)
