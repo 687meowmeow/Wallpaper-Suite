@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import com.wepwawet.log.WepWawetLogger
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Point
@@ -557,24 +558,26 @@ object WeEnginePrefs {
      * v0.8.10: render a GIF's middle frame — WE preview GIFs commonly open
      * with a solid background fill, so frame 0 makes a solid-color card.
      */
-    private fun decodeGifMiddleFrame(bytes: ByteArray): Bitmap? = try {
-        val movie = android.graphics.Movie.decodeByteArray(bytes, 0, bytes.size) ?: return null
-        if (movie.width() <= 0 || movie.height() <= 0) return null
-        val bmp = Bitmap.createBitmap(movie.width(), movie.height(), Bitmap.Config.ARGB_8888)
-        val canvas = android.graphics.Canvas(bmp)
-        bmp.eraseColor(android.graphics.Color.TRANSPARENT)
-        // middle of the animation (0 when duration is unknown/still)
-        val mid = if (movie.duration() > 0) movie.duration() / 2 else 0
-        movie.setTime(mid)
-        movie.draw(canvas, 0f, 0f)
-        WepWawetLogger.engineDebug("Preview: GIF middle frame rendered",
-            "dims" to "${movie.width()}x${movie.height()}",
-            "duration_ms" to movie.duration())
-        bmp
-    } catch (t: Throwable) {
-        WepWawetLogger.engineWarn("Preview: GIF middle-frame render failed",
-            "exception" to (t.message ?: t.javaClass.name))
-        null
+    private fun decodeGifMiddleFrame(bytes: ByteArray): Bitmap? {
+        return try {
+            val movie = android.graphics.Movie.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            if (movie.width() <= 0 || movie.height() <= 0) return null
+            val bmp = Bitmap.createBitmap(movie.width(), movie.height(), Bitmap.Config.ARGB_8888)
+            val canvas = android.graphics.Canvas(bmp)
+            bmp.eraseColor(android.graphics.Color.TRANSPARENT)
+            // middle of the animation (0 when duration is unknown/still)
+            val mid = if (movie.duration() > 0) movie.duration() / 2 else 0
+            movie.setTime(mid)
+            movie.draw(canvas, 0f, 0f)
+            WepWawetLogger.engineDebug("Preview: GIF middle frame rendered",
+                "dims" to "${movie.width()}x${movie.height()}",
+                "duration_ms" to movie.duration())
+            bmp
+        } catch (t: Throwable) {
+            WepWawetLogger.engineWarn("Preview: GIF middle-frame render failed",
+                "exception" to (t.message ?: t.javaClass.name))
+            null
+        }
     }
 
     private fun readLeU32(b: ByteArray, offset: Int): Int =

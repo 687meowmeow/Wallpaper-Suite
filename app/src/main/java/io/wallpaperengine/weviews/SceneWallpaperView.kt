@@ -43,6 +43,11 @@ import javax.microedition.khronos.opengles.GL10
  */
 class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperControls {
 
+    /** v0.8.10: window for the renderer's duplicate scene-request guard. */
+    private companion object {
+        const val DUPLICATE_REQUEST_WINDOW_MS = 1500L
+    }
+
     var lib: SceneLib? = null
     private var customHandler: Handler? = null
     private var loadCallback: Runnable? = null
@@ -551,11 +556,6 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
     // =====================================================================
 
     inner class Renderer : GLSurfaceView.Renderer {
-
-        /** v0.8.10: window for the duplicate scene-request guard. */
-        private companion object {
-            const val DUPLICATE_REQUEST_WINDOW_MS = 1500L
-        }
 
         var sceneContext: Int = 0
             private set
