@@ -1813,8 +1813,14 @@ class WorkshopDownloader(
         val file: String?,
         val title: String?,
         val dependency: String?,
-        /** Flat name → value map from the preset's "preset" object. */
-        val presetValues: Map<String, Any>,
+        /** Name → RAW JSON value from the preset's "preset" object.
+         *
+         * v0.8.10: values are kept as verbatim [com.google.gson.JsonElement]s
+         * (deep-copied out of the parse tree) — the PC copies preset values
+         * into the base's project.json byte-for-byte (FUN_1400303a0 copies
+         * the value NODE), and the old Boolean/Double/String flattening
+         * turned arrays into "[\"a\",\"b\"]" strings and ints into 1.0. */
+        val presetValues: Map<String, com.google.gson.JsonElement>,
     )
 
     /** Parse installDir/project.json; null when missing/unreadable. */
@@ -1823,18 +1829,12 @@ class WorkshopDownloader(
         if (!projectJson.exists() || projectJson.length() == 0L) return null
         return try {
             val obj = com.google.gson.JsonParser.parseString(projectJson.readText()).asJsonObject
-            val presetValues = mutableMapOf<String, Any>()
+            val presetValues = linkedMapOf<String, com.google.gson.JsonElement>()
             obj.get("preset")?.takeIf { it.isJsonObject }?.asJsonObject?.entrySet()?.forEach { (key, value) ->
-                when {
-                    value.isJsonPrimitive -> {
-                        val p = value.asJsonPrimitive
-                        presetValues[key] = when {
-                            p.isBoolean -> p.asBoolean
-                            p.isNumber -> p.asDouble
-                            else -> p.asString
-                        }
-                    }
-                    value.isJsonArray -> presetValues[key] = value.toString()
+                // v0.8.10: nulls are group headers/labels (no value) — the
+                // PC's apply loop skips them; so do we.
+                if (!value.isJsonNull) {
+                    presetValues[key] = value.deepCopy()
                 }
             }
             WorkshopProject(

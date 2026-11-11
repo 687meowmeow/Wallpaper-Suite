@@ -45,6 +45,11 @@ object NyanpasuSearch {
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
+            // v0.8.10: DNS-over-HTTPS fallback — the user's network drops
+            // plain DNS for the booru/API hosts (UnknownHostException on
+            // every source = the "completely black / tap refresh" report).
+            // System DNS is still tried FIRST; DoH only catches its failures.
+            .dns(DohDns)
             .connectTimeout(5, TimeUnit.SECONDS)
             .readTimeout(8, TimeUnit.SECONDS)
             .callTimeout(10, TimeUnit.SECONDS)
@@ -345,8 +350,15 @@ object NyanpasuSearch {
     private fun httpGetJson(url: String): JSONObject? = try {
         client.newCall(Request.Builder().url(url).header("User-Agent", USER_AGENT).build())
             .execute().use { resp ->
-                if (!resp.isSuccessful) null
-                else JSONObject(resp.body?.string() ?: return null)
+                when {
+                    !resp.isSuccessful -> {
+                        WepWawetLogger.appInfo("$TAG: source HTTP error",
+                            "host" to url.take(60),
+                            "code" to resp.code)
+                        null
+                    }
+                    else -> JSONObject(resp.body?.string() ?: return null)
+                }
             }
     } catch (e: Exception) {
         WepWawetLogger.appInfo("$TAG: source failed",
@@ -358,8 +370,15 @@ object NyanpasuSearch {
     private fun httpGetJsonArray(url: String): JSONArray? = try {
         client.newCall(Request.Builder().url(url).header("User-Agent", USER_AGENT).build())
             .execute().use { resp ->
-                if (!resp.isSuccessful) null
-                else JSONArray(resp.body?.string() ?: return null)
+                when {
+                    !resp.isSuccessful -> {
+                        WepWawetLogger.appInfo("$TAG: source HTTP error",
+                            "host" to url.take(60),
+                            "code" to resp.code)
+                        null
+                    }
+                    else -> JSONArray(resp.body?.string() ?: return null)
+                }
             }
     } catch (e: Exception) {
         WepWawetLogger.appInfo("$TAG: source failed",

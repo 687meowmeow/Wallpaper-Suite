@@ -147,36 +147,44 @@ object MpkgPacker {
 
     /**
      * v0.8.9: Apply a PRESET's saved property values to a packed
-     * project.json. The preset map is flat ({name: value}) — exactly how
-     * WE stores user property overrides. Matching names under
-     * general.properties get their "value" replaced; the preset title
-     * replaces the base's title so the library card shows the preset's
-     * name. Returns the rewritten bytes, or null when the JSON can't be
-     * parsed (caller keeps the original).
+     * project.json.
+     *
+     * v0.8.10 (PC parity, from the wallpaperui.exe decompile — FUN_1400303a0):
+     * the PC iterates the BASE's general.properties and, for every property
+     * that also exists under the preset's "preset" object, copies the
+     * preset's JSON value node into the property's "value" field VERBATIM —
+     * booleans stay booleans, numbers keep their int/float form, arrays and
+     * objects are copied as structures. Keys the base doesn't declare are
+     * silently dropped. The old flattening (Boolean/Double/String) turned
+     * arrays into strings and ints into 1.0 — this rewrite keeps the exact
+     * nodes. The preset title replaces the base's title so the library card
+     * shows the preset's name. Applied AND unmatched keys are logged so a
+     * device report shows exactly what a preset did.
      */
     private fun applyPresetToProjectJson(
         projectJsonBytes: ByteArray,
-        presetValues: Map<String, Any>,
+        presetValues: Map<String, com.google.gson.JsonElement>,
         presetTitle: String?,
     ): ByteArray? {
         return try {
             val root = JsonParser.parseString(String(projectJsonBytes, Charsets.UTF_8)).asJsonObject
             var applied = 0
+            val appliedKeys = ArrayList<String>()
+            val unmatchedKeys = ArrayList<String>()
             val general = root.get("general")?.takeIf { it.isJsonObject }?.asJsonObject
             val properties = general?.get("properties")?.takeIf { it.isJsonObject }?.asJsonObject
             if (properties != null) {
                 for ((name, value) in presetValues) {
-                    val prop = properties.get(name)?.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+                    if (value.isJsonNull) continue
+                    val prop = properties.get(name)?.takeIf { it.isJsonObject }?.asJsonObject
+                    if (prop == null) {
+                        unmatchedKeys.add(name)
+                        continue
+                    }
                     prop.remove("value")
-                    prop.add("value", when (value) {
-                        is Boolean -> com.google.gson.JsonPrimitive(value)
-                        is Double -> com.google.gson.JsonPrimitive(value)
-                        is Float -> com.google.gson.JsonPrimitive(value)
-                        is Int -> com.google.gson.JsonPrimitive(value)
-                        is Long -> com.google.gson.JsonPrimitive(value)
-                        else -> com.google.gson.JsonPrimitive(value.toString())
-                    })
+                    prop.add("value", value.deepCopy())
                     applied++
+                    appliedKeys.add(name)
                 }
             }
             if (presetTitle != null && presetTitle.isNotBlank()) {
@@ -186,6 +194,8 @@ object MpkgPacker {
             WepWawetLogger.proxy("MpkgPacker.applyPresetToProjectJson",
                 "offered" to presetValues.size,
                 "applied" to applied,
+                "applied_keys" to appliedKeys.joinToString(",").take(300),
+                "unmatched_keys" to unmatchedKeys.joinToString(",").take(300),
                 "has_properties_section" to (properties != null))
             root.toString().toByteArray(Charsets.UTF_8)
         } catch (e: Exception) {
@@ -397,14 +407,15 @@ object MpkgPacker {
         outputFile: File,
         installDir: File? = null,
         /**
-         * v0.9.0: PRESET support — a flat name → value map from a preset
+         * v0.9.0: PRESET support — a name → raw JSON value map from a preset
          * workshop item's project.json "preset" object. Each key that
          * matches a property under general.properties gets its "value"
-         * overwritten, so the packed wallpaper plays with the preset's
+         * overwritten VERBATIM (the PC copies the value node — see
+         * FUN_1400303a0), so the packed wallpaper plays with the preset's
          * saved settings (WE PC semantics: a preset plays its dependency
-         * wallpaper with the preset's values).
+         * wallpaper with the preset's values). v0.8.10: raw JsonElements.
          */
-        presetValues: Map<String, Any>? = null,
+        presetValues: Map<String, com.google.gson.JsonElement>? = null,
         /** v0.8.9: preset title — replaces the base's project.json title. */
         presetTitle: String? = null,
         /**
@@ -3047,6 +3058,35 @@ object MpkgPacker {
             }
             val w = rgbaBitmap.width
             val h = rgbaBitmap.height
+            // v0.8.10: decode-diagnostics. A solid-color decode (CMYK/
+            // 16-bit JPEGs decoded wrong, or a bogus embedded image) is the
+            // classic cause of a "solid color square" wallpaper after the
+            // ETC2 re-encode — sample the corners + center + average so the
+            // log can distinguish a bad decode from a bad encode.
+            runCatching {
+                val corners = IntArray(1); rgbaBitmap.getPixels(corners, 0, 1, 1, 1, 1, 1)
+                val tr = IntArray(1); rgbaBitmap.getPixels(tr, 0, 1, w - 2, 1, 1, 1)
+                val bl = IntArray(1); rgbaBitmap.getPixels(bl, 0, 1, 1, h - 2, 1, 1)
+                val br = IntArray(1); rgbaBitmap.getPixels(br, 0, 1, w - 2, h - 2, 1, 1)
+                val ctr = IntArray(1); rgbaBitmap.getPixels(ctr, 0, 1, w / 2, h / 2, 1, 1)
+                val all = listOf(corners[0], tr[0], bl[0], br[0], ctr[0])
+                val solid = all.distinct().size == 1
+                fun hex(v: Int) = "%06x".format(v and 0xFFFFFF)
+                WepWawetLogger.proxyDebug("MpkgPacker.decodeLargestImageToRgba: pixel sample",
+                    "name" to name,
+                    "dims" to "${w}x${h}",
+                    "tl" to hex(corners[0]), "tr" to hex(tr[0]),
+                    "bl" to hex(bl[0]), "br" to hex(br[0]),
+                    "center" to hex(ctr[0]),
+                    "solid_decode" to solid)
+                if (solid) {
+                    WepWawetLogger.proxyWarn(
+                        "MpkgPacker.decodeLargestImageToRgba: decoded image is a SINGLE color — " +
+                            "the embedded image decode is suspicious (CMYK/16-bit source?); " +
+                            "the ETC2 re-encode will ship that solid color",
+                        "name" to name, "color" to hex(corners[0]))
+                }
+            }
             val pixelBuffer = java.nio.ByteBuffer.allocateDirect(w * h * 4)
                 .order(java.nio.ByteOrder.nativeOrder())
             rgbaBitmap.copyPixelsToBuffer(pixelBuffer)

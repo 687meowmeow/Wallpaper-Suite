@@ -1,25 +1,38 @@
 package com.wepwawet.ui
 
 import android.content.Context
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.LazyGridState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -51,6 +64,14 @@ import com.wepwawet.ui.screens.WorkshopBrowserScreen
  * equal importance" — exactly our case — which frees the entire top of
  * every screen for content. Import moved to a top-bar "+" action on the
  * Wallpapers tab; Settings and Downloads remain top-bar icons.
+ *
+ * v0.8.10 (device report): the M3 NavigationBar's stock 80dp height read
+ * as "buttons at the bottom are too tall", and the outer Scaffold's
+ * default contentWindowInsets stacked a SECOND status-bar gap on top of
+ * every screen's own top bar ("a big empty space at the top, everything
+ * shifted down"). The bar is now a compact custom 60dp Surface row and
+ * the outer Scaffold no longer insets its content — each screen's own
+ * top bar already handles the status bar exactly once.
  */
 private data class BottomTab(
     val route: String,
@@ -62,7 +83,8 @@ private val BOTTOM_TABS = listOf(
     BottomTab("library", "Wallpapers", Icons.Filled.Wallpaper),
     BottomTab("workshop", "Workshop", Icons.Filled.Explore),
     BottomTab("imageFolders", "Folders", Icons.Filled.PhotoLibrary),
-    BottomTab("daily", "Daily", Icons.Filled.AutoAwesome),
+    // v0.8.10: renamed per user request (was "Daily").
+    BottomTab("daily", "Anime", Icons.Filled.AutoAwesome),
 )
 
 /**
@@ -193,16 +215,65 @@ fun WepWawetNavHost() {
     }
 
     Scaffold(
+        // v0.8.10: NO content insets here — every screen owns a top bar
+        // that pads for the status bar itself; the outer default stacked
+        // a second status-bar-height gap above the content.
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
             if (showBottomBar) {
-                NavigationBar {
-                    for (tab in BOTTOM_TABS) {
-                        NavigationBarItem(
-                            selected = currentRoute == tab.route,
-                            onClick = { navigateToTab(tab.route) },
-                            icon = { Icon(tab.icon, contentDescription = tab.label) },
-                            label = { Text(tab.label) },
-                        )
+                // v0.8.10: compact 60dp bar (the stock M3 NavigationBar is
+                // 80dp — reported as "too tall"). Same M3 visuals: pill
+                // indicator, secondaryContainer on the selected item.
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 2.dp,
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(60.dp)
+                            .navigationBarsPadding(),
+                    ) {
+                        for (tab in BOTTOM_TABS) {
+                            val selected = currentRoute == tab.route
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth()
+                                    .clickable(onClick = { navigateToTab(tab.route) }),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .padding(top = 6.dp)
+                                        .height(26.dp)
+                                        .fillMaxWidth(0.55f),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    if (selected) {
+                                        Box(
+                                            modifier = Modifier
+                                                .matchParentSize()
+                                                .clip(RoundedCornerShape(13.dp))
+                                                .background(MaterialTheme.colorScheme.secondaryContainer),
+                                        )
+                                    }
+                                    Icon(
+                                        tab.icon,
+                                        contentDescription = tab.label,
+                                        modifier = Modifier.height(20.dp),
+                                        tint = if (selected) MaterialTheme.colorScheme.onSecondaryContainer
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Text(
+                                    tab.label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (selected) MaterialTheme.colorScheme.onSurface
+                                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
                     }
                 }
             }

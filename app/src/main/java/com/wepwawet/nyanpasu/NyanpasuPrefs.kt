@@ -26,6 +26,10 @@ object NyanpasuPrefs {
     private const val KEY_LOCK_SAME = "lock_same_image"
     private const val KEY_SCHEDULE = "schedule_mode"
     private const val KEY_RECENT_URLS = "recent_urls"
+    // v0.8.10 (v1.0.0 feature port): first-run welcome + prefetch bookkeeping.
+    private const val KEY_WELCOME_SHOWN = "welcome_shown_v1"
+    private const val KEY_PREFETCH_URL = "prefetch_url"
+    private const val KEY_PREFETCH_AT = "prefetch_at"
 
     /** v1.0.0 default: neutral style, Pure content, both screens on, same image. */
     const val DEFAULT_STYLE = 50
@@ -113,5 +117,54 @@ object NyanpasuPrefs {
             current.remove(current.first())
         }
         prefs(context).edit().putStringSet(KEY_RECENT_URLS, current).apply()
+    }
+
+    // ── v1.0.0 feature port (v0.8.10) ──────────────────────────────────
+
+    /** One-time quick-guide dialog (v1.0.0's Welcome). */
+    fun readWelcomeShown(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_WELCOME_SHOWN, false)
+
+    fun writeWelcomeShown(context: Context) {
+        prefs(context).edit().putBoolean(KEY_WELCOME_SHOWN, true).apply()
+    }
+
+    /**
+     * Prefetch (v1.0.0's PrefetchCoordinator, simplified): after an apply,
+     * the NEXT image is fetched into cacheDir/prefetch.img so a later
+     * Refresh is instant. Entries older than 12 h are considered stale.
+     */
+    fun prefetchFile(context: Context) =
+        java.io.File(context.cacheDir, "nyanpasu_prefetch.img")
+
+    fun readPrefetchMeta(context: Context): Pair<String, Long>? {
+        val p = prefs(context)
+        val url = p.getString(KEY_PREFETCH_URL, null) ?: return null
+        val at = p.getLong(KEY_PREFETCH_AT, 0L)
+        if (url.isBlank() || at <= 0L) return null
+        return url to at
+    }
+
+    fun writePrefetchMeta(context: Context, url: String) {
+        prefs(context).edit()
+            .putString(KEY_PREFETCH_URL, url)
+            .putLong(KEY_PREFETCH_AT, System.currentTimeMillis())
+            .apply()
+    }
+
+    fun clearPrefetch(context: Context) {
+        prefs(context).edit()
+            .remove(KEY_PREFETCH_URL)
+            .remove(KEY_PREFETCH_AT)
+            .apply()
+        prefetchFile(context).delete()
+    }
+
+    fun isPrefetchFresh(context: Context): Boolean {
+        val meta = readPrefetchMeta(context) ?: return false
+        val (_, at) = meta
+        val fresh = System.currentTimeMillis() - at < 12L * 60 * 60 * 1000
+        if (!fresh) return false
+        return prefetchFile(context).let { it.isFile && it.length() > 1024 }
     }
 }

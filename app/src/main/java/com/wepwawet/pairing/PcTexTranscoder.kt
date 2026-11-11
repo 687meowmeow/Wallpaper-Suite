@@ -219,17 +219,30 @@ object PcTexTranscoder {
     /**
      * Build the PC-format output .tex.
      *
+     * v0.8.10 (Ghidra-verified PC parity): the TEXI imgW/imgH fields carry
+     * the image's OWN dims while texW/texH carry the storage dims — for
+     * ETC2 outputs the PC's resourcecompiler writes texW/texH as the
+     * 4-padded buffer dims but imgW/imgH as the UNPADDED image dims
+     * (FUN_140063c70's output struct: texW=local_720 ← the padded mip,
+     * imgW=local_714 ← the image; see the decompile notes in the worklog).
+     * The old code wrote texW into BOTH pairs, which shipped imgW=3844 for
+     * a 3843-wide image — a PC-never-produces layout.
+     *
      * @param format 0 (RGBA8888) or 5 (ETC2_RGBA8)
      * @param flags the SOURCE TEXI flags (bit 30 is stripped here; 0x08 is
      *        OR-ed in when the body is stored raw)
-     * @param texDims the dims for texW/texH/imgW/imgH AND the mip entry —
-     *        the 4-padded dims for ETC2, the image's own dims for RGBA
+     * @param texDims the STORAGE dims for texW/texH AND the mip entry —
+     *        the 4-padded dims for ETC2
+     * @param imgDims the IMAGE dims for imgW/imgH — the un-padded content
+     *        dims (identical to [texDims] for RGBA outputs, where the PC
+     *        keeps both equal to the image's own dims)
      * @param body the stored body bytes
      * @param decompSize the uncompressed body size
      * @param isLz4Body whether [body] is LZ4-compressed
      */
     fun build(
         format: Int, flags: Int, color: Int, texW: Int, texH: Int,
+        imgW: Int, imgH: Int,
         body: ByteArray, decompSize: Int, isLz4Body: Boolean,
     ): ByteArray {
         val outFlags = (flags and FLAG_STRIP_MASK.inv()) or
@@ -241,8 +254,8 @@ object PcTexTranscoder {
         writeLeInt(out, outFlags)
         writeLeInt(out, texW)
         writeLeInt(out, texH)
-        writeLeInt(out, texW)
-        writeLeInt(out, texH)
+        writeLeInt(out, imgW)
+        writeLeInt(out, imgH)
         writeLeInt(out, color)
         out.write("TEXB0004\u0000".toByteArray(Charsets.US_ASCII))
         writeLeInt(out, 1)          // imageCount
@@ -285,14 +298,16 @@ object PcTexTranscoder {
         if (useEtc2 && etc2Encoder != null) {
             val etc2 = etc2Encoder(rgba, w, h)
             if (etc2 != null) {
-                // ETC2 outputs carry the 4-padded dims.
+                // ETC2 outputs carry the 4-padded STORAGE dims in
+                // texW/texH + the mip header, and the image's own UNPADDED
+                // dims in imgW/imgH (PC parity — see build()).
                 val pw = (w + 3) and -4
                 val ph = (h + 3) and -4
                 val lz4 = if (etc2.size > LZ4_MIN_BYTES) Lz4Compat.compress(etc2) else null
                 return if (lz4 != null && lz4IsBeneficial(etc2.size, lz4.size)) {
-                    build(5, flags, color, pw, ph, lz4, etc2.size, true)
+                    build(5, flags, color, pw, ph, w, h, lz4, etc2.size, true)
                 } else {
-                    build(5, flags, color, pw, ph, etc2, etc2.size, false)
+                    build(5, flags, color, pw, ph, w, h, etc2, etc2.size, false)
                 }
             }
             // Encoder unavailable/failed — fall through to the RGBA path.
@@ -303,9 +318,9 @@ object PcTexTranscoder {
 
         val lz4 = if (rgba.size > LZ4_MIN_BYTES) Lz4Compat.compress(rgba) else null
         return if (lz4 != null && lz4IsBeneficial(rgba.size, lz4.size)) {
-            build(0, flags, color, w, h, lz4, rgba.size, true)
+            build(0, flags, color, w, h, w, h, lz4, rgba.size, true)
         } else {
-            build(0, flags, color, w, h, rgba, rgba.size, false)
+            build(0, flags, color, w, h, w, h, rgba, rgba.size, false)
         }
     }
 

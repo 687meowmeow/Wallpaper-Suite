@@ -274,6 +274,32 @@ class PcPipelineTest {
     }
 
     @Test
+    fun `ETC2 output writes UNPADDED img dims with PADDED storage dims`() {
+        // v0.8.10 (Ghidra-verified, FUN_140063c70): the PC's ETC2 output
+        // carries the 4-padded buffer dims in texW/texH + the mip header,
+        // and the image's OWN un-padded dims in imgW/imgH. A 3843×2734
+        // source must produce texW=3844 texH=2736 imgW=3843 imgH=2734 —
+        // the ishtar regression wrote texW into all four fields.
+        val w = 3843
+        val h = 2734
+        val rgba = ByteArray(w * h * 4) { 0x7f }
+        // A stub encoder "succeeds" with plausible ETC2-sized output; the
+        // small size keeps LZ4 out of the way (< 16383 bytes → raw body).
+        val etc2 = ByteArray(4096)
+        val out = PcTexTranscoder.transcodeRgbaBody(
+            0, true, 0x02, 0x11223344, w, h, rgba, etc2Encoder = { _, _, _ -> etc2 })!!
+        fun u32(off: Int) = java.nio.ByteBuffer.wrap(out, off, 4)
+            .order(java.nio.ByteOrder.LITTLE_ENDIAN).int
+        assertEquals(5, u32(18))              // format = ETC2_RGBA8
+        assertEquals(3844, u32(26))           // texW — padded storage
+        assertEquals(2736, u32(30))           // texH — padded storage
+        assertEquals(3843, u32(34))           // imgW — UNPADDED image
+        assertEquals(2734, u32(38))           // imgH — UNPADDED image
+        assertEquals(3844, u32(71))           // mip w — padded
+        assertEquals(2736, u32(75))           // mip h — padded
+    }
+
+    @Test
     fun `output-onlinepngtools - TEXB0003 LZ4 RGBA rebuilt - byte exact`() {
         val original = res("output_onlinepngtools_original.tex")
         val pcOutput = res("output_onlinepngtools_pc_output.tex")
@@ -397,7 +423,7 @@ class PcPipelineTest {
     @Test
     fun `build produces the exact PC header layout`() {
         val body = ByteArray(16) { it.toByte() }
-        val out = PcTexTranscoder.build(0, 0x0A, 0x11223344, 8, 8, body, 16, false)
+        val out = PcTexTranscoder.build(0, 0x0A, 0x11223344, 8, 8, 8, 8, body, 16, false)
         // v0.7.18 flag rules: raw storage ORs 0x08 in (0x0A already has it)
         assertEquals("TEXV0005\u0000", String(out, 0, 9, Charsets.US_ASCII))
         assertEquals("TEXI0001\u0000", String(out, 9, 9, Charsets.US_ASCII))
@@ -416,13 +442,13 @@ class PcPipelineTest {
 
         // v0.7.18: the output flags = (sourceFlags AND NOT 0x40000000) OR
         // (0x08 when raw). LZ4 bodies leave the source flags alone.
-        val raw30 = PcTexTranscoder.build(0, 0x40000010, 0, 4, 4, body, 16, false)
+        val raw30 = PcTexTranscoder.build(0, 0x40000010, 0, 4, 4, 4, 4, body, 16, false)
         fun f32(b: ByteArray, off: Int) = java.nio.ByteBuffer.wrap(b, off, 4)
             .order(java.nio.ByteOrder.LITTLE_ENDIAN).int
         assertEquals("bit 30 stripped, 0x08 OR-ed for raw", 0x18, f32(raw30, 22))
-        val lz4Body = PcTexTranscoder.build(0, 0x40000002, 0, 4, 4, body, 16, true)
+        val lz4Body = PcTexTranscoder.build(0, 0x40000002, 0, 4, 4, 4, 4, body, 16, true)
         assertEquals("bit 30 stripped, no 0x08 for LZ4", 0x02, f32(lz4Body, 22))
-        val plain = PcTexTranscoder.build(0, 0x00, 0, 4, 4, body, 16, false)
+        val plain = PcTexTranscoder.build(0, 0x00, 0, 4, 4, 4, 4, body, 16, false)
         assertEquals("0x08 OR-ed on a clean raw body", 0x08, f32(plain, 22))
         assertEquals(8, u32(71)); assertEquals(8, u32(75))
         assertEquals(0, u32(79))          // isLz4

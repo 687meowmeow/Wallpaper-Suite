@@ -8,6 +8,7 @@ import android.graphics.PointF
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
 import android.os.Handler
+import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.View
@@ -551,10 +552,19 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
 
     inner class Renderer : GLSurfaceView.Renderer {
 
+        /** v0.8.10: window for the duplicate scene-request guard. */
+        private companion object {
+            const val DUPLICATE_REQUEST_WINDOW_MS = 1500L
+        }
+
         var sceneContext: Int = 0
             private set
         private var surfaceValid: Boolean = false
         private var pendingScene: String? = null
+        // v0.8.10: duplicate-request guard state — the file this renderer
+        // last STARTED loading and when (elapsedRealtime clock).
+        private var currentSceneFile: String? = null
+        private var currentSceneLoadedAt: Long = 0L
         private var wallpaperWidth: Int = 0
         private var wallpaperHeight: Int = 0
 
@@ -663,6 +673,26 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
             // reload). Without this, a reload wouldn't fire the callback
             // and the static preview bitmap would stay hidden from the
             // first load — showing a black screen during the reload.
+            //
+            // v0.8.10 (device log): the preview screen can request the SAME
+            // file twice in quick succession (before the surface is valid,
+            // then again once the controls arrive) — the log showed every
+            // wallpaper initializing twice ~120 ms apart, doubling load
+            // time and memory churn. A duplicate request for the file this
+            // renderer started loading within the last 1.5 s is a no-op.
+            // Real reloads (returning from the SAF texture picker, the
+            // onStart bridge) come much later and still reload in full.
+            val now = SystemClock.elapsedRealtime()
+            if (packageFile == currentSceneFile &&
+                now - currentSceneLoadedAt < DUPLICATE_REQUEST_WINDOW_MS
+            ) {
+                WepWawetLogger.engineDebug("SceneView: duplicate scene request ignored",
+                    "file" to packageFile,
+                    "ms_since_load" to (now - currentSceneLoadedAt))
+                return
+            }
+            currentSceneFile = packageFile
+            currentSceneLoadedAt = now
             firstFrameFired = false
             if (surfaceValid) {
                 loadScene(packageFile)
@@ -686,6 +716,7 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
                 sceneContext = 0
                 surfaceValid = false
                 pendingScene = null
+                currentSceneFile = null
             }
         }
 

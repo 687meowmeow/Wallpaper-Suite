@@ -435,7 +435,22 @@ object WeEnginePrefs {
                 }
             }
         }
-        val bytes = lib.getWallpaperInfoPreviewBitmap(wallpaper.filePath)
+        // v0.8.10: the native preview lookup is wrapped in runCatching —
+        // for some packages it can THROW (rather than return null), and the
+        // old `?: fallback` chain never ran on that path, leaving a BLANK
+        // card ("Brown Dust still missing its preview"). Every step logs
+        // which path served the bitmap so a device report is conclusive.
+        val nativeBytes = runCatching {
+            lib.getWallpaperInfoPreviewBitmap(wallpaper.filePath)
+        }.onFailure {
+            WepWawetLogger.engineWarn("Preview: native preview lookup THREW — using .mpkg fallback",
+                "file" to wallpaper.filePath,
+                "exception" to (it.message ?: it.javaClass.name))
+        }.getOrNull()
+        WepWawetLogger.engineDebug("Preview: lookup result",
+            "file" to wallpaper.filePath.take(80),
+            "native_bytes" to (nativeBytes?.size ?: -1))
+        val bytes = nativeBytes
             // v0.8.9: Kotlin .mpkg fallback. The native engine's preview
             // lookup misses some packages (e.g. a preview.gif-only scene —
             // Brown Dust x-ray 3767714202), which left a BLANK card in the
@@ -444,7 +459,26 @@ object WeEnginePrefs {
             // hand BitmapFactory the entry — it decodes GIF (first frame),
             // JPEG, PNG, WebP and BMP.
             ?: readMpkgPreviewEntry(context, wallpaper.filePath)
-            ?: return null
+            ?: run {
+                WepWawetLogger.engineWarn("Preview: NO preview bytes from any source",
+                    "file" to wallpaper.filePath.take(80))
+                return null
+            }
+        if (nativeBytes == null && bytes.size > 0) {
+            WepWawetLogger.engine("Preview: served from .mpkg VFS fallback",
+                "file" to wallpaper.filePath.take(80),
+                "bytes" to bytes.size)
+        }
+        // v0.8.10: animated GIF previews decode their FIRST frame with
+        // BitmapFactory, and WE preview GIFs often start with a solid
+        // background fill — the card then shows a solid color square.
+        // Render the MIDDLE frame through Movie instead (what a human
+        // sees when the preview plays). Static formats fall through.
+        if (bytes.size > 3 && bytes[0] == 0x47.toByte() && bytes[1] == 0x49.toByte() &&
+            bytes[2] == 0x46.toByte()) {
+            val gifFrame = decodeGifMiddleFrame(bytes)
+            if (gifFrame != null) return gifFrame
+        }
         return try {
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
         } catch (e: Exception) {
@@ -454,6 +488,11 @@ object WeEnginePrefs {
             try {
                 BitmapFactory.decodeByteArray(fallback, 0, fallback.size)
             } catch (e2: Exception) {
+                WepWawetLogger.engineWarn("Preview: decode failed on BOTH sources",
+                    "file" to wallpaper.filePath.take(80),
+                    "native_bytes" to bytes.size,
+                    "fallback_bytes" to fallback.size,
+                    "exception" to (e2.message ?: e2.javaClass.name))
                 null
             }
         }
@@ -512,6 +551,30 @@ object WeEnginePrefs {
         } catch (t: Throwable) {
             null
         }
+    }
+
+    /**
+     * v0.8.10: render a GIF's middle frame — WE preview GIFs commonly open
+     * with a solid background fill, so frame 0 makes a solid-color card.
+     */
+    private fun decodeGifMiddleFrame(bytes: ByteArray): Bitmap? = try {
+        val movie = android.graphics.Movie.decodeByteArray(bytes, 0, bytes.size) ?: return null
+        if (movie.width() <= 0 || movie.height() <= 0) return null
+        val bmp = Bitmap.createBitmap(movie.width(), movie.height(), Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bmp)
+        bmp.eraseColor(android.graphics.Color.TRANSPARENT)
+        // middle of the animation (0 when duration is unknown/still)
+        val mid = if (movie.duration() > 0) movie.duration() / 2 else 0
+        movie.setTime(mid)
+        movie.draw(canvas, 0f, 0f)
+        WepWawetLogger.engineDebug("Preview: GIF middle frame rendered",
+            "dims" to "${movie.width()}x${movie.height()}",
+            "duration_ms" to movie.duration())
+        bmp
+    } catch (t: Throwable) {
+        WepWawetLogger.engineWarn("Preview: GIF middle-frame render failed",
+            "exception" to (t.message ?: t.javaClass.name))
+        null
     }
 
     private fun readLeU32(b: ByteArray, offset: Int): Int =

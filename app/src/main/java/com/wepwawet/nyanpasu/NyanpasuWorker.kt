@@ -139,16 +139,34 @@ class NyanpasuApplyWorker(context: Context, params: WorkerParameters) :
             return Result.success()
         }
         try {
-            val url = NyanpasuSearch.searchOne(
-                context = ctx,
-                strictTags = NyanpasuPrefs.readStrictTags(ctx),
-                softTags = NyanpasuPrefs.readSoftTags(ctx),
-                styleValue = NyanpasuPrefs.readStyle(ctx),
-                r18Mode = NyanpasuPrefs.readR18(ctx),
-                recentUrls = NyanpasuPrefs.readRecentUrls(ctx),
-            )
-            val bytes = NyanpasuSearch.downloadImage(url)
-            NyanpasuPrefs.pushRecentUrl(ctx, url)
+            // v0.8.10 (v1.0.0 prefetch): scheduled runs consume the
+            // prefetched image when it's fresh, then queue the next one.
+            var url: String? = null
+            var bytes: ByteArray? = null
+            if (NyanpasuPrefs.isPrefetchFresh(ctx)) {
+                val meta = NyanpasuPrefs.readPrefetchMeta(ctx)
+                val cached = NyanpasuPrefs.prefetchFile(ctx).readBytes()
+                if (meta != null && cached.size > 1024) {
+                    url = meta.first
+                    bytes = cached
+                    NyanpasuPrefs.clearPrefetch(ctx)
+                    WepWawetLogger.appInfo("NyanpasuApplyWorker: using prefetched image",
+                        "bytes" to cached.size)
+                }
+            }
+            if (bytes == null) {
+                val fetched = NyanpasuSearch.searchOne(
+                    context = ctx,
+                    strictTags = NyanpasuPrefs.readStrictTags(ctx),
+                    softTags = NyanpasuPrefs.readSoftTags(ctx),
+                    styleValue = NyanpasuPrefs.readStyle(ctx),
+                    r18Mode = NyanpasuPrefs.readR18(ctx),
+                    recentUrls = NyanpasuPrefs.readRecentUrls(ctx),
+                )
+                url = fetched
+                bytes = NyanpasuSearch.downloadImage(fetched)
+            }
+            NyanpasuPrefs.pushRecentUrl(ctx, url!!)
             val bitmap = NyanpasuApplier.decode(bytes, NyanpasuApplier.maxDecodeDimension(ctx))
                 ?: return Result.retry()
 
@@ -175,10 +193,31 @@ class NyanpasuApplyWorker(context: Context, params: WorkerParameters) :
             NyanpasuApplier.pushHistory(ctx, homeCrop)
             if (result.ok) {
                 notifyApplied(ctx)
+                // Queue the next prefetch so the following run is fast.
+                try {
+                    val nextUrl = NyanpasuSearch.searchOne(
+                        context = ctx,
+                        strictTags = NyanpasuPrefs.readStrictTags(ctx),
+                        softTags = NyanpasuPrefs.readSoftTags(ctx),
+                        styleValue = NyanpasuPrefs.readStyle(ctx),
+                        r18Mode = NyanpasuPrefs.readR18(ctx),
+                        recentUrls = NyanpasuPrefs.readRecentUrls(ctx),
+                    )
+                    val nextBytes = NyanpasuSearch.downloadImage(nextUrl)
+                    if (nextBytes.size > 1024) {
+                        NyanpasuPrefs.prefetchFile(ctx).writeBytes(nextBytes)
+                        NyanpasuPrefs.writePrefetchMeta(ctx, nextUrl)
+                    }
+                } catch (e: Exception) {
+                    WepWawetLogger.appInfo("NyanpasuApplyWorker: prefetch failed (non-fatal)",
+                        "exception" to e.javaClass.simpleName)
+                }
             } else {
                 notifyFailed(ctx)
             }
             return if (result.ok) Result.success() else Result.retry()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: NyanpasuSearch.NoImageException) {
             WepWawetLogger.appWarn("NyanpasuApplyWorker: no image found",
                 "message" to (e.message ?: ""))

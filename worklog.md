@@ -3757,3 +3757,139 @@ Reminders updated/added:
       new top-level destination must be added to BOTTOM_TABS and gets
       saveState/restoreState semantics for free. Drill-downs get a back
       arrow and no bar.
+
+## v0.8.10-alpha (build 128) — Ghidra parity round (ishtar tex dims, preset node parity, preview robustness) + Anime screen completion
+
+Driven by the user's device report on the v0.8.9 build, with BOTH EXEs
+re-decompiled (fresh Ghidra 11.3.2 headless projects — see the reminder
+below) and the WE ANDROID ENGINE binary pulled apart for the first time
+since the pairing round (libscenejni.so from wallpaper-engine.apk,
+41 MB, stripped symtab but intact .dynsym + string xrefs via capstone).
+
+=== RE ground truth established this round ===
+
+resourcecompiler64.exe (tex transcode tool):
+- FUN_140063c70 = the transcode gate + pipeline. Verbatim-copy rules
+  CONFIRMED as implemented (read-fail, fmt 8/9, imageCount>1, fmt 1
+  without force, flags&0x20). -f accepts "ETC2"→5, "ETC1"→3, "RGBA8"
+  (→5 with -c force, else →0). The output TEXI struct construction
+  (caller of the writer FUN_14005c930) writes:
+    texW/texH = the PADDED mip dims, imgW/imgH = the UNPADDED image dims.
+  OUR build() wrote texW into ALL FOUR fields — the one confirmed
+  divergence from the PC (a PC-never-produces layout; for ishtar's
+  3843×2734 texture we shipped imgW=3844).
+- The .tex WRITER (FUN_14005c930) writes the 7th TEXI u32 (color)
+  unconditionally, and a conditional extra field when flags&0x40 —
+  matches the ENGINE's reader (below), sizes agree; no change needed.
+
+wallpaperui.exe (preset semantics, FUN_1400303a0):
+- The PC applies a preset by iterating the BASE's general.properties
+  and copying the preset's JSON value NODE verbatim into each matching
+  property's "value". Unmatched preset keys are silently dropped (our
+  3-of-18 match is PC behavior — the other 15 target properties the
+  base's project.json doesn't declare). The old flattening
+  (Boolean/Double/String via Map<String,Any>) turned arrays into
+  "[\"a\",\"b\"]" strings and ints into 1.0 — presetValues now carries
+  raw deep-copied JsonElements end-to-end.
+
+libscenejni.so (the WE Android engine — first deep look):
+- .tex chunk dispatch at 0x253a148 (TEXI/TEXB/TEXS, 4-byte memcmp).
+- The TEXI reader (0x253c228) is bounds-checked per field, reads
+  imgW/imgH AFTER texH, an extra field only when flags&0x40, and a
+  7th field when TEXI version >= 1 — the layout our writer produces
+  is size-compatible.
+- The texture upload (glCompressedTexImage2D caller 0x260a8fc) uses
+  the MIP dims (texW/texH) for the GL texture and
+  GL_COMPRESSED_RGBA8_ETC2_EAC for the engine's ETC2 path — our
+  padded-mip + full-block-size output is upload-valid.
+- Engine format enum at the upload switch: 0=RGBA8888 1=RGB888
+  3=ETC2_RGBA8(0x8d64) 4=DXT5 5=ETC2_RGB8(0x9278) 6=DXT3 7=DXT1
+  8=RG88 9=R8. The .tex fmt 5 (ETC2_RGBA8) mapping is confirmed
+  working by the user's PC-produced WORKING mpkg (fmt 5, 1 B/px
+  bodies render correctly), so the tex→engine mapping layer handles
+  it; no change.
+
+=== Fixes shipped ===
+
+- ISHTAR dark-red square: the tex output now writes imgW/imgH as the
+  image's own un-padded dims (PC parity — PcTexTranscoder.build grew
+  imgW/imgH params; ETC2 path passes padded storage + unpadded image,
+  RGBA path passes image dims for both). Plus decode diagnostics:
+  every embedded-image decode logs corner+center pixel samples and
+  flags a SINGLE-COLOR decode (the classic symptom of a mis-decoded
+  CMYK/16-bit JPEG or a bogus embedded image) so the next device log
+  distinguishes a bad decode from a bad encode. These are GENERIC
+  rules — no wallpaper-specific branches.
+- PRESET value application: raw JSON node parity (above) + the apply
+  log now lists applied_keys and unmatched_keys (a device report will
+  show exactly what a preset did).
+- BROWN DUST missing preview: the native getWallpaperInfoPreviewBitmap
+  call is now inside runCatching — a native THROW (rather than a null
+  return) previously bypassed the entire .mpkg VFS fallback chain and
+  left a blank card. Every step logs (native bytes / fallback served /
+  decode-failed-both). GIF previews decode the MIDDLE frame via Movie
+  (WE preview GIFs open with a solid background fill — frame 0 made
+  solid-color cards).
+- UI: the outer Scaffold no longer insets its content (each screen's
+  own top bar handles the status bar exactly once — the v0.8.9 double
+  status-bar gap was the "big empty space at the top, everything
+  shifted down"). The bottom bar is a compact custom 60dp Surface row
+  (stock NavigationBar is 80dp — "buttons too tall"). "Daily" tab
+  renamed to "Anime".
+- ANIME SCREEN (the Nyanpasu port, v1.0.0 feature completion): the
+  search itself was already v1.0.0-verified; this round completes the
+  FEATURE set and the reliability layer:
+  • DohDns — OkHttp Dns that falls back to Cloudflare/Google JSON
+    DoH (by-IP endpoints, no bootstrap DNS) when the system resolver
+    fails. Device logs showed EVERY image host failing with
+    UnknownHostException (carrier/school DNS filtering) — that was the
+    "completely black / tap refresh" screen.
+  • Mascot speech bubble (random quips every 30–60 s, mode-change
+    reactions, kaomoji everywhere), 10-tap easter egg dialog.
+  • One-time welcome/quick-guide dialog.
+  • Dual-image mode completes: Refresh fetches a separate lock image
+    (粉蓝异色), the preview's label switches Home/Lock view, apply uses
+    both crops.
+  • Confetti burst on a successful apply.
+  • Prefetch (v1.0.0's PrefetchCoordinator, simplified): after an
+    apply/refresh the NEXT image downloads into
+    cacheDir/nyanpasu_prefetch.img (12 h freshness) — the following
+    Refresh is instant; the scheduled worker consumes it too and
+    re-queues the next.
+  • History thumbnails lost their border (user request).
+  • Logging on every action: fetch start/prefetch hit/miss, lock
+    image, prefetch result, apply, restore, save, easter egg.
+  • CancellationException rethrow guards in the screen + worker
+    (regression class from the v0.7.x era).
+  • HTTP status codes logged for every failed source call (the old
+    code only logged exceptions — a 403/429 was silent).
+  NOT ported from later Nyanpasu versions (the image-choice
+  regression): SearchImageQuality's hard min-resolution floors,
+  9:19.5 aspect targeting, GIF blocking, best-score deterministic
+  pool, required-tag hard constraints, bounded fallback. Reminder 98
+  stands.
+- Double scene load: requestLoadScene now ignores a duplicate request
+  for the SAME file within 1.5 s (the preview screen requested twice
+  ~120 ms apart — every wallpaper initialized twice in the device
+  log). Real reloads (SAF-picker return, the onStart bridge) arrive
+  much later and still reload in full.
+- Version: 0.8.10-alpha, versionCode 128 (still 0.8.x per the user's
+  mandate).
+
+Reminders added:
+  102. Ghidra in this sandbox: Java-21 JRE gets rejected by Ghidra's
+      LaunchSupport (Debian's java fails the version probe) — download
+      Temurin JDK 21 to /tmp and set JAVA_HOME_OVERRIDE in
+      support/launch.properties. MAXMEM 1400m, -analysisTimeoutPerFile
+      ~420, and DISABLE Decompiler Parameter ID / Function ID / Stack
+      via a preScript (wallpaperui.exe then finishes in ~7 min inside
+      the 10-min tool-call cap). Background processes die between
+      tool calls — one command per import+postScript pass.
+  103. The WE Android APK is directly downloadable
+      (wallpaperengine.io/android/apk/wallpaper-engine.apk, 145 MB);
+      libscenejni.so has no .symtab but full .dynsym — find functions
+      by string xref with capstone (ADRP+ADD pair scan with
+      byte-resync; plain md.disasm stops at the first bad byte).
+  104. TEXI imgW/imgH are the IMAGE dims; texW/texH (+ mip header)
+      are the STORAGE dims (padded for ETC2). Never write texW into
+      imgW/imgH again — that was the ishtar layout bug.
