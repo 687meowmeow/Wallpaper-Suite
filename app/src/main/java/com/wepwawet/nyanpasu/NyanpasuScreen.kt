@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Undo
+import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -210,17 +211,15 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
     val screenAspect = metrics.widthPixels.toFloat() / metrics.heightPixels
     // v0.8.13: the preview used aspectRatio(screenAspect) — on a portrait
     // phone that is ~0.45, i.e. a preview nearly as TALL AS THE SCREEN.
-    // The tools/save rows ended up below the fold and (with transformable
-    // eating one-finger drags) effectively unreachable — "the discover tab
-    // just shows a wallpaper and that's it. no buttons."
-    // v0.8.14: 45% was still "too big and it clips through the buttons" —
-    // a pinch-zoomed image painted right across the controls below (the
-    // graphicsLayer zoom is not clipped). The cap drops to 32% AND the box
-    // now clips its own bounds, so a zoomed image can never bleed over the
-    // rest of the screen. The image is Crop-scaled so it still fills the
-    // box at any height.
+    // v0.8.14: 45% → 32% + clipToBounds (zoomed images used to paint
+    // across the controls).
+    // v0.8.15: still "too big" on the device — the height cap binds and
+    // the box renders nearly square, which reads as a giant card. The cap
+    // drops to 22% of screen height (~200dp on a phone): a compact
+    // preview strip with the whole tool column comfortably on screen.
+    // Crop-fill keeps the image edge to edge.
     val maxPreviewHeightDp = with(androidx.compose.ui.platform.LocalDensity.current) {
-        (metrics.heightPixels * 0.32f).toDp()
+        (metrics.heightPixels * 0.22f).toDp()
     }
 
     fun persistTags() = NyanpasuPrefs.writeTags(context, strictTags, softTags)
@@ -308,7 +307,13 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
         }
     }
 
-    /** Applies the shown preview to the selected screens + history. */
+    /**
+     * SET (v0.8.15): applies the SHOWN preview to the selected screens +
+     * history. Refreshing is a separate action now — Discover never sets
+     * the wallpaper on its own ("the discover tab should not automatically
+     * set the wallpaper and setting it should be seperate from
+     * refreshing").
+     */
     fun applyShown() {
         val bmp = previewBitmap ?: return
         applying = true
@@ -329,14 +334,41 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                     NyanpasuApplier.pushHistory(context, homeCrop)
                     history = NyanpasuApplier.readHistory(context)
                     previewIsFresh = false
-                    statusLine = "Wallpaper updated"
-                    snackbar.showSnackbar("Wallpaper updated")
+                    statusLine = "Wallpaper set"
+                    snackbar.showSnackbar("Wallpaper set")
                     WepWawetLogger.appInfo("DiscoverScreen: applied",
                         "home_state" to homeState,
                         "lock_state" to lockState,
                         "separate_lock" to (lockCrop != null))
                 } else {
                     statusLine = "Wallpaper write failed (home=${result.homeOk}, lock=${result.lockOk})"
+                }
+
+                // Prefetch the NEXT image in the background (v1.0.0) — the
+                // next Refresh shows it instantly.
+                scope.launch {
+                    try {
+                        val nextUrl = withContext(Dispatchers.IO) {
+                            NyanpasuSearch.searchOne(
+                                context = context,
+                                strictTags = strictTags,
+                                softTags = softTags,
+                                styleValue = styleValue,
+                                r18Mode = r18Mode,
+                                recentUrls = NyanpasuPrefs.readRecentUrls(context),
+                            )
+                        }
+                        val nextBytes = withContext(Dispatchers.IO) { NyanpasuSearch.downloadImage(nextUrl) }
+                        if (nextBytes.size > 1024) {
+                            NyanpasuPrefs.prefetchFile(context).writeBytes(nextBytes)
+                            NyanpasuPrefs.writePrefetchMeta(context, nextUrl)
+                            WepWawetLogger.appInfo("DiscoverScreen: prefetched next image",
+                                "bytes" to nextBytes.size)
+                        }
+                    } catch (e: Exception) {
+                        WepWawetLogger.appInfo("DiscoverScreen: prefetch failed (non-fatal)",
+                            "exception" to e.javaClass.simpleName)
+                    }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -388,107 +420,6 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                     "message" to (e.message ?: ""))
             } finally {
                 fetching = false
-            }
-        }
-    }
-
-    /**
-     * Update (1.0's btnUpdate): fetch + apply in one tap. v0.8.14: when the
-     * preview already holds a FRESH (refreshed, unapplied) image, Update
-     * commits THAT image instead of fetching yet another one.
-     */
-    fun updateWallpaper() {
-        if (fetching || applying) return
-        if (previewBitmap != null && previewIsFresh) {
-            applyShown()
-            return
-        }
-        fetching = true
-        statusLine = "Searching…"
-        WepWawetLogger.appInfo("DiscoverScreen: update start",
-            "home_state" to homeState,
-            "lock_state" to lockState,
-            "dual" to NyanpasuPrefs.isDualMode(homeState, lockState))
-        scope.launch {
-            try {
-                fetchAndShow(
-                    homeState = homeState,
-                    lockState = lockState,
-                    strictTags = strictTags,
-                    softTags = softTags,
-                    styleValue = styleValue,
-                    r18Mode = r18Mode,
-                )
-                val bmp = previewBitmap
-                if (bmp == null || !previewIsFresh) return@launch
-
-                // Apply — one tap = new wallpaper on the selected screens.
-                applying = true
-                statusLine = "Applying…"
-                val lockBmp = if (NyanpasuPrefs.isDualMode(homeState, lockState))
-                    previewLockBitmap else null
-                val homeCrop = withContext(Dispatchers.IO) {
-                    NyanpasuApplier.cropForScreen(context, bmp)
-                }
-                val lockCrop = lockBmp?.let {
-                    withContext(Dispatchers.IO) { NyanpasuApplier.cropForScreen(context, it) }
-                }
-                val result = NyanpasuApplier.applyScreens(
-                    context, homeCrop, homeState, lockState, lockCrop)
-                if (result.ok) {
-                    NyanpasuApplier.pushHistory(context, homeCrop)
-                    history = NyanpasuApplier.readHistory(context)
-                    previewIsFresh = false
-                    statusLine = "Wallpaper updated"
-                    snackbar.showSnackbar("Wallpaper updated")
-                    WepWawetLogger.appInfo("DiscoverScreen: applied",
-                        "home_state" to homeState,
-                        "lock_state" to lockState,
-                        "separate_lock" to (lockCrop != null))
-                } else {
-                    statusLine = "Wallpaper write failed (home=${result.homeOk}, lock=${result.lockOk})"
-                }
-
-                // Prefetch the NEXT image in the background (v1.0.0).
-                scope.launch {
-                    try {
-                        val nextUrl = withContext(Dispatchers.IO) {
-                            NyanpasuSearch.searchOne(
-                                context = context,
-                                strictTags = strictTags,
-                                softTags = softTags,
-                                styleValue = styleValue,
-                                r18Mode = r18Mode,
-                                recentUrls = NyanpasuPrefs.readRecentUrls(context),
-                            )
-                        }
-                        val nextBytes = withContext(Dispatchers.IO) { NyanpasuSearch.downloadImage(nextUrl) }
-                        if (nextBytes.size > 1024) {
-                            NyanpasuPrefs.prefetchFile(context).writeBytes(nextBytes)
-                            NyanpasuPrefs.writePrefetchMeta(context, nextUrl)
-                            WepWawetLogger.appInfo("DiscoverScreen: prefetched next image",
-                                "bytes" to nextBytes.size)
-                        }
-                    } catch (e: Exception) {
-                        WepWawetLogger.appInfo("DiscoverScreen: prefetch failed (non-fatal)",
-                            "exception" to e.javaClass.simpleName)
-                    }
-                }
-            } catch (e: NyanpasuSearch.NoImageException) {
-                statusLine = "No image found — try different tags"
-                WepWawetLogger.appWarn("DiscoverScreen: no image found",
-                    "message" to (e.message ?: ""))
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                // The user left the screen — never swallow cancellation.
-                throw e
-            } catch (e: Exception) {
-                statusLine = "Failed: ${e.message ?: e.javaClass.simpleName}"
-                WepWawetLogger.appWarn("DiscoverScreen: update failed",
-                    "exception" to e.javaClass.name,
-                    "message" to (e.message ?: ""))
-            } finally {
-                fetching = false
-                applying = false
             }
         }
     }
@@ -616,6 +547,11 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
     // On open: show the LAST applied image (1.0's preview.loadPreview).
     // First ever launch with no history → fetch + apply one automatically.
     LaunchedEffect(Unit) {
+        // v0.8.15: on open we only ever SHOW something — the last applied
+        // image, or a freshly fetched one on first launch. Discover NEVER
+        // sets the wallpaper by itself anymore; that is exclusively the
+        // Set button ("the discover tab should not automatically set the
+        // wallpaper").
         if (previewBitmap == null) {
             val newest = history.firstOrNull()
             if (newest != null) {
@@ -625,7 +561,7 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                     }.getOrNull()
                 }
             } else if (!fetching) {
-                updateWallpaper()
+                refreshPreview()
             }
         }
     }
@@ -686,31 +622,11 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                             .fillMaxSize()
                             .graphicsLayerZoom(zoom, panX, panY),
                     )
-                    // v0.8.14: Refresh — fetch a new image into the preview
-                    // WITHOUT applying it (browse, then Set the one you like).
-                    IconButton(
-                        onClick = { refreshPreview() },
-                        enabled = !fetching && !applying,
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(6.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(Color.Black.copy(alpha = 0.55f)),
-                    ) {
-                        if (fetching) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(18.dp),
-                                strokeWidth = 2.dp,
-                                color = Color.White,
-                            )
-                        } else {
-                            Icon(
-                                Icons.Filled.Refresh,
-                                contentDescription = "Refresh preview",
-                                tint = Color.White,
-                            )
-                        }
-                    }
+                    // v0.8.15: the Refresh control MOVED to a labeled
+                    // button in the action row below the preview — the
+                    // v0.8.14 icon overlay sat on the image and was
+                    // effectively invisible ("there is still no refresh
+                    // button").
                     // Dual-mode preview switch (tap the label).
                     if (NyanpasuPrefs.isDualMode(homeState, lockState) &&
                         previewLockBitmap != null
@@ -741,7 +657,7 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                 } else {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            statusLine ?: "Tap Update to find a wallpaper",
+                            statusLine ?: "Tap Refresh to find a wallpaper",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center,
@@ -781,30 +697,58 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            // ===== Update (1.0's btnUpdate — fetch + apply in one tap) =====
-            Button(
-                onClick = { updateWallpaper() },
-                enabled = !fetching && !applying,
+            // ===== Set / Refresh (v0.8.15: SEPARATE actions) =====
+            // "the discover tab should not automatically set the wallpaper
+            // and setting it should be seperate from refreshing" — Refresh
+            // only fetches a new image into the preview; Set commits the
+            // shown image. Both are labeled, side by side.
+            Row(
                 modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                if (fetching || applying) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary,
+                Button(
+                    onClick = { applyShown() },
+                    enabled = !applying && previewBitmap != null,
+                    modifier = Modifier.weight(1.3f),
+                ) {
+                    if (applying) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                        )
+                    } else {
+                        Icon(Icons.Filled.Wallpaper, contentDescription = null)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        if (applying) "Setting…" else "Set as wallpaper",
+                        maxLines = 1,
                     )
-                } else {
-                    Icon(Icons.Filled.Download, contentDescription = null)
                 }
-                Spacer(Modifier.width(8.dp))
-                Text(when {
-                    fetching -> statusLine ?: "Working…"
-                    applying -> "Applying…"
-                    // v0.8.14: a fresh (refreshed, unapplied) preview is
-                    // committed by this button rather than replaced.
-                    previewIsFresh -> "Set this wallpaper"
-                    else -> "Update wallpaper"
-                })
+                OutlinedButton(
+                    onClick = { refreshPreview() },
+                    enabled = !fetching && !applying,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    if (fetching) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        Icon(Icons.Filled.Refresh, contentDescription = null)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text("Refresh", maxLines = 1)
+                }
+            }
+            if (statusLine != null) {
+                Text(
+                    statusLine!!,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             if (fetching || applying) {
                 LinearProgressIndicator(Modifier.fillMaxWidth())

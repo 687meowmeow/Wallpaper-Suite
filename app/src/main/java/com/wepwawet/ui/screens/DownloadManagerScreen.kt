@@ -98,15 +98,19 @@ fun DownloadManagerScreen(
                 },
                 actions = {
                     if (completedList.isNotEmpty()) {
-                        IconButton(onClick = {
-                            WepWawetLogger.workshop(
-                                "download_manager clear_all",
-                                "completed_count" to completedList.size,
-                            )
-                            DownloadManager.clearCompleted()
-                        }) {
-                            Icon(Icons.Filled.Delete, contentDescription = "Clear all completed")
-                        }
+                        // v0.8.15: SlimTopBarIcon — same 40dp action density
+                        // as every other screen's top bar.
+                        com.wepwawet.ui.components.SlimTopBarIcon(
+                            onClick = {
+                                WepWawetLogger.workshop(
+                                    "download_manager clear_all",
+                                    "completed_count" to completedList.size,
+                                )
+                                DownloadManager.clearCompleted()
+                            },
+                            contentDescription = "Clear all completed",
+                            icon = Icons.Filled.Delete,
+                        )
                     }
                 },
             )

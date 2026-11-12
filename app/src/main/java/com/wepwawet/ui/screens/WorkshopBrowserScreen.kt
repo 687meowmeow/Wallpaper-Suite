@@ -164,7 +164,9 @@ import kotlinx.coroutines.launch
  * @param onOpenPairing invoked when the user taps the Bluetooth (pairing) icon
  * @param onCreatorClick invoked with a creator Steam ID64 when the user taps
  *   the "by <creator>" line on a wallpaper tile. Typically wires up to
- *   `nav.navigate("creator/$steamId")` in the NavHost. Defaults to a no-op.
+ *   `nav.navigate("creator/$steamId")` in the NavHost. v0.8.15: nullable —
+ *   null renders a plain non-clickable line (the creator's own page passes
+ *   null; there is no nested creator navigation).
  * @param onBack optional back callback — when non-null, a back arrow is shown
  *   in the top bar. Used by the creator-browse route to return to global browse.
  * @param creatorSteamId optional Steam ID64 to scope the browse to a single
@@ -184,7 +186,7 @@ fun WorkshopBrowserScreen(
     onOpenFavorites: () -> Unit = {},
     onOpenPairing: () -> Unit,
     repo: WorkshopRepository,
-    onCreatorClick: (String) -> Unit = {},
+    onCreatorClick: ((String) -> Unit)? = null,
     onBack: (() -> Unit)? = null,
     creatorSteamId: String? = null,
     creatorDisplayName: String? = null,
@@ -248,6 +250,10 @@ fun WorkshopBrowserScreen(
     // configuration change (rotation) because plain remember is discarded
     // with the Activity.
     var query by rememberSaveable { mutableStateOf(repoQuery) }
+    // v0.8.15: the query the IME search action fired directly — the 500ms
+    // debounce of the same text used to re-run the search (grid loaded,
+    // wiped, loaded again). The debounce collect skips one matching fire.
+    var imeFiredQuery by remember { mutableStateOf<String?>(null) }
 
     // v0.8.1: pairing subsystem toggle (Settings → "Send to phone"). The
     // Bluetooth button + the send-to-phone flow are only visible/possible
@@ -585,6 +591,17 @@ fun WorkshopBrowserScreen(
                             repo.clearSearch()
                         }
                     } else {
+                        // v0.8.15: the IME search action already ran
+                        // startSearch for this exact text — don't run it a
+                        // second time (the grid used to load, wipe and
+                        // reload right after pressing search).
+                        if (q == imeFiredQuery) {
+                            imeFiredQuery = null
+                            WepWawetLogger.workshop(
+                                "ime search already fired — debounce skipped",
+                                "query" to q.take(80))
+                            return@collect
+                        }
                         WepWawetLogger.workshop(
                             "debounced query — startSearch",
                             "query" to q.take(80),
@@ -819,6 +836,9 @@ fun WorkshopBrowserScreen(
                             "ime search action — startSearch",
                             "query" to query.take(80),
                         )
+                        // v0.8.15: remember the fired text so the pending
+                        // debounce doesn't repeat it (see imeFiredQuery).
+                        imeFiredQuery = query
                         // v0.8.5: appScope — see filter-change LaunchedEffect.
                         if (query.isBlank()) com.wepwawet.WepWawetApplication.appScope.launch { repo.clearSearch() }
                         else com.wepwawet.WepWawetApplication.appScope.launch { repo.startSearch(query) }
@@ -1400,7 +1420,7 @@ private fun WallpaperGrid(
     items: List<WorkshopItemTyped>,
     tileSize: TileSize,
     onItemClick: (String) -> Unit,
-    onCreatorClick: (String) -> Unit,
+    onCreatorClick: ((String) -> Unit)?,
     creatorNames: Map<String, String>,
     footerState: WorkshopRepository.BrowseState,
 ) {

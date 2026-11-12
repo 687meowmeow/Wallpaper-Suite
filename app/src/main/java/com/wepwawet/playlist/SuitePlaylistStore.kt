@@ -230,6 +230,14 @@ object SuitePlaylistStore {
         readStore(context).playlists.firstOrNull { it.id == id }
 
     fun upsert(context: Context, playlist: Playlist) {
+        // v0.8.15: time rules may only reference entries that still exist —
+        // the editor's entry removal used to leave dangling paths that made
+        // a rule show "N wallpapers pinned" for wallpapers no longer in
+        // the playlist (rotation itself already ignored orphans).
+        val entryPaths = playlist.entries.map { it.filepath }.toHashSet()
+        for (rule in playlist.timeRules) {
+            rule.entryFilePaths.removeAll { it !in entryPaths }
+        }
         val store = readStore(context)
         val idx = store.playlists.indexOfFirst { it.id == playlist.id }
         if (idx >= 0) store.playlists[idx] = playlist else store.playlists.add(playlist)
@@ -276,6 +284,11 @@ object SuitePlaylistStore {
         val store = readStore(context)
         return store.playlists.firstOrNull { it.id == store.activePlaylistId }
     }
+
+    /** v0.8.15: the stored active playlist id — ONE read instead of a
+     * per-item isActive() file parse in the manager list. */
+    fun activePlaylistId(context: Context): String =
+        readStore(context).activePlaylistId
 
     fun isActive(context: Context, id: String): Boolean =
         readStore(context).activePlaylistId == id

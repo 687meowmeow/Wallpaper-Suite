@@ -16,7 +16,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.Icon
@@ -25,7 +24,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -67,9 +65,14 @@ fun PlaylistsScreen(
     var showNewDialog by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<SuitePlaylistStore.Playlist?>(null) }
     var deleteTarget by remember { mutableStateOf<SuitePlaylistStore.Playlist?>(null) }
+    // v0.8.15: the active id is read ONCE per reload — the old per-item
+    // isActive() call re-read and re-parsed the whole store JSON for every
+    // row on every recomposition (main-thread I/O).
+    var activePlaylistId by remember { mutableStateOf("") }
 
     fun reload() {
         playlists = SuitePlaylistStore.readAll(context)
+        activePlaylistId = SuitePlaylistStore.activePlaylistId(context)
     }
 
     LaunchedEffect(Unit) { reload() }
@@ -118,7 +121,7 @@ fun PlaylistsScreen(
                     modifier = Modifier.fillMaxSize(),
                 ) {
                     items(playlists, key = { it.id }) { playlist ->
-                        val active = SuitePlaylistStore.isActive(context, playlist.id)
+                        val active = playlist.id == activePlaylistId
                         Card(modifier = Modifier.fillMaxWidth()) {
                             Row(
                                 modifier = Modifier

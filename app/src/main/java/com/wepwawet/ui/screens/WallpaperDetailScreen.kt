@@ -145,6 +145,8 @@ fun WallpaperDetailScreen(
     var loading by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var isPaired by remember { mutableStateOf(PairingService.isPaired()) }
+    // v0.8.15: bumped by the Retry button on the load-failure screen.
+    var reloadCount by remember { mutableStateOf(0) }
 
     // v0.8.1: the pairing subsystem toggle — "Send to phone" only exists
     // while this is ON (Settings → "Send to phone"). The Download button
@@ -196,7 +198,7 @@ fun WallpaperDetailScreen(
         hasSteamCredentials = com.wepwawet.pairing.SteamCredentialsStore.hasCredentials(context)
     }
 
-    LaunchedEffect(itemId) {
+    LaunchedEffect(itemId, reloadCount) {
         loading = true
         errorMessage = null
         WepWawetLogger.workshop("WallpaperDetailScreen load", "id" to itemId)
@@ -265,6 +267,12 @@ fun WallpaperDetailScreen(
                     Text(errorMessage ?: "Wallpaper not found.",
                         color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodyMedium)
+                    // v0.8.15: a failed/empty load is no longer a dead end
+                    // — one tap retries (network blips, or a detail opened
+                    // from the Download Manager before the caches warmed).
+                    Button(onClick = { reloadCount++ }) {
+                        Text("Retry")
+                    }
                 }
             }
             return@Scaffold
@@ -424,7 +432,7 @@ fun WallpaperDetailScreen(
                             MetadataRow("Creator", creatorName)
                         }
                         MetadataRow("Subscriptions", current.subscriptionsFormatted)
-                        MetadataRow("Favorites", current.favorited.toString())
+                        MetadataRow("Favorites", current.favoritedFormatted)
                         MetadataRow("Views", current.views.toString())
                         MetadataRow("File size", current.fileSizeFormatted)
                         MetadataRow("Created", current.createdDateFormatted)
@@ -445,10 +453,20 @@ fun WallpaperDetailScreen(
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
                             current.tags.forEach { tag ->
-                                AssistChip(
-                                    onClick = {},
-                                    label = { Text(tag) },
-                                )
+                                // v0.8.15: tags render as PLAIN chips — the
+                                // old AssistChip rippled on tap but was
+                                // wired to nothing (a dead control).
+                                Surface(
+                                    shape = MaterialTheme.shapes.small,
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                ) {
+                                    Text(
+                                        tag,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        modifier = Modifier.padding(
+                                            horizontal = 10.dp, vertical = 6.dp),
+                                    )
+                                }
                             }
                         }
                     }
@@ -562,6 +580,12 @@ fun WallpaperDetailScreen(
             // Android app instead of importing into our own engine.
             if (pairingEnabled) {
                 item {
+                    // v0.8.15: the button used to stay ENABLED when not
+                    // paired / no Steam login — the whole download → pack
+                    // pipeline ran, PairingService.queueWallpaper silently
+                    // dropped the file (no pairing server) and the screen
+                    // popped as if it had succeeded. Now the prerequisites
+                    // gate the button itself.
                     OutlinedButton(
                         onClick = {
                             if (!downloadState.isRunning) {
@@ -570,7 +594,7 @@ fun WallpaperDetailScreen(
                                 com.wepwawet.pairing.WorkshopDownloadJob.launchSendToPhone(context, current)
                             }
                         },
-                        enabled = !downloadState.isRunning,
+                        enabled = !downloadState.isRunning && isPaired && hasSteamCredentials,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Icon(Icons.Filled.Send, contentDescription = null)

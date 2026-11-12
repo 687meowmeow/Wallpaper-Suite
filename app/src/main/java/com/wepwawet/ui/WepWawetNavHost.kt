@@ -363,7 +363,8 @@ fun WepWawetNavHost() {
                 onOpenSettings = { nav.navigate("settings") },
                 onOpenFavorites = { nav.navigate("favorites") },
                 onOpenPairing = { nav.navigate("pairing") },
-                onCreatorClick = { /* no nested creator navigation */ },
+                onCreatorClick = null, // no nested creator navigation — the
+                // "by …" line renders as plain text on a creator's own page.
                 onBack = { nav.popBackStack() },
                 creatorSteamId = steamId,
                 repo = repo,
@@ -416,6 +417,11 @@ fun WepWawetNavHost() {
                 // Logs button in Settings' top-right corner (visible only
                 // while verbose logging is enabled).
                 onOpenLogs = { nav.navigate("logs") },
+                // v0.8.15: a saved Steam key reaches the RUNNING service
+                // immediately (it used to wait for the next Activity
+                // onResume, so server-side sorts kept HTML-scraping after
+                // saving until the app was backgrounded once).
+                onApiKeySaved = { key -> steamApi.apiKey = key },
             )
         }
 

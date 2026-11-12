@@ -30,6 +30,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BrokenImage
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Edit
@@ -195,6 +196,10 @@ fun VideoTrimScreen(
     var durationMs by remember { mutableLongStateOf(0L) }
     var videoWidth by remember { mutableStateOf(0) }
     var videoHeight by remember { mutableStateOf(0) }
+    // v0.8.15: a corrupt/unsupported file used to leave the filmstrip
+    // spinner forever with the trim button disabled and NO explanation —
+    // surface the failure instead.
+    var metaFailed by remember { mutableStateOf(false) }
     var startMs by remember { mutableLongStateOf(0L) }
     var endMs by remember { mutableLongStateOf(0L) }
     var currentPosition by remember { mutableLongStateOf(0L) }
@@ -298,6 +303,7 @@ fun VideoTrimScreen(
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
+                metaFailed = true
                 WepWawetLogger.workshopWarn("VideoTrimScreen: metadata/thumbnail failed",
                     "exception" to e.javaClass.name, "message" to (e.message ?: ""))
             } finally {
@@ -416,7 +422,12 @@ fun VideoTrimScreen(
 
     Scaffold(
         topBar = {
-            SlimTopBar(title = "Trim Video", onBack = onBack)
+            // v0.8.15: the title matches the mode — every other string in
+            // library mode is clip-themed, the bar said "Trim Video".
+            SlimTopBar(
+                title = if (isLibraryMode) "Clip Video" else "Trim Video",
+                onBack = onBack,
+            )
         },
     ) { padding ->
         Column(
@@ -772,6 +783,25 @@ fun VideoTrimScreen(
                         }
                     }
                 }
+            } else if (metaFailed) {
+                // v0.8.15: an unreadable file says so instead of spinning
+                // forever; "Send/Add Full Video" below still works.
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.padding(vertical = 24.dp),
+                ) {
+                    Icon(
+                        Icons.Filled.BrokenImage,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        "Couldn't read this video — trimming is unavailable.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             } else {
                 CircularProgressIndicator(modifier = Modifier.size(32.dp))
             }
@@ -895,12 +925,17 @@ fun VideoTrimScreen(
                             }
                         }
                     },
-                    enabled = !isTrimming && durationMs > 0,
+                    // v0.8.15: in SEND mode the button requires a pairing —
+                    // the pipeline used to run to completion and silently
+                    // drop the file when no pairing server was up.
+                    enabled = !isTrimming && durationMs > 0 &&
+                        (isLibraryMode || PairingService.isPaired()),
                     modifier = Modifier.weight(1f),
                 ) {
                     Text(when {
                         isTrimming -> "Processing…"
                         isLibraryMode -> "Clip & Add"
+                        !PairingService.isPaired() -> "Pair first to send"
                         else -> "Trim & Send"
                     })
                 }
@@ -966,10 +1001,14 @@ fun VideoTrimScreen(
                             }
                         }
                     },
-                    enabled = !isTrimming,
+                    enabled = !isTrimming && (isLibraryMode || PairingService.isPaired()),
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text(if (isLibraryMode) "Add Full Video" else "Send Full Video")
+                    Text(when {
+                        isLibraryMode -> "Add Full Video"
+                        PairingService.isPaired() -> "Send Full Video"
+                        else -> "Pair first to send"
+                    })
                 }
             }
 

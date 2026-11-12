@@ -132,15 +132,21 @@ data class WorkshopItemTyped(
      * Formatted subscription count (e.g. "1.2M", "53K", "982").
      */
     val subscriptionsFormatted: String
-        get() {
-            val n = item.subscriptions
-            return when {
-                n < 1_000 -> n.toString()
-                n < 1_000_000 -> "%.1fK".format(n / 1_000.0)
-                n < 1_000_000_000 -> "%.1fM".format(n / 1_000_000.0)
-                else -> "%.2fB".format(n / 1_000_000_000.0)
-            }
-        }
+        get() = formatCount(item.subscriptions)
+
+    /**
+     * v0.8.15: formatted favorite count — the detail card used to show a
+     * raw 7-digit number right below the formatted "1.2M" subscriptions.
+     */
+    val favoritedFormatted: String
+        get() = formatCount(item.favorited)
+
+    private fun formatCount(n: Long): String = when {
+        n < 1_000 -> n.toString()
+        n < 1_000_000 -> "%.1fK".format(n / 1_000.0)
+        n < 1_000_000_000 -> "%.1fM".format(n / 1_000_000.0)
+        else -> "%.2fB".format(n / 1_000_000_000.0)
+    }
 
     /**
      * Formatted creation date (e.g. "Oct 22, 2026"). Returns "—" if unknown.

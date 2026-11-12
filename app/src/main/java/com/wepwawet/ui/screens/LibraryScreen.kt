@@ -162,14 +162,19 @@ fun LibraryScreen(
     // Pins
     var pinned by remember { mutableStateOf<Set<String>>(emptySet()) }
     var contextMenuFor by remember { mutableStateOf<WallpaperInfoSparse?>(null) }
-    var playlistPickerFor by remember { mutableStateOf<WallpaperInfoSparse?>(null) }
+    // v0.8.15: (path, title, type) — works for wallpapers AND folder images.
+    var playlistPickerFor by remember { mutableStateOf<Triple<String, String, String>?>(null) }
+    // v0.8.15: long-press menu for folder images (pin / group / playlist /
+    // rename) — mirrors the wallpaper context menu.
+    var imageMenuFor by remember { mutableStateOf<ImageFolderAssets.ImageEntry?>(null) }
 
     // ===== GROUPS (the user's manual groups — restored v0.8.12) =====
     var groups by remember { mutableStateOf<List<String>>(emptyList()) }
     var groupOf by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var activeGroup by remember { mutableStateOf<String?>(null) }
-    // The wallpaper whose "Add to group" dialog is open.
-    var groupTarget by remember { mutableStateOf<WallpaperInfoSparse?>(null) }
+    // The item whose "Add to group" dialog is open — v0.8.15: (path, title)
+    // so folder images can be grouped too.
+    var groupTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
     // Rename/delete dialog for a group (long-press a group chip).
     var manageGroupName by remember { mutableStateOf<String?>(null) }
 
@@ -564,34 +569,43 @@ fun LibraryScreen(
         src.filter { query.isEmpty() || it.second.displayName.lowercase(Locale.ROOT).contains(query) }
     }
 
-    // The merged grid: wallpapers (+ folder images in All, folder view: only
-    // the folder's images, group/tag/animated view: wallpapers only).
+    // The merged grid. v0.8.15: a MANUAL group contains its wallpapers AND
+    // its folder images ("you should be able to add images to groups aswell
+    // by holding down and pin") — only the engine-concept views (the
+    // built-in Animated group, workshop-tag filters) stay wallpapers-only,
+    // and the folder view stays images-only. Pinned items of BOTH kinds
+    // float above everything in All/groups.
     val gridItems = remember(
         sortedWallpapers, visibleFolderImages, activeFolder, activeGroup, activeTags,
-        animatedActive, pinned, addedDatesDownloads, addedDatesImages,
+        animatedActive, pinned, addedDatesDownloads, addedDatesImages, groupOf,
     ) {
-        val showImages = activeFolder != null ||
-            (activeGroup == null && activeTags.isEmpty() && !animatedActive)
-        if (!showImages) {
-            sortedWallpapers.map { LibraryItem.Wall(it, addedDateOf(it)) }
-        } else {
-            val images = visibleFolderImages.map {
-                LibraryItem.Img(
-                    it.first, it.second,
-                    addedDatesImages[it.second.uri] ?: it.second.lastModified)
-            }
-            if (activeFolder != null) {
+        val images = visibleFolderImages.map {
+            LibraryItem.Img(
+                it.first, it.second,
+                addedDatesImages[it.second.uri] ?: it.second.lastModified)
+        }
+        when {
+            activeFolder != null ->
                 // Folder view: only the folder's images.
                 images.sortedWith(libraryItemComparator(sortMethod))
-            } else {
-                // All: merge wallpapers + folder images under one sort;
-                // pinned wallpapers keep floating above everything.
+            animatedActive || activeTags.isNotEmpty() ->
+                // Engine-concept views: wallpapers only.
+                sortedWallpapers.map { LibraryItem.Wall(it, addedDateOf(it)) }
+            else -> {
+                // All / manual groups: merge wallpapers + images under one
+                // sort; in a group view only that group's items (wallpaper
+                // paths and image uris share the same group registry).
+                val groupImages =
+                    if (activeGroup == null) images
+                    else images.filter { groupOf[it.entry.uri] == activeGroup }
                 val pinnedWalls = sortedWallpapers.filter { it.filePath in pinned }
                     .map { LibraryItem.Wall(it, addedDateOf(it)) }
+                val pinnedImages = groupImages.filter { it.entry.uri in pinned }
                 val rest = (sortedWallpapers.filter { it.filePath !in pinned }
-                    .map { LibraryItem.Wall(it, addedDateOf(it)) } + images)
+                    .map { LibraryItem.Wall(it, addedDateOf(it)) } +
+                    groupImages.filter { it.entry.uri !in pinned })
                     .sortedWith(libraryItemComparator(sortMethod))
-                pinnedWalls + rest
+                pinnedWalls + pinnedImages + rest
             }
         }
     }
@@ -991,7 +1005,9 @@ fun LibraryScreen(
                                     // The folder badge marks folder images
                                     // inside the All view.
                                     showFolderBadge = activeFolder == null,
+                                    isPinned = item.entry.uri in pinned,
                                     onClick = { selectedImage = item.folder to item.entry },
+                                    onLongClick = { imageMenuFor = item.entry },
                                 )
                             }
                         }
@@ -1011,7 +1027,10 @@ fun LibraryScreen(
                     label = "Add to playlist",
                 ) {
                     contextMenuFor = null
-                    playlistPickerFor = target
+                    playlistPickerFor = Triple(
+                        target.filePath,
+                        target.title.ifEmpty { target.filePath.substringAfterLast('/') },
+                        target.type)
                 }
                 ContextAction(
                     icon = {
@@ -1046,7 +1065,8 @@ fun LibraryScreen(
                     else "Add to group",
                 ) {
                     contextMenuFor = null
-                    groupTarget = target
+                    groupTarget = target.filePath to
+                        target.title.ifEmpty { target.filePath.substringAfterLast('/') }
                 }
                 // Workshop page when the import filename carries the item id
                 workshopItemIdOf(target.filePath)?.let { itemId ->
@@ -1079,29 +1099,96 @@ fun LibraryScreen(
         }
     }
 
+    // ===== v0.8.15: folder-image context menu (long-press) =====
+    // "the rename should be when you hold down on the image. you should
+    // be able to add images to groups aswell by holding down and pin."
+    imageMenuFor?.let { entry ->
+        val imagePinned = entry.uri in pinned
+        val imageGroup = groupOf[entry.uri]
+        ModalBottomSheet(onDismissRequest = { imageMenuFor = null }) {
+            Column(modifier = Modifier.padding(bottom = 24.dp)) {
+                ContextAction(
+                    icon = {
+                        Icon(
+                            Icons.Filled.PushPin, contentDescription = null,
+                            tint = if (imagePinned) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface,
+                        )
+                    },
+                    label = if (imagePinned) "Unpin from top" else "Pin to top",
+                ) {
+                    scope.launch {
+                        withContext(Dispatchers.IO) {
+                            LibraryPrefs.setPinned(context, entry.uri, !imagePinned)
+                        }
+                        pinned = LibraryPrefs.readPinned(context)
+                        imageMenuFor = null
+                    }
+                }
+                ContextAction(
+                    icon = {
+                        Icon(
+                            Icons.Filled.Folder, contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                    },
+                    label = if (imageGroup != null)
+                        "Group: $imageGroup (change)"
+                    else "Add to group",
+                ) {
+                    imageMenuFor = null
+                    groupTarget = entry.uri to entry.displayName.substringBeforeLast('.')
+                }
+                ContextAction(
+                    icon = { Icon(Icons.Filled.PlaylistAdd, contentDescription = null) },
+                    label = "Add to playlist",
+                ) {
+                    imageMenuFor = null
+                    playlistPickerFor = Triple(
+                        entry.uri,
+                        entry.displayName.substringBeforeLast('.'),
+                        "Image")
+                }
+                ContextAction(
+                    icon = {
+                        Icon(
+                            Icons.Filled.Edit, contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                    },
+                    label = "Rename",
+                ) {
+                    imageMenuFor = null
+                    renameImageTarget = entry
+                }
+            }
+        }
+    }
+
     // ===== Playlist add (the saved suite playlists) =====
     playlistPickerFor?.let { target ->
         com.wepwawet.playlist.PlaylistPickerDialog(
-            wallpaperTitle = target.title.ifEmpty {
-                target.filePath.substringAfterLast('/')
-            },
+            wallpaperTitle = target.second,
             onDismiss = { playlistPickerFor = null },
             onManagePlaylists = {
                 playlistPickerFor = null
                 onOpenPlaylists()
             },
             onPicked = { playlistId ->
-                val path = target.filePath
-                val title = target.title.ifEmpty { path.substringAfterLast('/') }
-                val type = target.type
+                val path = target.first
+                val title = target.second
+                val type = target.third
                 scope.launch {
-                    withContext(Dispatchers.IO) {
+                    val added = withContext(Dispatchers.IO) {
                         com.wepwawet.playlist.SuitePlaylistStore.addEntry(
                             context, playlistId,
                             com.wepwawet.playlist.SuitePlaylistStore.Entry(path, title, type))
                     }
                     playlistPickerFor = null
-                    snackbar.showSnackbar("Added to playlist")
+                    // v0.8.15: addEntry dedupes by filepath — say so instead
+                    // of always claiming success ("Added to playlist" used to
+                    // show for an entry that was already there).
+                    snackbar.showSnackbar(if (added) "Added to playlist" else "Already in this playlist")
                 }
             },
         )
@@ -1148,15 +1235,16 @@ fun LibraryScreen(
 
     // Assign a wallpaper to a group (context menu → "Add to group") —
     // groups are created HERE (no "＋" chip on the chip row anymore).
-    groupTarget?.let { target ->
-        val currentGroup = groupOf[target.filePath]
+    // v0.8.15: (path, title) — folder images are groupable too.
+    groupTarget?.let { (targetPath, targetTitle) ->
+        val currentGroup = groupOf[targetPath]
         AlertDialog(
             onDismissRequest = { groupTarget = null },
             title = { Text("Add to group") },
             text = {
                 Column {
                     Text(
-                        target.title.ifEmpty { target.filePath.substringAfterLast('/') },
+                        targetTitle,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1169,11 +1257,11 @@ fun LibraryScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable {
-                                        LibraryPrefs.assignToGroup(context, target.filePath, group)
+                                        LibraryPrefs.assignToGroup(context, targetPath, group)
                                         groupOf = LibraryPrefs.readGroupOf(context)
                                         groupTarget = null
                                         WepWawetLogger.engine("LibraryScreen: assigned to group",
-                                            "file" to target.filePath,
+                                            "file" to targetPath,
                                             "group" to group)
                                     }
                                     .padding(vertical = 10.dp),
@@ -1203,7 +1291,7 @@ fun LibraryScreen(
                             onClick = {
                                 if (LibraryPrefs.createGroup(context, inlineNewGroup)) {
                                     val name = inlineNewGroup.trim().take(30)
-                                    LibraryPrefs.assignToGroup(context, target.filePath, name)
+                                    LibraryPrefs.assignToGroup(context, targetPath, name)
                                     groups = LibraryPrefs.readGroups(context)
                                     groupOf = LibraryPrefs.readGroupOf(context)
                                     groupTarget = null
@@ -1220,7 +1308,7 @@ fun LibraryScreen(
                     if (currentGroup != null) {
                         TextButton(
                             onClick = {
-                                LibraryPrefs.assignToGroup(context, target.filePath, null)
+                                LibraryPrefs.assignToGroup(context, targetPath, null)
                                 groupOf = LibraryPrefs.readGroupOf(context)
                                 groupTarget = null
                             },
@@ -1863,12 +1951,17 @@ private fun queryDisplayName(context: android.content.Context, uri: android.net.
  * memory/disk caching, GIF support, measured downsampling and a proper
  * error state (the old manual BitmapFactory decode failed silently,
  * which is why "the images in the folder are not loading").
+ * v0.8.15: long-press opens the image context menu (pin / group /
+ * playlist / rename) exactly like the wallpaper cards.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FolderImageTile(
     entry: ImageFolderAssets.ImageEntry,
     showFolderBadge: Boolean,
+    isPinned: Boolean = false,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     Box(
@@ -1877,7 +1970,14 @@ private fun FolderImageTile(
             .aspectRatio(1f)
             .clip(RoundedCornerShape(8.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(onClick = onClick),
+            .then(
+                if (onLongClick != null)
+                    Modifier.combinedClickable(
+                        onClick = onClick,
+                        onLongClick = onLongClick,
+                    )
+                else Modifier.clickable(onClick = onClick)
+            ),
     ) {
         SubcomposeAsyncImage(
             model = ImageRequest.Builder(context)
@@ -1921,6 +2021,21 @@ private fun FolderImageTile(
                     .background(Color(0x99000000), RoundedCornerShape(50))
                     .padding(4.dp)
                     .size(14.dp),
+            )
+        }
+
+        // v0.8.15: pinned marker — same look as the wallpaper cards, so
+        // pins read identically across the whole grid.
+        if (isPinned) {
+            Icon(
+                Icons.Filled.PushPin,
+                contentDescription = "Pinned",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(6.dp)
+                    .background(Color(0x99000000), RoundedCornerShape(50))
+                    .padding(4.dp),
             )
         }
 

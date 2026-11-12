@@ -121,11 +121,18 @@ private const val KEY_PKG_CACHE_ENABLED = "pkg_cache_enabled"
  * @param onBack     Called when the user taps the back arrow in the TopAppBar.
  * @param onOpenLogs Called when the user taps the Logs button (top-right,
  *                   visible only while verbose logging is enabled).
+ * @param onApiKeySaved v0.8.15: called with the trimmed key (null when
+ *                   cleared) the moment it is saved — the running
+ *                   SteamApiService used to only pick the key up on the
+ *                   next Activity onResume, so server-side sorts kept
+ *                   HTML-scraping after saving until the app was
+ *                   backgrounded once.
  */
 @Composable
 fun SettingsScreen(
     onBack: () -> Unit,
     onOpenLogs: () -> Unit,
+    onApiKeySaved: ((key: String?) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -217,10 +224,15 @@ fun SettingsScreen(
                 title = "Settings",
                 onBack = onBack,
                 // Logs button (top-right) — always shown (v0.7.1).
+                // v0.8.15: SlimTopBarIcon — the bare 48dp IconButton was
+                // visibly larger than every other screen's 40dp top-bar
+                // action.
                 actions = {
-                    IconButton(onClick = onOpenLogs) {
-                        Icon(Icons.Filled.BugReport, contentDescription = "Logs")
-                    }
+                    com.wepwawet.ui.components.SlimTopBarIcon(
+                        onClick = onOpenLogs,
+                        contentDescription = "Logs",
+                        icon = Icons.Filled.BugReport,
+                    )
                 },
             )
         }
@@ -317,6 +329,9 @@ fun SettingsScreen(
                             .apply()
                         steamApiKey = trimmed
                         steamApiKeySaved = trimmed.isNotBlank()
+                        // v0.8.15: hand the key to the RUNNING service
+                        // immediately — no Activity-resume round trip.
+                        onApiKeySaved?.invoke(trimmed.ifBlank { null })
                         WepWawetLogger.appInfo(
                             "settings_steam_api_key_saved",
                             "length" to trimmed.length,
@@ -1093,15 +1108,6 @@ private fun EngineSettingsCard() {
         )
     }
     var playlistSummary by remember { mutableStateOf("") }
-    var snackbarResult by remember { mutableStateOf<String?>(null) }
-
-    // v0.8.3: surface the export result (Saved to Downloads / nothing logged)
-    LaunchedEffect(snackbarResult) {
-        snackbarResult?.let {
-            WepWawetLogger.appInfo(it)
-            snackbarResult = null
-        }
-    }
 
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
@@ -1131,6 +1137,15 @@ private fun EngineSettingsCard() {
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text("Wallpaper Engine", style = MaterialTheme.typography.titleMedium)
+            // v0.8.15: the official single-playlist summary used to be
+            // computed and then never rendered (dead state) — show it.
+            if (playlistSummary.isNotBlank()) {
+                Text(
+                    "Playlist: $playlistSummary",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Text(
                 "FPS limit: $maxFps",
                 style = MaterialTheme.typography.bodyLarge,

@@ -1,19 +1,32 @@
 package com.wepwawet.ui.screens
 
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -45,13 +58,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import coil.compose.SubcomposeAsyncImage
+import coil.request.ImageRequest
 import com.wepwawet.engine.EngineLibrary
 import com.wepwawet.log.WepWawetLogger
 import com.wepwawet.playlist.SuitePlaylistStore
 import com.wepwawet.ui.components.SlimTopBar
+import io.wallpaperengine.weclient.WeEnginePrefs
 import io.wallpaperengine.weutil.WallpaperInfoSparse
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -339,14 +359,53 @@ fun PlaylistEditorScreen(
     }
 
     // ── Add wallpapers picker (multi-select from the library) ──
+    // v0.8.15: the picker is a THUMBNAIL GRID of everything addable —
+    // engine wallpapers (Scene/Video .mpkg downloads + local imports) AND
+    // folder images ("the add on the playlist menu should actually show
+    // the images and look good and be more than animated ones"). The old
+    // picker was a checkbox list of titles only.
+    data class PickItem(
+        val filepath: String,
+        val title: String,
+        val type: String,
+        val isContentUri: Boolean,
+    )
+
     if (showAddPicker) {
+        var folderImages by remember {
+            mutableStateOf<List<ImageFolderAssets.ImageEntry>>(emptyList())
+        }
         LaunchedEffect(Unit) {
             libraryWallpapers = withContext(Dispatchers.IO) {
                 EngineLibrary.enumerateWallpapers(context)
             }
+            folderImages = withContext(Dispatchers.IO) {
+                ImageFolderAssets.readFolders(context).flatMap { folder ->
+                    ImageFolderAssets.enumerateFolderImages(context, folder.treeUri)
+                }
+            }
+        }
+        val pickItems = remember(libraryWallpapers, folderImages) {
+            val walls = libraryWallpapers.map { w ->
+                PickItem(
+                    filepath = w.filePath,
+                    title = w.title.ifEmpty { w.filePath.substringAfterLast('/') },
+                    type = w.type.ifEmpty { "wallpaper" },
+                    isContentUri = w.isLocal || w.filePath.startsWith("content://"),
+                )
+            }
+            val images = folderImages.map { e ->
+                PickItem(
+                    filepath = e.uri,
+                    title = e.displayName.substringBeforeLast('.'),
+                    type = "Image",
+                    isContentUri = true,
+                )
+            }
+            (walls + images).distinctBy { it.filepath }
         }
         val alreadyIn = current.entries.map { it.filepath }.toSet()
-        val selected = remember {
+        val selected = remember(pickItems) {
             mutableStateOf(alreadyIn.toMutableSet())
         }
         AlertDialog(
@@ -354,52 +413,85 @@ fun PlaylistEditorScreen(
             title = { Text("Add wallpapers") },
             text = {
                 Column {
-                    if (libraryWallpapers.isEmpty()) {
+                    if (pickItems.isEmpty()) {
                         Text("Loading library…")
                     } else {
-                        LazyColumn(
+                        Text(
+                            "${pickItems.size} wallpapers — scenes, videos, images",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        LazyVerticalGrid(
+                            columns = GridCells.Fixed(3),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(320.dp),
+                                .height(420.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            items(libraryWallpapers, key = { it.filePath }) { wallpaper ->
-                                val path = wallpaper.filePath
-                                val checked = path in selected.value
-                                Row(
+                            gridItems(pickItems, key = { it.filepath }) { item ->
+                                val checked = item.filepath in selected.value
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
                                     modifier = Modifier
-                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .then(
+                                            if (checked)
+                                                Modifier.border(
+                                                    2.dp,
+                                                    MaterialTheme.colorScheme.primary,
+                                                    RoundedCornerShape(10.dp),
+                                                )
+                                            else Modifier
+                                        )
                                         .clickable {
-                                            selected.value = selected.value.toMutableSet().apply {
-                                                if (checked) remove(path) else add(path)
+                                            selected.value =
+                                                selected.value.toMutableSet().apply {
+                                                    if (checked) remove(item.filepath)
+                                                    else add(item.filepath)
+                                                }
+                                        }
+                                        .padding(4.dp),
+                                ) {
+                                    Box {
+                                        PlaylistPickThumb(
+                                            filepath = item.filepath,
+                                            isContentUri = item.isContentUri,
+                                        )
+                                        if (checked) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .align(Alignment.TopEnd)
+                                                    .padding(4.dp)
+                                                    .size(20.dp)
+                                                    .background(
+                                                        MaterialTheme.colorScheme.primary,
+                                                        CircleShape,
+                                                    ),
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                Icon(
+                                                    Icons.Filled.Check,
+                                                    contentDescription = null,
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(14.dp),
+                                                )
                                             }
                                         }
-                                        .padding(vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Checkbox(
-                                        checked = checked,
-                                        onCheckedChange = { isChecked ->
-                                            selected.value = selected.value.toMutableSet().apply {
-                                                if (isChecked) add(path) else remove(path)
-                                            }
-                                        },
-                                    )
-                                    Column {
-                                        Text(
-                                            wallpaper.title.ifEmpty {
-                                                path.substringAfterLast('/')
-                                            },
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                        Text(
-                                            wallpaper.type.ifEmpty { "wallpaper" } +
-                                                if (wallpaper.isLocal) " · local" else "",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
                                     }
+                                    Text(
+                                        item.title,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(top = 4.dp),
+                                    )
+                                    Text(
+                                        item.type,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
                                 }
                             }
                         }
@@ -412,15 +504,15 @@ fun PlaylistEditorScreen(
                         val chosen = selected.value
                         save {
                             entries.removeAll { it.filepath !in chosen }
-                            for (wallpaper in libraryWallpapers) {
-                                if (wallpaper.filePath in chosen &&
-                                    entries.none { it.filepath == wallpaper.filePath }
+                            for (item in pickItems) {
+                                if (item.filepath in chosen &&
+                                    entries.none { it.filepath == item.filepath }
                                 ) {
                                     entries.add(
                                         SuitePlaylistStore.Entry(
-                                            filepath = wallpaper.filePath,
-                                            title = wallpaper.title,
-                                            type = wallpaper.type,
+                                            filepath = item.filepath,
+                                            title = item.title,
+                                            type = item.type,
                                         )
                                     )
                                 }
@@ -576,4 +668,63 @@ private fun TimeRuleEditorDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         },
     )
+}
+
+/**
+ * v0.8.15: one thumbnail tile for the playlist picker grid. Content URIs
+ * (local imports + folder images) load through COIL — the same loader the
+ * library grid uses; engine .mpkg wallpapers decode their preview bitmap
+ * exactly like the library cards do (WeEnginePrefs.getWallpaperPreviewBitmap).
+ */
+@Composable
+private fun PlaylistPickThumb(
+    filepath: String,
+    isContentUri: Boolean,
+) {
+    val context = LocalContext.current
+    val shape = RoundedCornerShape(8.dp)
+    if (isContentUri) {
+        SubcomposeAsyncImage(
+            model = ImageRequest.Builder(context)
+                .data(android.net.Uri.parse(filepath))
+                .crossfade(true)
+                .build(),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(shape),
+        )
+    } else {
+        var preview by remember(filepath) { mutableStateOf<Bitmap?>(null) }
+        LaunchedEffect(filepath) {
+            preview = withContext(Dispatchers.IO) {
+                runCatching {
+                    val info = WallpaperInfoSparse()
+                    info.filePath = filepath
+                    WeEnginePrefs.getWallpaperPreviewBitmap(
+                        context, EngineLibrary.sceneLib(context), info)
+                }.getOrNull()
+            }
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(shape)
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center,
+        ) {
+            val bmp = preview
+            if (bmp != null) {
+                Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+    }
 }

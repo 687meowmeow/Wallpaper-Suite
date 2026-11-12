@@ -258,6 +258,41 @@ class WEWallpaperService : WallpaperService() {
             private var suiteOrderRandom: Boolean = true
             private var suitePlaylist: com.wepwawet.playlist.SuitePlaylistStore.Playlist? = null
 
+            // v0.8.15: the ACTIVE suite playlist id as of the last
+            // syncSettings — lets syncSettingsAndApplyChanges detect an
+            // activation switch (null until the first sync so a fresh
+            // engine never counts as a switch).
+            private var lastSyncedActiveId: String? = null
+
+            /**
+             * v0.8.15: sync + LIVE apply. Called whenever the store changes
+             * while the service runs (requestPlaylistSettingsChanged).
+             * When the ACTIVE playlist changed, the new playlist's next
+             * wallpaper is applied IMMEDIATELY — previously the switch
+             * waited for the 5-second tick's interval gate, and ticks are
+             * paused while the app is foregrounded, so toggling a playlist
+             * inside the app changed nothing until the user went home
+             * ("the button to enable a playlist doesnt update live").
+             */
+            fun syncSettingsAndApplyChanges() {
+                val prevActiveId = lastSyncedActiveId
+                syncSettings()
+                if (isPreview) return
+                if (suiteMode && lastSyncedActiveId != prevActiveId && prevActiveId != null) {
+                    val next = suitePickNew()
+                    if (next.isNotEmpty()) {
+                        WeEnginePrefs.storeString(
+                            this@WEWallpaperService, WeEnginePrefs.PREF_KEY_SELECTED_WALLPAPER, next)
+                        reloadActiveWallpaper()
+                        // Stamp the switch time so the interval restarts
+                        // and the tick doesn't immediately rotate again.
+                        onWallpaperChangedExternally()
+                        WepWawetLogger.engine("Service: active playlist switched — applied now",
+                            "file" to next.takeLast(60))
+                    }
+                }
+            }
+
             private fun reloadRandomPool() {
                 randomPool.clear()
                 for (wallpaper in playlistData.wallpapers) {
@@ -283,9 +318,11 @@ class WEWallpaperService : WallpaperService() {
                 val suiteActive =
                     com.wepwawet.playlist.SuitePlaylistStore.activePlaylist(this@WEWallpaperService)
                 if (suiteActive != null && suiteActive.entries.isNotEmpty()) {
+                    lastSyncedActiveId = suiteActive.id
                     syncSuiteSettings(suiteActive)
                     return
                 }
+                lastSyncedActiveId = ""
                 suiteMode = false
                 suitePlaylist = null
                 playlistData = WeEnginePrefs.readPlaylist(this@WEWallpaperService)
@@ -534,6 +571,11 @@ class WEWallpaperService : WallpaperService() {
                 if (newWallpaper.isNotEmpty()) {
                     WeEnginePrefs.storeString(this@WEWallpaperService, WeEnginePrefs.PREF_KEY_SELECTED_WALLPAPER, newWallpaper)
                     reloadActiveWallpaper()
+                    // v0.8.15: stamp the switch time. Without this the
+                    // interval gate compared against the stale
+                    // lastChangeTime forever, so after the first interval
+                    // elapsed the playlist rotated on EVERY 5-second tick.
+                    playlist.onWallpaperChangedExternally()
                 }
             }
         }
@@ -565,7 +607,11 @@ class WEWallpaperService : WallpaperService() {
 
         fun refreshPlaylistSettings() {
             handler.post {
-                playlist.syncSettings()
+                // v0.8.15: syncSettingsAndApplyChanges — activating a
+                // playlist now switches the wallpaper immediately instead
+                // of waiting for a tick (which is paused while the app is
+                // foregrounded).
+                playlist.syncSettingsAndApplyChanges()
             }
         }
 

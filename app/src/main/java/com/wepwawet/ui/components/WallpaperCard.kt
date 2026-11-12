@@ -69,7 +69,9 @@ import com.wepwawet.log.WepWawetLogger
  * @param onClick invoked when the card body is tapped (opens the detail screen)
  * @param onCreatorClick invoked with the creator's Steam ID64 when the user
  *   taps the "by <creator>" line. Opens a filtered browse showing only that
- *   creator's items. No-op if the item has no creator Steam ID.
+ *   creator's items. v0.8.15: nullable — null (e.g. while already viewing a
+ *   creator's page) renders a plain, non-clickable line instead of a dead
+ *   underlined control. No-op if the item has no creator Steam ID.
  */
 @Composable
 fun WallpaperCard(
@@ -77,7 +79,7 @@ fun WallpaperCard(
     tileSize: TileSize,
     creatorName: String?,
     onClick: () -> Unit,
-    onCreatorClick: (String) -> Unit,
+    onCreatorClick: ((String) -> Unit)?,
 ) {
     // Subscribe to download manager state so the card updates live when
     // a download starts/finishes for this item.
@@ -96,27 +98,14 @@ fun WallpaperCard(
     val maturity = WorkshopTags.getMaturity(item.tags)
     val isMobile = WorkshopTags.isMobileCompatible(item.type)
 
-    // The display name to show in the "by …" line. Preference order:
-    //   1. resolved creatorName passed in from the repo's creatorNames cache
-    //      (this is the user-friendly display name like "GothSees")
-    //   2. item.creator (sometimes populated by Steam — usually empty)
-    //
-    // v0.5.2 — the raw creator_steam_id (17-digit Steam ID64) is NO LONGER
-    // shown as a fallback. The "by …" line is hidden entirely until the
-    // repo's creatorNames cache has resolved a friendly display name for
-    // this creator. The clickable behavior is preserved when a creator
-    // ID is available (the resolution can complete after the card
-    // is first rendered — tapping still works because we use
-    // `item.creator` directly for the click handler, not the displayed
-    // name). We use `item.creator` (always populated by Steam) rather than
-    // `item.creatorSteamId` (null for HTTP-API-sourced items) so the click
-    // works regardless of which code path produced the item.
+    // The display name to show in the "by …" line: ONLY the repo-resolved
+    // creatorNames value. v0.8.15: the old `item.creator.isNotBlank() ->
+    // item.creator` branch leaked the raw 17-digit SteamID64 whenever the
+    // name hadn't resolved (or failed to) — exactly what this file's own
+    // v0.5.2 contract forbids. The "by …" line stays hidden until a real
+    // display name exists.
     val creatorId = item.creator
-    val displayName: String? = when {
-        !creatorName.isNullOrBlank() -> creatorName
-        item.creator.isNotBlank() -> item.creator
-        else -> null
-    }
+    val displayName: String? = creatorName?.takeIf { it.isNotBlank() }
 
     Box(
         modifier = Modifier
@@ -196,9 +185,13 @@ fun WallpaperCard(
                     maxLines = 1,
                 )
             }
-            // "by <creator>" — clickable when a creator steam ID is available
+            // "by <creator>" — clickable when a creator steam ID is
+            // available AND a handler was passed (null = plain text, e.g.
+            // on the creator's own page — v0.8.15 kills the dead
+            // underlined no-op control).
             if (displayName != null) {
-                val clickableModifier = if (creatorId.isNotBlank()) {
+                val clickable = creatorId.isNotBlank() && onCreatorClick != null
+                val clickableModifier = if (clickable) {
                     Modifier.clickable {
                         WepWawetLogger.workshop(
                             "wallpaper_card_creator_tap",
@@ -206,7 +199,7 @@ fun WallpaperCard(
                             "creator_steam_id" to creatorId,
                             "creator_name" to displayName,
                         )
-                        onCreatorClick(creatorId)
+                        onCreatorClick?.invoke(creatorId)
                     }
                 } else {
                     Modifier
@@ -214,13 +207,13 @@ fun WallpaperCard(
                 Text(
                     text = "by $displayName",
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (creatorId.isNotBlank())
+                    color = if (clickable)
                         Color.White.copy(alpha = 0.95f)
                     else
                         Color.White.copy(alpha = 0.7f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    textDecoration = if (creatorId.isNotBlank())
+                    textDecoration = if (clickable)
                         TextDecoration.Underline
                     else TextDecoration.None,
                     modifier = clickableModifier,
