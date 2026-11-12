@@ -82,9 +82,6 @@ object SuitePlaylistStore {
     const val ORDER_RANDOM = "random"
     const val ORDER_ORDERED = "ordered"
 
-    /** v0.8.16: fixed id of the built-in Discover playlist (auto refresh). */
-    const val DISCOVER_PLAYLIST_ID = "discover"
-
     private data class StoreFile(
         var playlists: MutableList<Playlist> = ArrayList(),
         var activePlaylistId: String = "",
@@ -285,25 +282,27 @@ object SuitePlaylistStore {
     }
 
     /**
-     * v0.8.16: the BUILT-IN Discover playlist — auto refresh's home in the
-     * playlist system ("the auto refresh should be handled by the playlist
-     * system"). Fixed id so it can be found (and re-found) across runs;
-     * every Discover Set appends an entry. Shows up in the Playlists
-     * manager like any other playlist.
+     * v0.8.17: RETIRE the built-in "Discover" playlist auto-refresh concept
+     * entirely ("remove auto refresh entirely from the section. dont have
+     * it be a normal play list"). Any playlist left over from a v0.8.16
+     * install is dissolved — its entries are dropped (the saved discover
+     * files under filesDir/discover are not the user's library images, so
+     * nothing else references them) and the files are deleted.
      */
-    fun discoverPlaylist(context: Context): Playlist {
-        readStore(context).playlists.firstOrNull { it.id == DISCOVER_PLAYLIST_ID }
-            ?.let { return it }
-        val playlist = Playlist(
-            id = DISCOVER_PLAYLIST_ID,
-            name = "Discover",
-            intervalMinutes = 60)
+    fun removeDiscoverPlaylistIfPresent(context: Context) {
         val store = readStore(context)
-        store.playlists.add(playlist)
+        val leftover = store.playlists.firstOrNull { it.id == "discover" } ?: return
+        for (entry in leftover.entries) {
+            if (entry.filepath.contains("/discover/")) {
+                runCatching { java.io.File(entry.filepath).delete() }
+            }
+        }
+        store.playlists.removeAll { it.id == "discover" }
+        if (store.activePlaylistId == "discover") store.activePlaylistId = ""
         writeStore(context, store)
-        WepWawetLogger.appInfo("SuitePlaylistStore: Discover playlist created",
-            "id" to playlist.id)
-        return playlist
+        notifyService(context)
+        WepWawetLogger.appInfo("SuitePlaylistStore: legacy Discover playlist removed",
+            "entries" to leftover.entries.size)
     }
 
     // ── Active playlist ──────────────────────────────────────────────

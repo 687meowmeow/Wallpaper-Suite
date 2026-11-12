@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -30,10 +31,11 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SaveAlt
-import androidx.compose.material.icons.filled.QueueMusic
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material3.AlertDialog
@@ -49,6 +51,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -79,6 +82,7 @@ import androidx.compose.ui.unit.dp
 import com.wepwawet.log.WepWawetLogger
 import com.wepwawet.ui.components.SlimTopBar
 import com.wepwawet.ui.screens.ImageFolderAssets
+import com.wepwawet.ui.screens.BitmapCropDialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -115,12 +119,7 @@ import kotlin.random.Random
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun NyanpasuScreen(
-    onBack: (() -> Unit)? = null,
-    // v0.8.16: the Auto refresh card deep-links into the playlist manager
-    // (auto refresh is handled by the playlist system now).
-    onOpenPlaylists: () -> Unit = {},
-) {
+fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
@@ -147,9 +146,10 @@ fun NyanpasuScreen(
     var applying by remember { mutableStateOf(false) }
     var statusLine by remember { mutableStateOf<String?>(null) }
     var history by remember { mutableStateOf(NyanpasuApplier.readHistory(context)) }
-    // v0.8.16: the built-in Discover playlist (name to entry count) shown
-    // in the Auto refresh card.
-    var discoverPlaylistInfo by remember { mutableStateOf<Pair<String, Int>?>(null) }
+    // v0.8.17: the Set-as-wallpaper choice ("crop it from there if you push
+    // set as wallpaper") + the crop dialog itself.
+    var showSetChoice by remember { mutableStateOf(false) }
+    var showCropDialog by remember { mutableStateOf(false) }
 
     // ---- v0.8.12: save-to-folder state ----
     var showSaveToFolder by remember { mutableStateOf(false) }
@@ -207,12 +207,65 @@ fun NyanpasuScreen(
         }
     }
 
-    // v0.8.16: the preview is a FIXED compact strip (no aspect math, no
-    // zoom) and it sits BELOW the action rows — "the discover tab still
-    // has the image too big and its under the buttons". 45% → 32% → 22%
-    // caps all still read as a giant card; 160dp with the buttons first
-    // is unambiguous.
-    val previewHeight = 160.dp
+    // v0.8.17: "+ folder → Create new folder" ("add the option to create a
+    // folder when you push + folder and the option to make it hidden from
+    // the gallery aswell"). Two steps: pick the PARENT location (its grant
+    // covers the subfolder), then name the folder — with a hidden-from-
+    // gallery switch that drops a .nomedia marker inside.
+    var createFolderParent by remember { mutableStateOf<String?>(null) }
+    var showCreateFolderName by remember { mutableStateOf(false) }
+    var newFolderName by remember { mutableStateOf("") }
+    var newFolderHidden by remember { mutableStateOf(false) }
+    var creatingFolder by remember { mutableStateOf(false) }
+    val createFolderParentPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            ImageFolderAssets.takePersistableGrants(context, uri)
+            createFolderParent = uri.toString()
+            showCreateFolderName = true
+        }
+    }
+
+    /** Create the subfolder, register it, and save the current image into it. */
+    fun createFolderAndSave() {
+        val parent = createFolderParent ?: return
+        if (creatingFolder) return
+        creatingFolder = true
+        scope.launch {
+            try {
+                val dirUri = withContext(Dispatchers.IO) {
+                    ImageFolderAssets.createSubfolder(context, parent, newFolderName, newFolderHidden)
+                }
+                if (dirUri == null) {
+                    snackbar.showSnackbar("Couldn't create the folder (see logs)")
+                } else {
+                    ImageFolderAssets.addFolder(context, dirUri)
+                    saveFolders = ImageFolderAssets.readFolders(context)
+                    WepWawetLogger.appInfo("DiscoverScreen: folder created",
+                        "name" to newFolderName.trim().take(60),
+                        "hidden" to newFolderHidden)
+                    // Reset this dialog first, then hand off to the shared
+                    // save path (its own savingToFolder guard must see
+                    // savingToFolder == false to run).
+                    showCreateFolderName = false
+                    createFolderParent = null
+                    newFolderName = ""
+                    saveToFolder(dirUri)
+                }
+            } finally {
+                creatingFolder = false
+            }
+        }
+    }
+
+    // v0.8.17: the preview sits at the TOP at the IMAGE's own aspect
+    // ratio, full width. Only a sanity cap: images taller than 70% of the
+    // screen letterbox (Fit) instead of eating the whole page — the aspect
+    // itself is never distorted.
+    val maxPreviewHeight = with(androidx.compose.ui.platform.LocalDensity.current) {
+        (context.resources.displayMetrics.heightPixels * 0.7f).toDp()
+    }
 
     fun persistTags() = NyanpasuPrefs.writeTags(context, strictTags, softTags)
 
@@ -346,14 +399,20 @@ fun NyanpasuScreen(
      * set the wallpaper and setting it should be seperate from
      * refreshing").
      */
-    fun applyShown() {
-        val bmp = previewBitmap ?: return
+    /**
+     * v0.8.17: applyShown grew override parameters for the CROP-FIRST flow
+     * ("you should also have the option to crop it from there if you push
+     * set as wallpaper") — the crop dialog hands back a cropped bitmap that
+     * replaces the home (or lock) image for this apply only.
+     */
+    fun applyBitmap(homeOverride: Bitmap? = null, lockOverride: Bitmap? = null) {
+        val bmp = homeOverride ?: previewBitmap ?: return
         applying = true
         statusLine = "Applying…"
         scope.launch {
             try {
                 val lockBmp = if (NyanpasuPrefs.isDualMode(homeState, lockState))
-                    previewLockBitmap else null
+                    (lockOverride ?: previewLockBitmap) else null
                 val homeCrop = withContext(Dispatchers.IO) {
                     NyanpasuApplier.cropForScreen(context, bmp)
                 }
@@ -371,43 +430,9 @@ fun NyanpasuScreen(
                     WepWawetLogger.appInfo("DiscoverScreen: applied",
                         "home_state" to homeState,
                         "lock_state" to lockState,
-                        "separate_lock" to (lockCrop != null))
-
-                    // v0.8.16: AUTO REFRESH = THE PLAYLIST SYSTEM. Every
-                    // Set adds the image to the built-in "Discover"
-                    // playlist (FIFO, 20 entries); rotating them is the
-                    // playlist engine's job, on the interval picked in the
-                    // playlist editor — ONE rotation system for the whole
-                    // app, no separate background worker.
-                    withContext(Dispatchers.IO) {
-                        runCatching {
-                            val dir = java.io.File(context.filesDir, "discover").apply { mkdirs() }
-                            val img = java.io.File(dir, "discover_${System.currentTimeMillis()}.jpg")
-                            java.io.FileOutputStream(img).use { out ->
-                                bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, out)
-                            }
-                            val playlist =
-                                com.wepwawet.playlist.SuitePlaylistStore.discoverPlaylist(context)
-                            playlist.entries.add(
-                                com.wepwawet.playlist.SuitePlaylistStore.Entry(
-                                    filepath = img.absolutePath,
-                                    title = "Discover ${playlist.entries.size + 1}",
-                                    type = "Image"))
-                            // FIFO trim: keep the newest 20, delete dropped files.
-                            while (playlist.entries.size > 20) {
-                                val dropped = playlist.entries.removeAt(0)
-                                runCatching { java.io.File(dropped.filepath).delete() }
-                            }
-                            com.wepwawet.playlist.SuitePlaylistStore.upsert(context, playlist)
-                            WepWawetLogger.appInfo("DiscoverScreen: added to Discover playlist",
-                                "entries" to playlist.entries.size,
-                                "file" to img.name)
-                        }
-                    }
-                    discoverPlaylistInfo = withContext(Dispatchers.IO) {
-                        val pl = com.wepwawet.playlist.SuitePlaylistStore.discoverPlaylist(context)
-                        pl.name to pl.entries.size
-                    }
+                        "separate_lock" to (lockCrop != null),
+                        "cropped_home" to (homeOverride != null),
+                        "cropped_lock" to (lockOverride != null))
                 } else {
                     statusLine = "Wallpaper write failed (home=${result.homeOk}, lock=${result.lockOk})"
                 }
@@ -426,6 +451,8 @@ fun NyanpasuScreen(
             }
         }
     }
+
+    fun applyShown() = applyBitmap()
 
     /**
      * v0.8.14: REFRESH — fetch a fresh image into the preview WITHOUT
@@ -509,28 +536,31 @@ fun NyanpasuScreen(
     }
 
     /**
-     * Save (1.0's btnSave): the visible image (or the newest history
-     * entry) into the system gallery.
+     * v0.8.17: save the current image INTO THE SUITE, no folder needed —
+     * "you should also be able to save images to the suite without having
+     * a folder like how it is for animated wallpapers". Lands in the
+     * built-in "Suite images" folder (app-internal, never in the gallery)
+     * and shows up on the Wallpapers page immediately.
      */
-    fun saveCurrentToGallery() {
+    fun saveToSuite() {
+        if (savingToFolder) return
+        savingToFolder = true
         scope.launch {
-            val bmp = previewBitmap ?: history.firstOrNull()?.let {
-                withContext(Dispatchers.IO) {
-                    runCatching {
-                        android.graphics.BitmapFactory.decodeFile(it.file.absolutePath)
-                    }.getOrNull()
+            try {
+                val bmp = imageForSaving()
+                if (bmp == null) {
+                    snackbar.showSnackbar("Nothing to save yet")
+                } else {
+                    val ok = withContext(Dispatchers.IO) {
+                        ImageFolderAssets.saveImageToFolder(
+                            context, ImageFolderAssets.SUITE_URI, bmp)
+                    }
+                    snackbar.showSnackbar(if (ok) "Saved to the suite" else "Save failed (see logs)")
+                    if (ok) WepWawetLogger.appInfo("DiscoverScreen: saved to the suite")
                 }
+            } finally {
+                savingToFolder = false
             }
-            if (bmp == null) {
-                snackbar.showSnackbar("Nothing to save yet")
-                return@launch
-            }
-            val ok = withContext(Dispatchers.IO) {
-                NyanpasuApplier.saveToGallery(context, bmp)
-            }
-            snackbar.showSnackbar(
-                if (ok) "Saved to Pictures/WallpaperSuite" else "Save failed")
-            if (ok) WepWawetLogger.appInfo("DiscoverScreen: saved to gallery")
         }
     }
 
@@ -606,14 +636,16 @@ fun NyanpasuScreen(
                 refreshPreview()
             }
         }
-        // v0.8.16: keep the preload queue topped up + surface the Discover
-        // playlist state, and retire the legacy background worker for
-        // anyone upgrading ("auto refresh is handled by the playlist
-        // system" now).
+        // v0.8.17: keep the preload queue topped up, retire the legacy
+        // background worker from the scheduler days, and dissolve the
+        // short-lived v0.8.16 "Discover" playlist for upgraders (auto
+        // refresh has no Discover-side machinery anymore).
         refillQueue()
-        discoverPlaylistInfo = withContext(Dispatchers.IO) {
-            val pl = com.wepwawet.playlist.SuitePlaylistStore.discoverPlaylist(context)
-            pl.name to pl.entries.size
+        withContext(Dispatchers.IO) {
+            runCatching {
+                com.wepwawet.playlist.SuitePlaylistStore
+                    .removeDiscoverPlaylistIfPresent(context)
+            }
         }
         runCatching {
             val wm = androidx.work.WorkManager.getInstance(context)
@@ -640,12 +672,62 @@ fun NyanpasuScreen(
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            // ===== v0.8.16 LAYOUT: actions FIRST, compact preview BELOW =====
-            // "the discover tab still has the image too big and its under
-            // the buttons" — the buttons lead, the preview supports. It is
-            // a fixed 160dp strip (Crop-filled, no zoom/pan: the
-            // transformable was three rounds of clipping/scroll pain for a
-            // preview this size).
+            // ===== v0.8.17 LAYOUT: preview at the TOP, at the IMAGE's own
+            // aspect ratio ("now the discover image is too small and in the
+            // wrong place. it should be at the top and match the aspect
+            // ratio of the image") — full width, exact aspect (a sane 70%
+            // screen-height cap only letterboxes absurdly tall images,
+            // aspect always preserved). The action rows follow.
+            val shownBmp =
+                if (previewingLock && previewLockBitmap != null) previewLockBitmap else previewBitmap
+            val imgAspect = shownBmp
+                ?.let { it.width.toFloat() / it.height } ?: 0.75f
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = maxPreviewHeight)
+                    .aspectRatio(imgAspect.coerceIn(0.2f, 5f))
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (shownBmp != null) {
+                    Image(
+                        bitmap = shownBmp.asImageBitmap(),
+                        contentDescription = "Wallpaper preview",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    // Dual-mode preview switch (tap the label).
+                    if (NyanpasuPrefs.isDualMode(homeState, lockState) &&
+                        previewLockBitmap != null
+                    ) {
+                        Text(
+                            if (previewingLock) "Lock preview — tap to switch"
+                            else "Home preview — tap to switch",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White,
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(top = 8.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color.Black.copy(alpha = 0.55f))
+                                .clickable { previewingLock = !previewingLock }
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                        )
+                    }
+                } else if (fetching) {
+                    CircularProgressIndicator(modifier = Modifier.size(36.dp))
+                } else {
+                    Text(
+                        statusLine ?: "Tap Refresh to find a wallpaper",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                    )
+                }
+            }
 
             // ===== Tools row (v1.0.0: Undo / Home / Lock — all LABELED) =====
             Row(
@@ -679,16 +761,14 @@ fun NyanpasuScreen(
             )
 
             // ===== Set / Refresh (v0.8.15: SEPARATE actions) =====
-            // "the discover tab should not automatically set the wallpaper
-            // and setting it should be seperate from refreshing" — Refresh
-            // only fetches a new image into the preview; Set commits the
-            // shown image. Both are labeled, side by side.
+            // Refresh only fetches a new image into the preview; Set commits
+            // the shown image — and now OFFERS A CROP FIRST (v0.8.17).
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Button(
-                    onClick = { applyShown() },
+                    onClick = { showSetChoice = true },
                     enabled = !applying && previewBitmap != null,
                     modifier = Modifier.weight(1.3f),
                 ) {
@@ -735,67 +815,21 @@ fun NyanpasuScreen(
                 LinearProgressIndicator(Modifier.fillMaxWidth())
             }
 
-            // ===== Preview (compact, below the buttons) =====
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(previewHeight)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                contentAlignment = Alignment.Center,
-            ) {
-                val shown =
-                    if (previewingLock && previewLockBitmap != null) previewLockBitmap else previewBitmap
-                if (shown != null) {
-                    Image(
-                        bitmap = shown.asImageBitmap(),
-                        contentDescription = "Wallpaper preview",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                    // Dual-mode preview switch (tap the label).
-                    if (NyanpasuPrefs.isDualMode(homeState, lockState) &&
-                        previewLockBitmap != null
-                    ) {
-                        Text(
-                            if (previewingLock) "Lock preview — tap to switch"
-                            else "Home preview — tap to switch",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color.White,
-                            modifier = Modifier
-                                .align(Alignment.TopCenter)
-                                .padding(top = 8.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(Color.Black.copy(alpha = 0.55f))
-                                .clickable { previewingLock = !previewingLock }
-                                .padding(horizontal = 10.dp, vertical = 4.dp),
-                        )
-                    }
-                } else if (fetching) {
-                    CircularProgressIndicator(modifier = Modifier.size(36.dp))
-                } else {
-                    Text(
-                        statusLine ?: "Tap Refresh to find a wallpaper",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-            }
-
-            // ===== Save row (v0.8.12: gallery + folder — visible buttons) =====
+            // ===== Save row (v0.8.17: suite + folder) =====
+            // "remove save to gallery from discover" + "you should also be
+            // able to save images to the suite without having a folder".
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 OutlinedButton(
-                    onClick = { saveCurrentToGallery() },
+                    onClick = { saveToSuite() },
+                    enabled = !savingToFolder,
                     modifier = Modifier.weight(1f),
                 ) {
                     Icon(Icons.Filled.SaveAlt, contentDescription = null)
                     Spacer(Modifier.width(6.dp))
-                    Text("Save to gallery", maxLines = 1)
+                    Text("Save to suite", maxLines = 1)
                 }
                 OutlinedButton(
                     onClick = {
@@ -809,7 +843,6 @@ fun NyanpasuScreen(
                     Text("Save to folder", maxLines = 1)
                 }
             }
-
             // ===== Tags (tap a chip to flip strict/soft) =====
             Text("Tags", style = MaterialTheme.typography.titleMedium)
             TagEditor(
@@ -905,35 +938,12 @@ fun NyanpasuScreen(
                 ) { Text("NSFW") }
             }
 
-            // ===== Auto refresh (v0.8.16: THE PLAYLIST SYSTEM) =====
-            // "the auto refresh should be handled by the playlist system" —
-            // the old WorkManager scheduler is gone. Every Set builds the
-            // built-in "Discover" playlist; activating it (and picking its
-            // interval) happens in Playlists, exactly like every other
-            // playlist.
-            Text("Auto refresh", style = MaterialTheme.typography.titleMedium)
-            val plInfo = discoverPlaylistInfo
-            Text(
-                if (plInfo != null && plInfo.second > 0)
-                    "Every image you Set is added to the \"${plInfo.first}\" " +
-                        "playlist (${plInfo.second} image${if (plInfo.second == 1) "" else "s"}). " +
-                        "Activate it in Playlists to rotate them — its interval " +
-                        "lives there, next to your other playlists."
-                else
-                    "Every image you Set is added to the built-in \"Discover\" " +
-                        "playlist. Activate it in Playlists to rotate them — " +
-                        "its interval lives there, next to your other playlists.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            OutlinedButton(
-                onClick = { onOpenPlaylists() },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Icon(Icons.Filled.QueueMusic, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("Open Playlists")
-            }
+            // v0.8.17: the Auto refresh section is GONE from Discover
+            // ("remove auto refresh entirely from the section. dont have it
+            // be a normal play list") — no Discover-side rotation machinery
+            // and no special playlist. Rotation belongs to the playlist
+            // system: save images you like (suite/folder), then add them
+            // to a playlist from the library like anything else.
 
             // ===== History =====
             Text("History", style = MaterialTheme.typography.titleMedium)
@@ -1047,6 +1057,11 @@ fun NyanpasuScreen(
                         }
                     }
                     Spacer(Modifier.height(8.dp))
+                    // v0.8.17: "+ folder" offers BOTH picking an existing
+                    // folder and CREATING one (with a hidden-from-gallery
+                    // option) — "add the option to create a folder when you
+                    // push + folder and the option to make it hidden from
+                    // the gallery aswell".
                     OutlinedButton(
                         onClick = {
                             try {
@@ -1060,9 +1075,29 @@ fun NyanpasuScreen(
                         enabled = !savingToFolder,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Icon(Icons.Filled.Add, contentDescription = null)
+                        Icon(Icons.Filled.FolderOpen, contentDescription = null)
                         Spacer(Modifier.width(6.dp))
-                        Text("Pick a folder…")
+                        Text("Choose an existing folder…")
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            try {
+                                // The parent picker result opens the name +
+                                // hidden-from-gallery dialog.
+                                createFolderParentPicker.launch(null)
+                            } catch (t: Throwable) {
+                                WepWawetLogger.appWarn(
+                                    "DiscoverScreen: parent picker failed",
+                                    "exception" to t.javaClass.name)
+                            }
+                        },
+                        enabled = !savingToFolder && !creatingFolder,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(Icons.Filled.CreateNewFolder, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Create a new folder…")
                     }
                 }
             },
@@ -1070,6 +1105,126 @@ fun NyanpasuScreen(
                 TextButton(
                     onClick = { showSaveToFolder = false },
                     enabled = !savingToFolder,
+                ) { Text("Cancel") }
+            },
+        )
+    }
+
+    // ===== v0.8.17: Set-as-wallpaper choice ("you should also have the
+    // option to crop it from there if you push set as wallpaper") =====
+    if (showSetChoice) {
+        AlertDialog(
+            onDismissRequest = { if (!applying) showSetChoice = false },
+            title = { Text("Set as wallpaper") },
+            text = {
+                Column {
+                    Text("Crop the image first, or set it as-is.")
+                    Spacer(Modifier.height(12.dp))
+                    FilledTonalButton(
+                        onClick = {
+                            showSetChoice = false
+                            showCropDialog = true
+                        },
+                        enabled = !applying,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(Icons.Filled.Edit, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Crop first…")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showSetChoice = false
+                        applyShown()
+                    },
+                    enabled = !applying,
+                ) { Text("Set directly") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSetChoice = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    // ===== v0.8.17: the crop-before-setting dialog (shared surface with
+    // the image editor: handles, presets incl. Phone, rule of thirds) ====
+    if (showCropDialog) {
+        val cropBmp =
+            (if (previewingLock) previewLockBitmap else previewBitmap)
+        if (cropBmp != null) {
+            BitmapCropDialog(
+                bitmap = cropBmp,
+                onDismiss = { showCropDialog = false },
+                onApply = { cropped ->
+                    showCropDialog = false
+                    // The crop replaces the image the user was LOOKING at
+                    // (home, or lock in dual mode) for this apply only.
+                    if (previewingLock) applyBitmap(lockOverride = cropped)
+                    else applyBitmap(homeOverride = cropped)
+                },
+            )
+        } else {
+            showCropDialog = false
+        }
+    }
+
+    // ===== v0.8.17: create-folder dialog (name + hidden from gallery) ====
+    if (showCreateFolderName) {
+        AlertDialog(
+            onDismissRequest = { if (!creatingFolder) showCreateFolderName = false },
+            title = { Text("Create folder") },
+            text = {
+                Column {
+                    Text(
+                        "The new folder is created inside the location you " +
+                            "picked, and the current image is saved into it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = newFolderName,
+                        onValueChange = { newFolderName = it },
+                        singleLine = true,
+                        label = { Text("Folder name") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { newFolderHidden = !newFolderHidden }
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(
+                            checked = newFolderHidden,
+                            onCheckedChange = { newFolderHidden = it },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Hidden from gallery")
+                    }
+                    Text(
+                        "Hiding drops a .nomedia marker inside — gallery apps " +
+                            "and MediaStore skip folders that have one.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { createFolderAndSave() },
+                    enabled = newFolderName.isNotBlank() && !creatingFolder,
+                ) { Text(if (creatingFolder) "Creating…" else "Create") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showCreateFolderName = false },
+                    enabled = !creatingFolder,
                 ) { Text("Cancel") }
             },
         )

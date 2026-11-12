@@ -45,6 +45,38 @@ object ImageFolderAssets {
     // Legacy single-folder key (v0.8.9/v0.8.10) — migrated on first read.
     private const val KEY_LEGACY_FOLDER = "folder_uri"
 
+    // ── v0.8.17: the built-in SUITE folder ───────────────────────────
+    // "you should also be able to save images to the suite without having
+    // a folder like how it is for animated wallpapers" — downloaded
+    // (animated) wallpapers live inside the app and just appear in the
+    // library; suite-saved images get the same treatment. The folder is
+    // app-internal, always present, not removable, and (like everything
+    // under filesDir) never shows up in the system gallery.
+    const val SUITE_URI = "suite://images"
+
+    fun isSuiteFolder(treeUriStr: String): Boolean = treeUriStr == SUITE_URI
+
+    fun suiteDir(context: Context): File =
+        File(context.filesDir, "suite_images").apply { mkdirs() }
+
+    /**
+     * v0.8.17: the folder's OWN document id, for both storage shapes:
+     *  • a tree uri picked via OpenDocumentTree ("/tree/<docId>") — its
+     *    tree id IS the root folder;
+     *  • a subfolder document uri created by the "+ folder → Create new"
+     *    flow ("/tree/<root>/document/<subDocId>") — getDocumentId gives
+     *    the SUBFOLDER, so enumeration/save target the subfolder itself.
+     */
+    private fun folderDocId(folder: Uri): String = try {
+        android.provider.DocumentsContract.getDocumentId(folder)
+    } catch (t: Throwable) {
+        android.provider.DocumentsContract.getTreeDocumentId(folder)
+    }
+
+    /** A "document" uri carries its own segment after the tree part. */
+    private fun isDocumentUri(folder: Uri): Boolean =
+        folder.pathSegments.count() >= 4 && folder.pathSegments[2] == "document"
+
     // ── Folder registry ──────────────────────────────────────────────
 
     fun readFolders(context: Context): List<SavedFolder> {
@@ -58,12 +90,19 @@ object ImageFolderAssets {
             }
             prefs.edit().remove(KEY_LEGACY_FOLDER).apply()
             WepWawetLogger.appInfo("ImageFolderAssets: legacy folder migrated")
-            return set.plus(legacy).map { SavedFolder(it, folderDisplayName(it)) }
+            set.plus(legacy)
+        } else {
+            set
+        }.let { uris ->
+            // v0.8.17: the built-in Suite folder is ALWAYS in the list —
+            // it is where "Save to suite" puts images (app-internal, like
+            // the downloads for animated wallpapers).
+            (uris + SUITE_URI).map { SavedFolder(it, folderDisplayName(it)) }
         }
-        return set.map { SavedFolder(it, folderDisplayName(it)) }
     }
 
     fun addFolder(context: Context, treeUri: String) {
+        if (isSuiteFolder(treeUri)) return
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val set = (prefs.getStringSet(KEY_FOLDERS, emptySet()) ?: emptySet()).toMutableSet()
         if (set.add(treeUri)) {
@@ -74,6 +113,11 @@ object ImageFolderAssets {
     }
 
     fun removeFolder(context: Context, treeUri: String) {
+        // The built-in Suite folder is not removable.
+        if (isSuiteFolder(treeUri)) {
+            WepWawetLogger.appInfo("ImageFolderAssets: suite folder is built-in, not removed")
+            return
+        }
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val set = (prefs.getStringSet(KEY_FOLDERS, emptySet()) ?: emptySet()).toMutableSet()
         if (set.remove(treeUri)) {
@@ -83,21 +127,54 @@ object ImageFolderAssets {
         }
     }
 
-    /** "content://…/tree/primary%3APictures%2FWallpapers" → "Pictures/Wallpapers". */
-    fun folderDisplayName(treeUriStr: String): String = try {
-        val docId = android.provider.DocumentsContract.getTreeDocumentId(Uri.parse(treeUriStr))
-        docId.substringAfter(':').ifBlank { docId }
-    } catch (t: Throwable) {
-        "Folder"
+    /**
+     * "content://…/tree/primary%3APictures%2FWallpapers" → "Pictures/Wallpapers";
+     * a created subfolder document uri → just the subfolder's own name;
+     * the suite folder → "Suite images".
+     */
+    fun folderDisplayName(treeUriStr: String): String = when {
+        isSuiteFolder(treeUriStr) -> "Suite images"
+        else -> try {
+            val uri = Uri.parse(treeUriStr)
+            val docId = if (isDocumentUri(uri))
+                android.provider.DocumentsContract.getDocumentId(uri)
+            else
+                android.provider.DocumentsContract.getTreeDocumentId(uri)
+            docId.substringAfterLast('/').ifBlank {
+                docId.substringAfter(':').ifBlank { docId }
+            }
+        } catch (t: Throwable) {
+            "Folder"
+        }
     }
 
     // ── Enumeration + decode ─────────────────────────────────────────
 
-    /** Query a SAF tree folder for image-kind files, capped at 500. */
+    /** Query a folder for image-kind files, capped at 500. SAF trees,
+     *  created subfolders and the built-in suite folder all work. */
     fun enumerateFolderImages(context: Context, folderUriStr: String): List<ImageEntry> {
+        // v0.8.17: the built-in suite folder is plain internal storage.
+        if (isSuiteFolder(folderUriStr)) {
+            val dir = suiteDir(context)
+            val imageExts = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
+            return dir.listFiles()
+                ?.filter { it.isFile && it.extension.lowercase() in imageExts }
+                ?.sortedByDescending { it.lastModified() }
+                ?.take(500)
+                ?.map { f ->
+                    ImageEntry(
+                        uri = f.absolutePath,
+                        displayName = f.name,
+                        lastModified = f.lastModified(),
+                    )
+                }
+                ?: emptyList()
+        }
         return try {
             val folder = Uri.parse(folderUriStr)
-            val docId = android.provider.DocumentsContract.getTreeDocumentId(folder)
+            // v0.8.17: subfolder document uris enumerate their OWN children
+            // (folderDocId falls back to the tree id for picked roots).
+            val docId = folderDocId(folder)
             val children = android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(
                 folder, docId)
             val projection = arrayOf(
@@ -204,10 +281,28 @@ object ImageFolderAssets {
      * Requires the persistable WRITE grant — [takePersistableGrants].
      */
     fun saveImageToFolder(context: Context, treeUriStr: String, bitmap: Bitmap): Boolean {
+        // v0.8.17: suite saves are plain internal files (app-internal, so
+        // they never appear in the system gallery).
+        if (isSuiteFolder(treeUriStr)) {
+            return try {
+                val target = File(
+                    suiteDir(context), "wallpaper_${System.currentTimeMillis()}.jpg")
+                java.io.FileOutputStream(target).use { out ->
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, out)
+                }
+                WepWawetLogger.appInfo("ImageFolderAssets: image saved to the suite",
+                    "file" to target.name)
+                true
+            } catch (t: Throwable) {
+                WepWawetLogger.appWarn("ImageFolderAssets: suite save failed",
+                    "exception" to t.javaClass.name)
+                false
+            }
+        }
         return try {
             val tree = Uri.parse(treeUriStr)
-            val docId = android.provider.DocumentsContract.getTreeDocumentId(tree)
-            val parentDoc = android.provider.DocumentsContract.buildDocumentUriUsingTree(tree, docId)
+            val parentDoc = android.provider.DocumentsContract.buildDocumentUriUsingTree(
+                tree, folderDocId(tree))
             val name = "wallpaper_${System.currentTimeMillis()}.jpg"
             val docUri = android.provider.DocumentsContract.createDocument(
                 context.contentResolver, parentDoc, "image/jpeg", name) ?: run {
@@ -250,12 +345,40 @@ object ImageFolderAssets {
     ): Pair<Int, Int> {
         var copied = 0
         var failed = 0
+        // v0.8.17: importing into the built-in suite folder = plain file
+        // copies into internal storage.
+        if (isSuiteFolder(treeUriStr)) {
+            for (source in sources) {
+                try {
+                    val displayName = queryDisplayName(context, source)
+                        ?: "image_${System.currentTimeMillis()}.jpg"
+                    val target = File(suiteDir(context), displayName)
+                    val ok = try {
+                        context.contentResolver.openInputStream(source)?.use { input ->
+                            java.io.FileOutputStream(target).use { output ->
+                                input.copyTo(output)
+                            }
+                            true
+                        } ?: false
+                    } catch (t: Throwable) {
+                        false
+                    }
+                    if (ok) copied++ else { failed++; runCatching { target.delete() } }
+                } catch (t: Throwable) {
+                    failed++
+                    WepWawetLogger.appWarn("ImageFolderAssets: suite import failed",
+                        "exception" to t.javaClass.name)
+                }
+            }
+            WepWawetLogger.appInfo("ImageFolderAssets: images imported to the suite",
+                "copied" to copied, "failed" to failed)
+            return copied to failed
+        }
         val tree = Uri.parse(treeUriStr)
         for (source in sources) {
             try {
-                val docId = android.provider.DocumentsContract.getTreeDocumentId(tree)
-                val parentDoc =
-                    android.provider.DocumentsContract.buildDocumentUriUsingTree(tree, docId)
+                val parentDoc = android.provider.DocumentsContract.buildDocumentUriUsingTree(
+                    tree, folderDocId(tree))
                 // Prefer the provider's display name; fall back to a timestamp.
                 val displayName = queryDisplayName(context, source)
                     ?: "image_${System.currentTimeMillis()}.jpg"
@@ -327,6 +450,93 @@ object ImageFolderAssets {
         runCatching {
             context.contentResolver.takePersistableUriPermission(
                 uri, android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        }
+    }
+
+    /**
+     * v0.8.17: delete a folder image ("there should be a delete option for
+     * images when you hold down"). Suite images are plain files; SAF
+     * documents go through DocumentsContract.deleteDocument with a
+     * resolver.delete fallback (some providers only implement the latter).
+     */
+    fun deleteImage(context: Context, uriStr: String): Boolean {
+        // Suite / internal file path.
+        if (uriStr.startsWith("/")) {
+            return try {
+                val ok = File(uriStr).delete()
+                WepWawetLogger.appInfo("ImageFolderAssets: suite image deleted",
+                    "file" to uriStr.substringAfterLast('/'), "ok" to ok)
+                ok
+            } catch (t: Throwable) {
+                false
+            }
+        }
+        return try {
+            val uri = Uri.parse(uriStr)
+            try {
+                android.provider.DocumentsContract.deleteDocument(
+                    context.contentResolver, uri)
+            } catch (t: Throwable) {
+                // Fallback for providers without deleteDocument.
+                context.contentResolver.delete(uri, null, null) > 0
+            }.also { ok ->
+                WepWawetLogger.appInfo("ImageFolderAssets: image deleted",
+                    "ok" to ok, "uri" to uriStr.takeLast(48))
+            }
+        } catch (t: Throwable) {
+            WepWawetLogger.appWarn("ImageFolderAssets: delete failed",
+                "exception" to t.javaClass.name,
+                "message" to (t.message ?: ""))
+            false
+        }
+    }
+
+    /**
+     * v0.8.17: create a subfolder inside a granted parent tree (the "+ folder
+     * → Create new folder" flow) with an optional ".nomedia" marker — the
+     * standard mechanism gallery apps and MediaStore use to skip a folder.
+     * Returns the new folder's DOCUMENT uri (usable directly as a library
+     * folder), or null.
+     */
+    fun createSubfolder(
+        context: Context,
+        parentTreeUriStr: String,
+        name: String,
+        hiddenFromGallery: Boolean,
+    ): String? {
+        val clean = name.trim().take(60)
+        if (clean.isEmpty()) return null
+        return try {
+            val tree = Uri.parse(parentTreeUriStr)
+            val parentDoc = android.provider.DocumentsContract.buildDocumentUriUsingTree(
+                tree, android.provider.DocumentsContract.getTreeDocumentId(tree))
+            val dirUri = android.provider.DocumentsContract.createDocument(
+                context.contentResolver,
+                parentDoc,
+                android.provider.DocumentsContract.Document.MIME_TYPE_DIR,
+                clean) ?: run {
+                WepWawetLogger.appWarn("ImageFolderAssets: createSubfolder returned null",
+                    "name" to clean)
+                return null
+            }
+            if (hiddenFromGallery) {
+                val nomedia = runCatching {
+                    android.provider.DocumentsContract.createDocument(
+                        context.contentResolver, dirUri, "application/octet-stream", ".nomedia")
+                }.getOrNull()
+                if (nomedia == null) {
+                    WepWawetLogger.appWarn("ImageFolderAssets: .nomedia not created " +
+                        "(folder still created)")
+                }
+            }
+            WepWawetLogger.appInfo("ImageFolderAssets: subfolder created",
+                "name" to clean, "hidden" to hiddenFromGallery)
+            dirUri.toString()
+        } catch (t: Throwable) {
+            WepWawetLogger.appWarn("ImageFolderAssets: createSubfolder failed",
+                "exception" to t.javaClass.name,
+                "message" to (t.message ?: ""))
+            null
         }
     }
 

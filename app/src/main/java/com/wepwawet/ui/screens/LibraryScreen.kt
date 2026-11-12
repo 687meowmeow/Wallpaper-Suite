@@ -37,6 +37,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BrokenImage
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
@@ -168,8 +169,11 @@ fun LibraryScreen(
     // v0.8.15: (path, title, type) — works for wallpapers AND folder images.
     var playlistPickerFor by remember { mutableStateOf<Triple<String, String, String>?>(null) }
     // v0.8.15: long-press menu for folder images (pin / group / playlist /
-    // rename) — mirrors the wallpaper context menu.
+    // rename / delete) — mirrors the wallpaper context menu.
     var imageMenuFor by remember { mutableStateOf<ImageFolderAssets.ImageEntry?>(null) }
+    // v0.8.17: "there should be a delete option for images when you hold
+    // down" — the confirm dialog target.
+    var deleteImageTarget by remember { mutableStateOf<ImageFolderAssets.ImageEntry?>(null) }
     // v0.8.16: crop overrides (original uri → cropped file path) — what the
     // grid/preview/Set/playlists actually load for an edited image.
     var cropOverrides by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -1195,8 +1199,65 @@ fun LibraryScreen(
                     imageMenuFor = null
                     renameImageTarget = entry
                 }
+                // v0.8.17: delete ("there should be a delete option for
+                // images when you hold down") — destructive, so it asks.
+                ContextAction(
+                    icon = {
+                        Icon(
+                            Icons.Filled.Delete, contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                        )
+                    },
+                    label = "Delete",
+                ) {
+                    imageMenuFor = null
+                    deleteImageTarget = entry
+                }
             }
         }
+    }
+
+    // v0.8.17: delete confirm — removes the file (SAF deleteDocument or a
+    // plain File delete for suite images), its crop override, and any
+    // playlist entries pointing at either path.
+    deleteImageTarget?.let { entry ->
+        AlertDialog(
+            onDismissRequest = { deleteImageTarget = null },
+            title = { Text("Delete image?") },
+            text = {
+                Text(
+                    "\"${entry.displayName}\" is deleted for good. " +
+                        "Playlists using it lose the entry.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val victim = entry
+                        deleteImageTarget = null
+                        scope.launch {
+                            val ok = withContext(Dispatchers.IO) {
+                                val resolved = ImageCropStore.resolve(context, victim.uri)
+                                ImageCropStore.clear(context, victim.uri)
+                                com.wepwawet.playlist.SuitePlaylistStore
+                                    .removeEntryEverywhere(context, victim.uri)
+                                if (resolved != victim.uri) {
+                                    com.wepwawet.playlist.SuitePlaylistStore
+                                        .removeEntryEverywhere(context, resolved)
+                                }
+                                ImageFolderAssets.deleteImage(context, victim.uri)
+                            }
+                            snackbar.showSnackbar(if (ok) "Deleted" else "Delete failed (see logs)")
+                            if (ok) WepWawetLogger.appInfo("LibraryScreen: image deleted",
+                                "file" to victim.displayName)
+                            reload()
+                        }
+                    },
+                ) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteImageTarget = null }) { Text("Cancel") }
+            },
+        )
     }
 
     // ===== Playlist add (the saved suite playlists) =====
@@ -1427,27 +1488,43 @@ fun LibraryScreen(
 
     // ===== Remove-folder dialog (long-press a folder chip) =====
     removeFolderTarget?.let { folder ->
-        AlertDialog(
-            onDismissRequest = { removeFolderTarget = null },
-            title = { Text("Remove folder?") },
-            text = {
-                Text("\"${folder.name}\" disappears from this page. Its files stay on " +
-                    "your device; wallpapers already set from it keep working.")
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        ImageFolderAssets.removeFolder(context, folder.treeUri)
-                        if (activeFolder == folder.treeUri) activeFolder = null
-                        removeFolderTarget = null
-                        reload()
-                    },
-                ) { Text("Remove") }
-            },
-            dismissButton = {
-                TextButton(onClick = { removeFolderTarget = null }) { Text("Cancel") }
-            },
-        )
+        // v0.8.17: the built-in Suite folder is not removable — it is where
+        // "Save to suite" images live.
+        if (ImageFolderAssets.isSuiteFolder(folder.treeUri)) {
+            AlertDialog(
+                onDismissRequest = { removeFolderTarget = null },
+                title = { Text("Suite images") },
+                text = {
+                    Text("This built-in folder holds images you save to the suite. " +
+                        "It can't be removed — delete individual images by holding them.")
+                },
+                confirmButton = {
+                    TextButton(onClick = { removeFolderTarget = null }) { Text("OK") }
+                },
+            )
+        } else {
+            AlertDialog(
+                onDismissRequest = { removeFolderTarget = null },
+                title = { Text("Remove folder?") },
+                text = {
+                    Text("\"${folder.name}\" disappears from this page. Its files stay on " +
+                        "your device; wallpapers already set from it keep working.")
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            ImageFolderAssets.removeFolder(context, folder.treeUri)
+                            if (activeFolder == folder.treeUri) activeFolder = null
+                            removeFolderTarget = null
+                            reload()
+                        },
+                    ) { Text("Remove") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { removeFolderTarget = null }) { Text("Cancel") }
+                },
+            )
+        }
     }
 
     // ===== Folder image fullscreen preview + set =====

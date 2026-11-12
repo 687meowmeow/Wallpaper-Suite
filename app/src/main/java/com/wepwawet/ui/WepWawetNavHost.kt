@@ -282,11 +282,12 @@ fun WepWawetNavHost() {
                 },
                 onOpenPlaylists = { nav.navigate("playlists") },
                 // v0.8.16: the image editor (crop + aspect presets).
+                // v0.8.17: the request goes through ImageEditRequestHolder —
+                // uri-in-route arguments mangled SAF document ids ("the
+                // edit menu doesnt load anything").
                 onEditImage = { entry ->
-                    nav.navigate(
-                        "imageEditor/" +
-                            android.net.Uri.encode(entry.uri) + "/" +
-                            android.net.Uri.encode(entry.displayName))
+                    com.wepwawet.ui.screens.ImageEditRequestHolder.set(entry.uri, entry.displayName)
+                    nav.navigate("imageEditor")
                 },
                 steamApi = steamApi,
             )
@@ -297,12 +298,7 @@ fun WepWawetNavHost() {
         // implementation package keeps its historical name but NO
         // user-visible string carries it.
         composable("discover") {
-            com.wepwawet.nyanpasu.NyanpasuScreen(
-                onBack = null,
-                // v0.8.16: the Auto refresh card deep-links into the
-                // playlist manager (auto refresh = playlists now).
-                onOpenPlaylists = { nav.navigate("playlists") },
-            )
+            com.wepwawet.nyanpasu.NyanpasuScreen(onBack = null)
         }
 
         // v0.8.0: live-rendering preview + apply + properties + playlist.
@@ -333,20 +329,10 @@ fun WepWawetNavHost() {
             )
         }
 
-        // v0.8.16: the image editor (crop + aspect presets) — the uri and
-        // display name are Uri-encoded into the path segments.
-        composable(
-            route = "imageEditor/{uri}/{name}",
-            arguments = listOf(
-                navArgument("uri") { type = NavType.StringType },
-                navArgument("name") { type = NavType.StringType },
-            ),
-        ) { entry ->
-            ImageEditorScreen(
-                imageUri = android.net.Uri.decode(entry.arguments?.getString("uri").orEmpty()),
-                displayName = android.net.Uri.decode(entry.arguments?.getString("name").orEmpty()),
-                onBack = { nav.popBackStack() },
-            )
+        // v0.8.16: the image editor (crop + aspect presets). v0.8.17: no
+        // route arguments — the request rides in ImageEditRequestHolder.
+        composable("imageEditor") {
+            ImageEditorScreen(onBack = { nav.popBackStack() })
         }
 
         composable(

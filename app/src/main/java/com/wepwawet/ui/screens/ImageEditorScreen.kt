@@ -19,10 +19,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.BrokenImage
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
@@ -52,7 +55,10 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil.imageLoader
 import coil.request.ImageRequest
 import com.wepwawet.log.WepWawetLogger
@@ -64,6 +70,24 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.abs
 import kotlin.math.roundToInt
+
+/**
+ * v0.8.17: the edit request travels through this holder instead of nav
+ * route arguments — the previous uri-as-path-segment scheme broke loading
+ * ("the edit menu doesnt load anything"): SAF document ids already contain
+ * %-escapes, and encode/decode layers mangled them. A plain holder (the
+ * same pattern as PreviewRequestHolder) has no encoding at all.
+ */
+object ImageEditRequestHolder {
+    @Volatile
+    private var pending: Pair<String, String>? = null // uri to displayName
+
+    fun set(imageUri: String, displayName: String) {
+        pending = imageUri to displayName
+    }
+
+    fun peek(): Pair<String, String>? = pending
+}
 
 /**
  * v0.8.16: the image EDITOR — "replace the rename on the image menu where
@@ -84,16 +108,19 @@ import kotlin.math.roundToInt
  */
 @Composable
 fun ImageEditorScreen(
-    /** The ORIGINAL folder-image uri (what ImageCropStore keys on). */
-    imageUri: String,
-    displayName: String,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val request = remember { ImageEditRequestHolder.peek() }
+    val imageUri = request?.first.orEmpty()
+    val displayName = request?.second.orEmpty()
+
+    var loadFailed by remember { mutableStateOf(false) }
 
     // ---- Load the working bitmap (the pristine source, capped at 4096px) ----
     val bitmap by produceState<Bitmap?>(initialValue = null, imageUri) {
+        if (imageUri.isEmpty()) return@produceState
         value = withContext(Dispatchers.IO) {
             runCatching {
                 val data: Any = if (imageUri.startsWith("/"))
@@ -124,6 +151,7 @@ fun ImageEditorScreen(
                 null
             }
         }
+        if (value == null) loadFailed = true
     }
 
     // The saved crop (if any) restores the previous rectangle — fractions
@@ -137,19 +165,7 @@ fun ImageEditorScreen(
     }
 
     // ---- Aspect presets (incl. the PHONE's own aspect ratio) ----
-    val metrics = context.resources.displayMetrics
-    val phoneRatio = metrics.widthPixels.toFloat() / metrics.heightPixels
-    val presets = remember(phoneRatio) {
-        listOf(
-            "Free" to null,
-            "Phone" to phoneRatio,
-            "1:1" to 1f,
-            "4:3" to 4f / 3f,
-            "3:4" to 3f / 4f,
-            "16:9" to 16f / 9f,
-            "9:16" to 9f / 16f,
-        )
-    }
+    val presets = remember { cropPresets(context) }
     var activePreset by remember { mutableStateOf(0) } // Free by default
     val lockRatio = presets[activePreset].second
 
@@ -169,138 +185,56 @@ fun ImageEditorScreen(
                 .padding(padding),
         ) {
             val bmp = bitmap
-            if (bmp == null) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    CircularProgressIndicator()
+            when {
+                bmp != null -> Unit // fall through to the crop surface
+                loadFailed || imageUri.isEmpty() -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                    ) {
+                        Icon(
+                            Icons.Filled.BrokenImage,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            if (imageUri.isEmpty()) "Nothing to edit — open an image and choose Edit."
+                            else "Couldn\'t load this image.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                    return@Column
                 }
-                return@Column
+                else -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentAlignment = Alignment.Center,
+                    ) { CircularProgressIndicator() }
+                    return@Column
+                }
             }
 
-            // ---- Crop surface: the image fit-centered at its exact
-            // aspect (dispW x dispH), so fractions map linearly. The drag
-            // handler lives HERE (not in the overlay) so every step reads
-            // the live `rect` state — a lambda capturing a plain val would
-            // keep dragging a STALE rectangle. ----
-            BoxWithConstraints(
+            // ---- Crop surface (shared with BitmapCropDialog) ----
+            CropSurface(
+                bmp = bmp,
+                rect = rect,
+                lockRatio = lockRatio,
+                onRectChange = { rect = it },
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
                     .padding(8.dp),
-            ) {
-                val availW = maxWidth - 16.dp
-                val availH = maxHeight - 16.dp
-                val scale = minOf(
-                    availW.value / bmp.width,
-                    availH.value / bmp.height,
-                ).coerceAtLeast(0.01f)
-                val dispW = (bmp.width * scale).dp
-                val dispH = (bmp.height * scale).dp
+            )
 
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .size(dispW, dispH)
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(Color(0xFF101014))
-                        .pointerInput(lockRatio, dispW, dispH) {
-                            val minPx = 36.dp.toPx()
-                            val cornerPx = 28.dp.toPx()
-                            val edgePx = 22.dp.toPx()
-                            var active = CropHandle.NONE
-                            detectDragGestures(
-                                onDragStart = { offset ->
-                                    val r = Rect(
-                                        rect.left * dispW.value,
-                                        rect.top * dispH.value,
-                                        rect.right * dispW.value,
-                                        rect.bottom * dispH.value,
-                                    )
-                                    active = hitTest(offset, r, cornerPx, edgePx)
-                                },
-                                onDrag = { change, drag ->
-                                    change.consume()
-                                    if (active == CropHandle.NONE) return@detectDragGestures
-                                    val r = Rect(
-                                        rect.left * dispW.value,
-                                        rect.top * dispH.value,
-                                        rect.right * dispW.value,
-                                        rect.bottom * dispH.value,
-                                    )
-                                    val px = dragRect(
-                                        handle = active,
-                                        drag = drag,
-                                        r = r,
-                                        dispW = dispW.value,
-                                        dispH = dispH.value,
-                                        ratio = lockRatio,
-                                        minPx = minPx,
-                                    )
-                                    rect = Rect(
-                                        (px.left / dispW.value).coerceIn(0f, 1f),
-                                        (px.top / dispH.value).coerceIn(0f, 1f),
-                                        (px.right / dispW.value).coerceIn(0f, 1f),
-                                        (px.bottom / dispH.value).coerceIn(0f, 1f),
-                                    )
-                                },
-                                onDragEnd = { active = CropHandle.NONE },
-                                onDragCancel = { active = CropHandle.NONE },
-                            )
-                        },
-                ) {
-                    Image(
-                        bitmap = bmp.asImageBitmap(),
-                        contentDescription = displayName,
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                    // Draw-only overlay: dim + border + handles + thirds.
-                    Canvas(modifier = Modifier.fillMaxSize()) {
-                        val r = Rect(
-                            rect.left * size.width,
-                            rect.top * size.height,
-                            rect.right * size.width,
-                            rect.bottom * size.height,
-                        )
-                        val dim = Color.Black.copy(alpha = 0.55f)
-                        drawRect(dim, topLeft = Offset.Zero,
-                            size = Size(size.width, r.top))
-                        drawRect(dim, topLeft = Offset(0f, r.bottom),
-                            size = Size(size.width, size.height - r.bottom))
-                        drawRect(dim, topLeft = Offset(0f, r.top),
-                            size = Size(r.left, r.height))
-                        drawRect(dim, topLeft = Offset(r.right, r.top),
-                            size = Size(size.width - r.right, r.height))
-                        val third = Color.White.copy(alpha = 0.28f)
-                        for (i in 1..2) {
-                            val x = r.left + (r.right - r.left) * i / 3f
-                            val y = r.top + (r.bottom - r.top) * i / 3f
-                            drawLine(third, Offset(x, r.top), Offset(x, r.bottom), 1.dp.toPx())
-                            drawLine(third, Offset(r.left, y), Offset(r.right, y), 1.dp.toPx())
-                        }
-                        drawRect(
-                            Color.White,
-                            topLeft = Offset(r.left, r.top),
-                            size = Size(r.width, r.height),
-                            style = Stroke(width = 2.dp.toPx()),
-                        )
-                        val arm = 18.dp.toPx()
-                        val thick = 3.dp.toPx()
-                        fun mark(cx: Float, cy: Float, dx: Float, dy: Float) {
-                            drawLine(Color.White, Offset(cx, cy), Offset(cx + dx * arm, cy), thick)
-                            drawLine(Color.White, Offset(cx, cy), Offset(cx, cy + dy * arm), thick)
-                        }
-                        mark(r.left, r.top, 1f, 1f)
-                        mark(r.right, r.top, -1f, 1f)
-                        mark(r.left, r.bottom, 1f, -1f)
-                        mark(r.right, r.bottom, -1f, -1f)
-                    }
-                }
-            }
 
             // ---- Preset chips ----
             Row(
@@ -388,6 +322,257 @@ fun ImageEditorScreen(
                     Icon(Icons.Filled.Check, contentDescription = null)
                     Spacer(Modifier.width(6.dp))
                     Text(if (saving) "Saving…" else "Save crop")
+                }
+            }
+        }
+    }
+}
+
+// ── Shared crop pieces ────────────────────────────────────────────────────
+
+/** The preset aspect list — Free + this display's own ratio + classics. */
+fun cropPresets(context: android.content.Context): List<Pair<String, Float?>> {
+    val m = context.resources.displayMetrics
+    return listOf(
+        "Free" to null,
+        "Phone" to (m.widthPixels.toFloat() / m.heightPixels),
+        "1:1" to 1f,
+        "4:3" to 4f / 3f,
+        "3:4" to 3f / 4f,
+        "16:9" to 16f / 9f,
+        "9:16" to 9f / 16f,
+    )
+}
+
+/**
+ * The crop surface used by BOTH the folder-image editor and the Discover
+ * "crop before setting" dialog: the image fit-centered at its exact aspect
+ * (dispW x dispH) so crop fractions map linearly, with the drag handler
+ * reading the LIVE rect state (a lambda capturing a plain val would keep
+ * dragging a STALE rectangle) and a draw-only overlay (dim + border +
+ * handles + thirds).
+ */
+@Composable
+private fun CropSurface(
+    bmp: Bitmap,
+    rect: Rect,
+    lockRatio: Float?,
+    onRectChange: (Rect) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    BoxWithConstraints(modifier = modifier) {
+        val availW = maxWidth - 16.dp
+        val availH = maxHeight - 16.dp
+        val scale = minOf(
+            availW.value / bmp.width,
+            availH.value / bmp.height,
+        ).coerceAtLeast(0.01f)
+        val dispW = (bmp.width * scale).dp
+        val dispH = (bmp.height * scale).dp
+
+        Box(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .size(dispW, dispH)
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color(0xFF101014))
+                .pointerInput(lockRatio, dispW, dispH) {
+                    val minPx = 36.dp.toPx()
+                    val cornerPx = 28.dp.toPx()
+                    val edgePx = 22.dp.toPx()
+                    var active = CropHandle.NONE
+                    detectDragGestures(
+                        onDragStart = { offset ->
+                            val r = Rect(
+                                rect.left * dispW.value,
+                                rect.top * dispH.value,
+                                rect.right * dispW.value,
+                                rect.bottom * dispH.value,
+                            )
+                            active = hitTest(offset, r, cornerPx, edgePx)
+                        },
+                        onDrag = { change, drag ->
+                            change.consume()
+                            if (active == CropHandle.NONE) return@detectDragGestures
+                            val r = Rect(
+                                rect.left * dispW.value,
+                                rect.top * dispH.value,
+                                rect.right * dispW.value,
+                                rect.bottom * dispH.value,
+                            )
+                            val px = dragRect(
+                                handle = active,
+                                drag = drag,
+                                r = r,
+                                dispW = dispW.value,
+                                dispH = dispH.value,
+                                ratio = lockRatio,
+                                minPx = minPx,
+                            )
+                            onRectChange(
+                                Rect(
+                                    (px.left / dispW.value).coerceIn(0f, 1f),
+                                    (px.top / dispH.value).coerceIn(0f, 1f),
+                                    (px.right / dispW.value).coerceIn(0f, 1f),
+                                    (px.bottom / dispH.value).coerceIn(0f, 1f),
+                                )
+                            )
+                        },
+                        onDragEnd = { active = CropHandle.NONE },
+                        onDragCancel = { active = CropHandle.NONE },
+                    )
+                },
+        ) {
+            Image(
+                bitmap = bmp.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
+            // Draw-only overlay: dim + border + handles + thirds.
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val r = Rect(
+                    rect.left * size.width,
+                    rect.top * size.height,
+                    rect.right * size.width,
+                    rect.bottom * size.height,
+                )
+                val dim = Color.Black.copy(alpha = 0.55f)
+                drawRect(dim, topLeft = Offset.Zero,
+                    size = Size(size.width, r.top))
+                drawRect(dim, topLeft = Offset(0f, r.bottom),
+                    size = Size(size.width, size.height - r.bottom))
+                drawRect(dim, topLeft = Offset(0f, r.top),
+                    size = Size(r.left, r.height))
+                drawRect(dim, topLeft = Offset(r.right, r.top),
+                    size = Size(size.width - r.right, r.height))
+                val third = Color.White.copy(alpha = 0.28f)
+                for (i in 1..2) {
+                    val x = r.left + (r.right - r.left) * i / 3f
+                    val y = r.top + (r.bottom - r.top) * i / 3f
+                    drawLine(third, Offset(x, r.top), Offset(x, r.bottom), 1.dp.toPx())
+                    drawLine(third, Offset(r.left, y), Offset(r.right, y), 1.dp.toPx())
+                }
+                drawRect(
+                    Color.White,
+                    topLeft = Offset(r.left, r.top),
+                    size = Size(r.width, r.height),
+                    style = Stroke(width = 2.dp.toPx()),
+                )
+                val arm = 18.dp.toPx()
+                val thick = 3.dp.toPx()
+                fun mark(cx: Float, cy: Float, dx: Float, dy: Float) {
+                    drawLine(Color.White, Offset(cx, cy), Offset(cx + dx * arm, cy), thick)
+                    drawLine(Color.White, Offset(cx, cy), Offset(cx, cy + dy * arm), thick)
+                }
+                mark(r.left, r.top, 1f, 1f)
+                mark(r.right, r.top, -1f, 1f)
+                mark(r.left, r.bottom, 1f, -1f)
+                mark(r.right, r.bottom, -1f, -1f)
+            }
+        }
+    }
+}
+
+/**
+ * v0.8.17: the Discover "crop before setting" dialog — "you should also
+ * have the option to crop it from there if you push set as wallpaper".
+ * An in-memory bitmap (no file round-trip), the same handles/presets as
+ * the editor, and a Crop & set action that hands the CROPPED bitmap back
+ * to the caller to apply.
+ */
+@Composable
+fun BitmapCropDialog(
+    bitmap: Bitmap,
+    onDismiss: () -> Unit,
+    onApply: (Bitmap) -> Unit,
+) {
+    val context = LocalContext.current
+    var rect by remember { mutableStateOf(Rect(0f, 0f, 1f, 1f)) }
+    val presets = remember { cropPresets(context) }
+    var activePreset by remember { mutableStateOf(0) }
+    val lockRatio = presets[activePreset].second
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xF2101014))
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .padding(horizontal = 12.dp),
+        ) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Crop before setting",
+                style = MaterialTheme.typography.titleMedium,
+                color = Color.White,
+            )
+            CropSurface(
+                bmp = bitmap,
+                rect = rect,
+                lockRatio = lockRatio,
+                onRectChange = { rect = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .padding(8.dp),
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                presets.forEachIndexed { index, (label, _) ->
+                    FilterChip(
+                        selected = activePreset == index,
+                        onClick = {
+                            activePreset = index
+                            rect = fitPresetRect(rect, presets[index].second)
+                        },
+                        label = { Text(label) },
+                    )
+                }
+            }
+            Text(
+                "Drag the corners to resize — drag inside to move." +
+                    if (lockRatio != null) " Ratio locked." else "",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White.copy(alpha = 0.7f),
+                modifier = Modifier.padding(vertical = 4.dp),
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                TextButton(onClick = onDismiss, modifier = Modifier.weight(1f)) {
+                    Text("Cancel")
+                }
+                Button(
+                    onClick = {
+                        val l = (rect.left * bitmap.width).roundToInt()
+                            .coerceIn(0, bitmap.width - 2)
+                        val t = (rect.top * bitmap.height).roundToInt()
+                            .coerceIn(0, bitmap.height - 2)
+                        val r = (rect.right * bitmap.width).roundToInt()
+                            .coerceIn(l + 1, bitmap.width)
+                        val b = (rect.bottom * bitmap.height).roundToInt()
+                            .coerceIn(t + 1, bitmap.height)
+                        if (r - l >= 8 && b - t >= 8) {
+                            onApply(Bitmap.createBitmap(bitmap, l, t, r - l, b - t))
+                        }
+                    },
+                    modifier = Modifier.weight(1.5f),
+                ) {
+                    Icon(Icons.Filled.Check, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Crop & set")
                 }
             }
         }
