@@ -15,6 +15,14 @@
 # EMPTY objects: every completed-download history entry lost its metadata on
 # app restart. Keep the whole package.
 -keep class com.wepwawet.data.** { *; }
+# v0.8.14 (v15 regression, "this playlist no longer exists"): the suite
+# playlist store serializes Playlist/Entry/TimeRule/StoreFile through Gson.
+# Their package had NO keep rule, so R8 mangled the reflective fields in
+# release builds: create() wrote a store file the editor could never read
+# back — SuitePlaylistStore.read(id) returned null right after creation and
+# the editor dead-ended on "This playlist no longer exists." Same failure
+# class as v0.7.24; same fix: keep the whole package.
+-keep class com.wepwawet.playlist.** { *; }
 -keep class com.google.gson.** { *; }
 -keepattributes Signature
 -keepattributes *Annotation*

@@ -609,8 +609,8 @@ android {
         // last-open filter restored on start; deterministic tile-size
         // columns; "+" adds images to the open folder; workshop filter-tag
         // pruning; tighter search↔filter spacing.
-        versionCode = 131
-        versionName = "0.8.13-alpha"
+        versionCode = 132
+        versionName = "0.8.14-alpha"
         // Native ABI filter — only build for arm64-v8a (WE app targets Snapdragon 8 Gen 2+)
         ndk {
             abiFilters += "arm64-v8a"

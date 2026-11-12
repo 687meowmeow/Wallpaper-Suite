@@ -1,6 +1,7 @@
 package com.wepwawet.ui.screens
 
 import android.graphics.Bitmap
+import android.graphics.drawable.BitmapDrawable
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -38,6 +39,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BrokenImage
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Label
@@ -92,6 +94,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.SubcomposeAsyncImage
+import coil.imageLoader
 import coil.request.ImageRequest
 import com.wepwawet.data.SteamApiService
 import com.wepwawet.data.WorkshopTagStore
@@ -203,6 +206,19 @@ fun LibraryScreen(
         mutableStateOf<Pair<ImageFolderAssets.SavedFolder, ImageFolderAssets.ImageEntry>?>(null)
     }
     var workingImage by remember { mutableStateOf(false) }
+    // v0.8.14: the folder image being renamed.
+    var renameImageTarget by remember { mutableStateOf<ImageFolderAssets.ImageEntry?>(null) }
+
+    // v0.8.14: "Newest" = date ADDED TO THE APP. Workshop downloads take
+    // their true download-completion time from the download history; every
+    // other item falls back to the file date; folder images get their
+    // first-seen time (addedDatesImages, registered during reload).
+    var addedDatesDownloads by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
+    var addedDatesImages by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
+
+    /** The "added to the app" date of an engine-library wallpaper. */
+    fun addedDateOf(w: WallpaperInfoSparse): Long =
+        addedDatesDownloads[workshopItemIdOf(w.filePath)] ?: w.lastModifiedDate
 
     fun reload() {
         scope.launch {
@@ -213,6 +229,10 @@ fun LibraryScreen(
             pinned = LibraryPrefs.readPinned(context)
             groups = LibraryPrefs.readGroups(context)
             groupOf = LibraryPrefs.readGroupOf(context)
+            // True download-completion times (itemId → epoch millis) — the
+            // "added to the app" date for workshop wallpapers.
+            addedDatesDownloads = com.wepwawet.data.DownloadManager
+                .completedDownloads.value.associate { it.itemId to it.completedAt }
             folders = ImageFolderAssets.readFolders(context)
             workshopTags = WorkshopTagStore.readAll(context)
             allFolderImages = withContext(Dispatchers.IO) {
@@ -221,6 +241,10 @@ fun LibraryScreen(
                         .map { folder to it }
                 }
             }
+            // v0.8.14: register + fetch "added to the app" dates for the
+            // folder images (first-seen timestamps — see registerAddedDates).
+            addedDatesImages = ImageFolderAssets.registerAddedDates(
+                context, allFolderImages.map { it.second })
             WepWawetLogger.appInfo("LibraryScreen: folders enumerated",
                 "folders" to folders.size,
                 "images" to allFolderImages.size)
@@ -297,23 +321,52 @@ fun LibraryScreen(
             context, activeGroup, animatedActive, activeFolder, activeTags)
     }
 
-    /** Pack (or reuse) + import + apply a folder image. */
-    fun setFolderImageAsWallpaper(entry: ImageFolderAssets.ImageEntry) {
+    /**
+     * Set a folder image as the plain SYSTEM wallpaper.
+     *
+     * v0.8.14: the ONE set path for basic images ("basic images shouldnt
+     * use the wallpaper engine renderer — videos should"). The bitmap is
+     * fetched through COIL — the SAME loader that renders the grid
+     * thumbnails (GIF-aware, provider-robust) — because the previous
+     * manual BitmapFactory decode could fail silently on some
+     * providers/codecs, leaving the preview spinner forever and the Set
+     * button permanently disabled. The old pack-to-Scene-mpkg / WE
+     * renderer path is GONE for folder images.
+     */
+    fun setFolderImageAsSystemWallpaper(entry: ImageFolderAssets.ImageEntry) {
         if (workingImage) return
         workingImage = true
         scope.launch {
             try {
-                val result = withContext(Dispatchers.IO) {
-                    ImageFolderAssets.packAndImportImage(context, entry)
+                val ok = withContext(Dispatchers.IO) {
+                    val request = ImageRequest.Builder(context)
+                        .data(android.net.Uri.parse(entry.uri))
+                        .allowHardware(false) // the crop needs pixel access
+                        .size(2048)
+                        .build()
+                    val drawable = context.imageLoader.execute(request).drawable
+                        ?: return@withContext false
+                    val bmp = (drawable as? BitmapDrawable)?.bitmap
+                        ?: run {
+                            // Animated drawables (GIF): draw the current
+                            // frame into a software bitmap.
+                            val w = drawable.intrinsicWidth.coerceAtLeast(1)
+                            val h = drawable.intrinsicHeight.coerceAtLeast(1)
+                            Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also {
+                                val canvas = android.graphics.Canvas(it)
+                                drawable.setBounds(0, 0, w, h)
+                                drawable.draw(canvas)
+                            }
+                        }
+                    val crop = com.wepwawet.nyanpasu.NyanpasuApplier.cropForScreen(context, bmp)
+                    com.wepwawet.nyanpasu.NyanpasuApplier.apply(
+                        context, crop, homeOn = true, lockOn = true).ok
                 }
-                if (result != null) {
-                    WeEnginePrefs.callApplyWallpaper(context, result, false)
-                    snackbar.showSnackbar("Wallpaper set — \"${result.title}\"")
-                    WepWawetLogger.appInfo("LibraryScreen: folder image set",
-                        "file" to result.filePath)
-                } else {
-                    snackbar.showSnackbar("Failed to pack the image (see logs)")
-                }
+                snackbar.showSnackbar(
+                    if (ok) "Wallpaper set — \"${entry.displayName.substringBeforeLast('.')}\""
+                    else "Wallpaper write failed")
+                if (ok) WepWawetLogger.appInfo("LibraryScreen: folder image set (system)",
+                    "file" to entry.displayName)
             } finally {
                 workingImage = false
                 selectedImage = null
@@ -321,26 +374,36 @@ fun LibraryScreen(
         }
     }
 
-    /** Set a folder image as the plain SYSTEM wallpaper. */
-    fun setFolderImageAsSystemWallpaper(entry: ImageFolderAssets.ImageEntry) {
-        if (workingImage) return
-        workingImage = true
+    /**
+     * v0.8.14: rename a folder image in place (SAF renameDocument). The
+     * extension is preserved; the grid reloads with the new document uri.
+     */
+    fun renameFolderImage(entry: ImageFolderAssets.ImageEntry, rawName: String) {
+        val clean = rawName.trim().take(80)
+        if (clean.isEmpty()) return
+        val ext = entry.displayName.substringAfterLast('.', "").ifEmpty { "jpg" }
+        val target = if (clean.endsWith(".$ext")) clean else "$clean.$ext"
         scope.launch {
-            try {
-                val ok = withContext(Dispatchers.IO) {
-                    val bmp = ImageFolderAssets.decodeBitmapScaled(context, entry.uri, 4096)
-                        ?: return@withContext false
-                    val crop = com.wepwawet.nyanpasu.NyanpasuApplier.cropForScreen(context, bmp)
-                    val result = com.wepwawet.nyanpasu.NyanpasuApplier.apply(
-                        context, crop, homeOn = true, lockOn = true)
-                    result.ok
+            val ok = withContext(Dispatchers.IO) {
+                try {
+                    // renameDocument returns the NEW uri, or null when the
+                    // provider refuses (e.g. a file with that name exists).
+                    android.provider.DocumentsContract.renameDocument(
+                        context.contentResolver, android.net.Uri.parse(entry.uri), target) != null
+                } catch (t: Throwable) {
+                    WepWawetLogger.appWarn("LibraryScreen: rename image failed",
+                        "exception" to t.javaClass.name,
+                        "message" to (t.message ?: ""))
+                    false
                 }
-                snackbar.showSnackbar(
-                    if (ok) "System wallpaper set" else "System wallpaper write failed")
-            } finally {
-                workingImage = false
-                selectedImage = null
             }
+            if (ok) {
+                WepWawetLogger.appInfo("LibraryScreen: image renamed",
+                    "from" to entry.displayName, "to" to target)
+                selectedImage = null
+                reload()
+            }
+            snackbar.showSnackbar(if (ok) "Renamed to $target" else "Rename failed")
         }
     }
 
@@ -474,10 +537,13 @@ fun LibraryScreen(
         }
     }
 
-    val sortedWallpapers = remember(filteredWallpapers, sortMethod, pinned) {
+    val sortedWallpapers = remember(filteredWallpapers, sortMethod, pinned, addedDatesDownloads) {
         val sorted = when (sortMethod) {
-            SortMethod.NEWEST -> filteredWallpapers.sortedByDescending { it.lastModifiedDate }
-            SortMethod.OLDEST -> filteredWallpapers.sortedBy { it.lastModifiedDate }
+            // v0.8.14: Newest/Oldest = ADDED TO THE APP (download history
+            // timestamp, falling back to the file date) — not the file's
+            // own date.
+            SortMethod.NEWEST -> filteredWallpapers.sortedByDescending { addedDateOf(it) }
+            SortMethod.OLDEST -> filteredWallpapers.sortedBy { addedDateOf(it) }
             SortMethod.ALPHAASC -> filteredWallpapers.sortedBy {
                 it.title.lowercase(Locale.ROOT).ifEmpty { it.filePath.lowercase(Locale.ROOT) }
             }
@@ -500,13 +566,20 @@ fun LibraryScreen(
 
     // The merged grid: wallpapers (+ folder images in All, folder view: only
     // the folder's images, group/tag/animated view: wallpapers only).
-    val gridItems = remember(sortedWallpapers, visibleFolderImages, activeFolder, activeGroup, activeTags, animatedActive, pinned) {
+    val gridItems = remember(
+        sortedWallpapers, visibleFolderImages, activeFolder, activeGroup, activeTags,
+        animatedActive, pinned, addedDatesDownloads, addedDatesImages,
+    ) {
         val showImages = activeFolder != null ||
             (activeGroup == null && activeTags.isEmpty() && !animatedActive)
         if (!showImages) {
-            sortedWallpapers.map { LibraryItem.Wall(it) }
+            sortedWallpapers.map { LibraryItem.Wall(it, addedDateOf(it)) }
         } else {
-            val images = visibleFolderImages.map { LibraryItem.Img(it.first, it.second) }
+            val images = visibleFolderImages.map {
+                LibraryItem.Img(
+                    it.first, it.second,
+                    addedDatesImages[it.second.uri] ?: it.second.lastModified)
+            }
             if (activeFolder != null) {
                 // Folder view: only the folder's images.
                 images.sortedWith(libraryItemComparator(sortMethod))
@@ -514,9 +587,9 @@ fun LibraryScreen(
                 // All: merge wallpapers + folder images under one sort;
                 // pinned wallpapers keep floating above everything.
                 val pinnedWalls = sortedWallpapers.filter { it.filePath in pinned }
-                    .map { LibraryItem.Wall(it) }
+                    .map { LibraryItem.Wall(it, addedDateOf(it)) }
                 val rest = (sortedWallpapers.filter { it.filePath !in pinned }
-                    .map { LibraryItem.Wall(it) } + images)
+                    .map { LibraryItem.Wall(it, addedDateOf(it)) } + images)
                     .sortedWith(libraryItemComparator(sortMethod))
                 pinnedWalls + rest
             }
@@ -1256,11 +1329,28 @@ fun LibraryScreen(
     }
 
     // ===== Folder image fullscreen preview + set =====
+    // v0.8.14: COIL renders the preview (same loader as the grid tiles —
+    // it already works on this device, the manual decode didn't) and ONE
+    // "Set as wallpaper" button sets the plain system wallpaper. The old
+    // "System wallpaper" / "Set as wallpaper" (WE renderer) pair is gone —
+    // basic images never touch the renderer. Rename sits beside Close.
     selectedImage?.let { (folder, entry) ->
         var fullBitmap by remember(entry.uri) { mutableStateOf<Bitmap?>(null) }
+        var loadFailed by remember(entry.uri) { mutableStateOf(false) }
         LaunchedEffect(entry.uri) {
             fullBitmap = withContext(Dispatchers.IO) {
-                ImageFolderAssets.decodeBitmapScaled(context, entry.uri, 2048)
+                val request = ImageRequest.Builder(context)
+                    .data(android.net.Uri.parse(entry.uri))
+                    .allowHardware(false)
+                    .size(2048)
+                    .build()
+                val drawable = context.imageLoader.execute(request).drawable ?: return@withContext null
+                (drawable as? BitmapDrawable)?.bitmap
+            }
+            if (fullBitmap == null) {
+                loadFailed = true
+                WepWawetLogger.appWarn("LibraryScreen: fullscreen preview decode failed",
+                    "file" to entry.displayName)
             }
         }
         Dialog(
@@ -1283,15 +1373,19 @@ fun LibraryScreen(
                     contentAlignment = Alignment.Center,
                 ) {
                     val bmp = fullBitmap
-                    if (bmp != null) {
-                        androidx.compose.foundation.Image(
+                    when {
+                        bmp != null -> androidx.compose.foundation.Image(
                             bitmap = bmp.asImageBitmap(),
                             contentDescription = entry.displayName,
                             contentScale = ContentScale.Fit,
                             modifier = Modifier.fillMaxSize(),
                         )
-                    } else {
-                        CircularProgressIndicator()
+                        loadFailed -> Icon(
+                            Icons.Filled.BrokenImage,
+                            contentDescription = "Could not load image",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        else -> CircularProgressIndicator()
                     }
                 }
                 Spacer(Modifier.height(12.dp))
@@ -1302,31 +1396,73 @@ fun LibraryScreen(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Spacer(Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = { setFolderImageAsSystemWallpaper(entry) },
-                        enabled = !workingImage,
-                        modifier = Modifier.weight(1f),
-                    ) { Text("System wallpaper") }
-                    Button(
-                        onClick = { setFolderImageAsWallpaper(entry) },
-                        enabled = !workingImage && fullBitmap != null,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        if (workingImage) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                        } else {
-                            Icon(Icons.Filled.Wallpaper, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                        }
-                        Text("Set as wallpaper")
+                Button(
+                    onClick = { setFolderImageAsSystemWallpaper(entry) },
+                    enabled = !workingImage && fullBitmap != null,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    if (workingImage) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                    } else {
+                        Icon(Icons.Filled.Wallpaper, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
                     }
+                    Text("Set as wallpaper")
                 }
                 Spacer(Modifier.height(4.dp))
-                TextButton(onClick = { if (!workingImage) selectedImage = null }) { Text("Close") }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = { renameImageTarget = entry },
+                        enabled = !workingImage,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Icon(Icons.Filled.Edit, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Rename", maxLines = 1)
+                    }
+                    OutlinedButton(
+                        onClick = { if (!workingImage) selectedImage = null },
+                        enabled = !workingImage,
+                        modifier = Modifier.weight(1f),
+                    ) { Text("Close", maxLines = 1) }
+                }
             }
         }
+    }
+
+    // ===== v0.8.14: rename-image dialog =====
+    renameImageTarget?.let { target ->
+        var nameField by remember(target.uri) {
+            mutableStateOf(target.displayName.substringBeforeLast('.'))
+        }
+        AlertDialog(
+            onDismissRequest = { renameImageTarget = null },
+            title = { Text("Rename image") },
+            text = {
+                OutlinedTextField(
+                    value = nameField,
+                    onValueChange = { nameField = it.take(80) },
+                    singleLine = true,
+                    label = { Text("Image name") },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        renameFolderImage(target, nameField)
+                        renameImageTarget = null
+                    },
+                    enabled = nameField.isNotBlank(),
+                ) { Text("Rename") }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameImageTarget = null }) { Text("Cancel") }
+            },
+        )
     }
 }
 
@@ -1439,12 +1575,24 @@ private fun LibraryTagFilterSheet(
 // Grid item model — wallpapers AND folder images under ONE sort
 // ════════════════════════════════════════════════════════════════════
 
+/**
+ * v0.8.14: NEWEST/OLDEST sort by the "added to the app" date — when the
+ * item ENTERED this library (download completed / folder image first
+ * seen), NOT the file's own date ("in the wallpaper menu newest sorting
+ * should be the date added to the app not the date the image was
+ * created"). Workshop downloads seed from the download history's
+ * completion timestamps; folder images from the first-seen registry;
+ * everything else falls back to the file date.
+ */
 private sealed interface LibraryItem {
     val sortDate: Long
     val sortTitle: String
 
-    data class Wall(val w: WallpaperInfoSparse) : LibraryItem {
-        override val sortDate: Long get() = w.lastModifiedDate
+    data class Wall(
+        val w: WallpaperInfoSparse,
+        val addedAt: Long,
+    ) : LibraryItem {
+        override val sortDate: Long get() = addedAt
         override val sortTitle: String
             get() = w.title.ifEmpty { w.filePath.substringAfterLast('/') }
     }
@@ -1452,8 +1600,9 @@ private sealed interface LibraryItem {
     data class Img(
         val folder: ImageFolderAssets.SavedFolder,
         val entry: ImageFolderAssets.ImageEntry,
+        val addedAt: Long,
     ) : LibraryItem {
-        override val sortDate: Long get() = entry.lastModified
+        override val sortDate: Long get() = addedAt
         override val sortTitle: String get() = entry.displayName
     }
 }

@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material3.AlertDialog
@@ -44,6 +45,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -68,6 +70,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -134,6 +137,9 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var previewLockBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var previewingLock by remember { mutableStateOf(false) }
+    // v0.8.14: true when the preview shows a freshly refreshed image that
+    // has NOT been applied yet — Update then commits it as-is.
+    var previewIsFresh by remember { mutableStateOf(false) }
     var zoom by remember { mutableFloatStateOf(1f) }
     var panX by remember { mutableFloatStateOf(0f) }
     var panY by remember { mutableFloatStateOf(0f) }
@@ -206,104 +212,152 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
     // phone that is ~0.45, i.e. a preview nearly as TALL AS THE SCREEN.
     // The tools/save rows ended up below the fold and (with transformable
     // eating one-finger drags) effectively unreachable — "the discover tab
-    // just shows a wallpaper and that's it. no buttons." Cap the preview
-    // at 45% of the physical screen height; the image is Crop-scaled so it
-    // still fills the box at any height.
+    // just shows a wallpaper and that's it. no buttons."
+    // v0.8.14: 45% was still "too big and it clips through the buttons" —
+    // a pinch-zoomed image painted right across the controls below (the
+    // graphicsLayer zoom is not clipped). The cap drops to 32% AND the box
+    // now clips its own bounds, so a zoomed image can never bleed over the
+    // rest of the screen. The image is Crop-scaled so it still fills the
+    // box at any height.
     val maxPreviewHeightDp = with(androidx.compose.ui.platform.LocalDensity.current) {
-        (metrics.heightPixels * 0.45f).toDp()
+        (metrics.heightPixels * 0.32f).toDp()
     }
 
     fun persistTags() = NyanpasuPrefs.writeTags(context, strictTags, softTags)
 
     /**
-     * Fetch a fresh image (using the prefetch when fresh) and APPLY it —
-     * one tap, exactly like 1.0's Update button. Dual mode fetches a
-     * separate lock-screen image too. Afterwards the NEXT image is
-     * prefetched in the background.
+     * v0.8.14: REFRESH — fetch a fresh image into the preview WITHOUT
+     * applying it (the browse flow the user asked for: "there is no refresh
+     * button"). Update/Set then commits the shown image.
      */
-    fun updateWallpaper() {
+    fun refreshPreview() {
         if (fetching || applying) return
         fetching = true
         statusLine = "Searching…"
-        WepWawetLogger.appInfo("DiscoverScreen: update start",
+        WepWawetLogger.appInfo("DiscoverScreen: refresh start (preview only)",
             "home_state" to homeState,
             "lock_state" to lockState,
             "dual" to NyanpasuPrefs.isDualMode(homeState, lockState))
         scope.launch {
             try {
-                val maxDim = NyanpasuApplier.maxDecodeDimension(context)
-                var url: String? = null
-                var bytes: ByteArray? = null
-                if (NyanpasuPrefs.isPrefetchFresh(context)) {
-                    val meta = NyanpasuPrefs.readPrefetchMeta(context)
-                    val cached = NyanpasuPrefs.prefetchFile(context).readBytes()
-                    if (meta != null && cached.size > 1024) {
-                        url = meta.first
-                        bytes = cached
-                        NyanpasuPrefs.clearPrefetch(context)
-                        WepWawetLogger.appInfo("DiscoverScreen: using prefetched image",
-                            "bytes" to cached.size,
-                            "age_ms" to (System.currentTimeMillis() - meta.second))
-                    }
-                }
-                if (bytes == null) {
-                    val fetched = withContext(Dispatchers.IO) {
-                        NyanpasuSearch.searchOne(
-                            context = context,
-                            strictTags = strictTags,
-                            softTags = softTags,
-                            styleValue = styleValue,
-                            r18Mode = r18Mode,
-                            recentUrls = NyanpasuPrefs.readRecentUrls(context),
-                        )
-                    }
-                    statusLine = "Downloading…"
-                    url = fetched
-                    bytes = withContext(Dispatchers.IO) { NyanpasuSearch.downloadImage(fetched) }
-                }
-                val imgBytes = bytes!!
-                NyanpasuPrefs.pushRecentUrl(context, url!!)
-                val bmp = withContext(Dispatchers.IO) { NyanpasuApplier.decode(imgBytes, maxDim) }
-                if (bmp == null) {
-                    statusLine = "Downloaded image failed to decode"
-                    WepWawetLogger.appWarn("DiscoverScreen: decode failed",
-                        "url" to url!!.take(100), "bytes" to imgBytes.size)
-                    return@launch
-                }
-                previewBitmap = bmp
-                zoom = 1f; panX = 0f; panY = 0f
-                previewingLock = false
+                fetchAndShow(
+                    homeState = homeState,
+                    lockState = lockState,
+                    strictTags = strictTags,
+                    softTags = softTags,
+                    styleValue = styleValue,
+                    r18Mode = r18Mode,
+                )
+                statusLine = "New image — press Set to apply"
+            } catch (e: NyanpasuSearch.NoImageException) {
+                statusLine = "No image found — try different tags"
+                WepWawetLogger.appWarn("DiscoverScreen: no image found",
+                    "message" to (e.message ?: ""))
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                statusLine = "Failed: ${e.message ?: e.javaClass.simpleName}"
+                WepWawetLogger.appWarn("DiscoverScreen: refresh failed",
+                    "exception" to e.javaClass.name,
+                    "message" to (e.message ?: ""))
+            } finally {
+                fetching = false
+            }
+        }
+    }
 
-                // Dual mode (pink/blue): a separate image for the lock screen.
-                var lockBmp: Bitmap? = null
-                if (NyanpasuPrefs.isDualMode(homeState, lockState)) {
-                    statusLine = "Matching a lock-screen image…"
-                    val lockUrl = withContext(Dispatchers.IO) {
-                        NyanpasuSearch.searchOne(
-                            context = context,
-                            strictTags = strictTags,
-                            softTags = softTags,
-                            styleValue = styleValue,
-                            r18Mode = r18Mode,
-                            recentUrls = NyanpasuPrefs.readRecentUrls(context) + url!!,
-                        )
-                    }
-                    val lockBytes = withContext(Dispatchers.IO) { NyanpasuSearch.downloadImage(lockUrl) }
-                    NyanpasuPrefs.pushRecentUrl(context, lockUrl)
-                    lockBmp = withContext(Dispatchers.IO) {
-                        NyanpasuApplier.decode(lockBytes, maxDim)
-                    }
-                    previewLockBitmap = lockBmp
-                    WepWawetLogger.appInfo("DiscoverScreen: lock image fetched",
-                        "url" to lockUrl.take(100),
-                        "dims" to (lockBmp?.let { "${it.width}x${it.height}" } ?: "null"))
-                } else {
-                    previewLockBitmap = null
-                }
+    /**
+     * Shared fetch: prefetch-aware image search → preview (plus the lock
+     * complement in dual mode). Sets [previewIsFresh]; applies NOTHING.
+     */
+    suspend fun fetchAndShow(
+        homeState: Int,
+        lockState: Int,
+        strictTags: List<String>,
+        softTags: List<String>,
+        styleValue: Int,
+        r18Mode: Int,
+    ) {
+        val maxDim = NyanpasuApplier.maxDecodeDimension(context)
+        var url: String? = null
+        var bytes: ByteArray? = null
+        if (NyanpasuPrefs.isPrefetchFresh(context)) {
+            val meta = NyanpasuPrefs.readPrefetchMeta(context)
+            val cached = NyanpasuPrefs.prefetchFile(context).readBytes()
+            if (meta != null && cached.size > 1024) {
+                url = meta.first
+                bytes = cached
+                NyanpasuPrefs.clearPrefetch(context)
+                WepWawetLogger.appInfo("DiscoverScreen: using prefetched image",
+                    "bytes" to cached.size,
+                    "age_ms" to (System.currentTimeMillis() - meta.second))
+            }
+        }
+        if (bytes == null) {
+            val fetched = withContext(Dispatchers.IO) {
+                NyanpasuSearch.searchOne(
+                    context = context,
+                    strictTags = strictTags,
+                    softTags = softTags,
+                    styleValue = styleValue,
+                    r18Mode = r18Mode,
+                    recentUrls = NyanpasuPrefs.readRecentUrls(context),
+                )
+            }
+            statusLine = "Downloading…"
+            url = fetched
+            bytes = withContext(Dispatchers.IO) { NyanpasuSearch.downloadImage(fetched) }
+        }
+        val imgBytes = bytes!!
+        NyanpasuPrefs.pushRecentUrl(context, url!!)
+        val bmp = withContext(Dispatchers.IO) { NyanpasuApplier.decode(imgBytes, maxDim) }
+        if (bmp == null) {
+            statusLine = "Downloaded image failed to decode"
+            WepWawetLogger.appWarn("DiscoverScreen: decode failed",
+                "url" to url!!.take(100), "bytes" to imgBytes.size)
+            return
+        }
+        previewBitmap = bmp
+        previewIsFresh = true
+        zoom = 1f; panX = 0f; panY = 0f
+        previewingLock = false
 
-                // Apply — one tap = new wallpaper on the selected screens.
-                applying = true
-                statusLine = "Applying…"
+        // Dual mode (pink/blue): a separate image for the lock screen.
+        if (NyanpasuPrefs.isDualMode(homeState, lockState)) {
+            statusLine = "Matching a lock-screen image…"
+            val lockUrl = withContext(Dispatchers.IO) {
+                NyanpasuSearch.searchOne(
+                    context = context,
+                    strictTags = strictTags,
+                    softTags = softTags,
+                    styleValue = styleValue,
+                    r18Mode = r18Mode,
+                    recentUrls = NyanpasuPrefs.readRecentUrls(context) + url!!,
+                )
+            }
+            val lockBytes = withContext(Dispatchers.IO) { NyanpasuSearch.downloadImage(lockUrl) }
+            NyanpasuPrefs.pushRecentUrl(context, lockUrl)
+            val lockBmp = withContext(Dispatchers.IO) {
+                NyanpasuApplier.decode(lockBytes, maxDim)
+            }
+            previewLockBitmap = lockBmp
+            WepWawetLogger.appInfo("DiscoverScreen: lock image fetched",
+                "url" to lockUrl.take(100),
+                "dims" to (lockBmp?.let { "${it.width}x${it.height}" } ?: "null"))
+        } else {
+            previewLockBitmap = null
+        }
+    }
+
+    /** Applies the shown preview to the selected screens + history. */
+    fun applyShown() {
+        val bmp = previewBitmap ?: return
+        applying = true
+        statusLine = "Applying…"
+        scope.launch {
+            try {
+                val lockBmp = if (NyanpasuPrefs.isDualMode(homeState, lockState))
+                    previewLockBitmap else null
                 val homeCrop = withContext(Dispatchers.IO) {
                     NyanpasuApplier.cropForScreen(context, bmp)
                 }
@@ -315,6 +369,76 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                 if (result.ok) {
                     NyanpasuApplier.pushHistory(context, homeCrop)
                     history = NyanpasuApplier.readHistory(context)
+                    previewIsFresh = false
+                    statusLine = "Wallpaper updated"
+                    snackbar.showSnackbar("Wallpaper updated")
+                    WepWawetLogger.appInfo("DiscoverScreen: applied",
+                        "home_state" to homeState,
+                        "lock_state" to lockState,
+                        "separate_lock" to (lockCrop != null))
+                } else {
+                    statusLine = "Wallpaper write failed (home=${result.homeOk}, lock=${result.lockOk})"
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                statusLine = "Failed: ${e.message ?: e.javaClass.simpleName}"
+                WepWawetLogger.appWarn("DiscoverScreen: apply failed",
+                    "exception" to e.javaClass.name,
+                    "message" to (e.message ?: ""))
+            } finally {
+                applying = false
+            }
+        }
+    }
+
+    /**
+     * Update (1.0's btnUpdate): fetch + apply in one tap. v0.8.14: when the
+     * preview already holds a FRESH (refreshed, unapplied) image, Update
+     * commits THAT image instead of fetching yet another one.
+     */
+    fun updateWallpaper() {
+        if (fetching || applying) return
+        if (previewBitmap != null && previewIsFresh) {
+            applyShown()
+            return
+        }
+        fetching = true
+        statusLine = "Searching…"
+        WepWawetLogger.appInfo("DiscoverScreen: update start",
+            "home_state" to homeState,
+            "lock_state" to lockState,
+            "dual" to NyanpasuPrefs.isDualMode(homeState, lockState))
+        scope.launch {
+            try {
+                fetchAndShow(
+                    homeState = homeState,
+                    lockState = lockState,
+                    strictTags = strictTags,
+                    softTags = softTags,
+                    styleValue = styleValue,
+                    r18Mode = r18Mode,
+                )
+                val bmp = previewBitmap
+                if (bmp == null || !previewIsFresh) return@launch
+
+                // Apply — one tap = new wallpaper on the selected screens.
+                applying = true
+                statusLine = "Applying…"
+                val lockBmp = if (NyanpasuPrefs.isDualMode(homeState, lockState))
+                    previewLockBitmap else null
+                val homeCrop = withContext(Dispatchers.IO) {
+                    NyanpasuApplier.cropForScreen(context, bmp)
+                }
+                val lockCrop = lockBmp?.let {
+                    withContext(Dispatchers.IO) { NyanpasuApplier.cropForScreen(context, it) }
+                }
+                val result = NyanpasuApplier.applyScreens(
+                    context, homeCrop, homeState, lockState, lockCrop)
+                if (result.ok) {
+                    NyanpasuApplier.pushHistory(context, homeCrop)
+                    history = NyanpasuApplier.readHistory(context)
+                    previewIsFresh = false
                     statusLine = "Wallpaper updated"
                     snackbar.showSnackbar("Wallpaper updated")
                     WepWawetLogger.appInfo("DiscoverScreen: applied",
@@ -395,6 +519,7 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                     runCatching { entry.file.delete() }
                     history = NyanpasuApplier.readHistory(context)
                     previewBitmap = bmp
+                    previewIsFresh = false
                     zoom = 1f; panX = 0f; panY = 0f
                     statusLine = "Previous wallpaper restored"
                     snackbar.showSnackbar("Previous wallpaper restored")
@@ -535,11 +660,15 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
             // detector anymore, so it falls through to this Column's
             // verticalScroll and the whole page scrolls normally. Pan is
             // only claimed once the user is actually zoomed in.
+            // v0.8.14: clipToBounds — a zoomed/panned image used to paint
+            // right across the controls below ("clips through the buttons");
+            // now the box clips its own bounds.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(max = maxPreviewHeightDp)
                     .aspectRatio(screenAspect.coerceIn(0.4f, 1f))
+                    .clipToBounds()
                     .transformable(
                         state = transformState,
                         canPan = { zoom > 1.001f },
@@ -557,6 +686,31 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                             .fillMaxSize()
                             .graphicsLayerZoom(zoom, panX, panY),
                     )
+                    // v0.8.14: Refresh — fetch a new image into the preview
+                    // WITHOUT applying it (browse, then Set the one you like).
+                    IconButton(
+                        onClick = { refreshPreview() },
+                        enabled = !fetching && !applying,
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(6.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color.Black.copy(alpha = 0.55f)),
+                    ) {
+                        if (fetching) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = Color.White,
+                            )
+                        } else {
+                            Icon(
+                                Icons.Filled.Refresh,
+                                contentDescription = "Refresh preview",
+                                tint = Color.White,
+                            )
+                        }
+                    }
                     // Dual-mode preview switch (tap the label).
                     if (NyanpasuPrefs.isDualMode(homeState, lockState) &&
                         previewLockBitmap != null
@@ -646,6 +800,9 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                 Text(when {
                     fetching -> statusLine ?: "Working…"
                     applying -> "Applying…"
+                    // v0.8.14: a fresh (refreshed, unapplied) preview is
+                    // committed by this button rather than replaced.
+                    previewIsFresh -> "Set this wallpaper"
                     else -> "Update wallpaper"
                 })
             }
@@ -838,6 +995,7 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                                             context, crop, homeState, lockState, null)
                                         if (result.ok) {
                                             previewBitmap = bmp
+                                            previewIsFresh = false
                                             zoom = 1f; panX = 0f; panY = 0f
                                             statusLine = "Restored"
                                             snackbar.showSnackbar("Restored")

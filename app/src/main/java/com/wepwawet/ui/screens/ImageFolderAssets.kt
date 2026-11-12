@@ -15,10 +15,11 @@ import java.io.File
  * Folders tab was folded INTO the main wallpaper page).
  *
  * The user picks any device folder (SAF); its images appear in the
- * library grid under their own filter chip. Tapping one packs it into a
- * Scene .mpkg through the SAME packer used for image-type workshop
- * downloads ([com.wepwawet.pairing.MpkgPacker.packSceneWallpaper]) and
- * applies it through the standard flow.
+ * library grid under their own filter chip. v0.8.14: tapping one opens a
+ * fullscreen preview and "Set as wallpaper" writes it as the plain SYSTEM
+ * wallpaper (crop + WallpaperManager.setBitmap) — basic images never go
+ * through the Wallpaper Engine renderer ("videos should though", and
+ * video imports still do). Images can also be renamed in place via SAF.
  *
  * Multiple folders are supported — each is persisted as a tree URI with
  * a persistable read grant.
@@ -39,6 +40,8 @@ object ImageFolderAssets {
     private const val PREFS = "wallpapersuite_image_folders"
     private const val KEY_FOLDERS = "folder_uris"
     private const val KEY_IMPORTS = "imported_images"
+    // v0.8.14: first-seen registry — "date ADDED TO THE APP" per image.
+    private const val KEY_ADDED_PREFIX = "added|"
     // Legacy single-folder key (v0.8.9/v0.8.10) — migrated on first read.
     private const val KEY_LEGACY_FOLDER = "folder_uri"
 
@@ -325,6 +328,43 @@ object ImageFolderAssets {
             context.contentResolver.takePersistableUriPermission(
                 uri, android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         }
+    }
+
+    // ── First-seen registry ("date added to the app") ─────────────────
+
+    /**
+     * v0.8.14: "Newest" on the Wallpapers page sorts by when an item was
+     * ADDED TO THE APP, not by the image file's own date ("right now all
+     * the folder images are at the top of All"). For a folder image that
+     * added-date is the first time our scanner saw its document uri:
+     * every entry of [entries] missing from the registry is registered
+     * with NOW, and the full uri→addedAt map is returned. Images that
+     * were already known keep their original first-seen time, so the
+     * one-time registration on update does not reshuffle them later.
+     */
+    fun registerAddedDates(context: Context, entries: List<ImageEntry>): Map<String, Long> {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        val map = HashMap<String, Long>(entries.size)
+        var registered = 0
+        val editor by lazy { prefs.edit() }
+        for (entry in entries) {
+            val key = KEY_ADDED_PREFIX + entry.uri
+            val existing = prefs.getLong(key, -1L)
+            if (existing > 0L) {
+                map[entry.uri] = existing
+            } else {
+                map[entry.uri] = now
+                editor.putLong(key, now)
+                registered++
+            }
+        }
+        if (registered > 0) {
+            editor.apply()
+            WepWawetLogger.appInfo("ImageFolderAssets: added-dates registered",
+                "new" to registered)
+        }
+        return map
     }
 
     // ── Pack + import ────────────────────────────────────────────────

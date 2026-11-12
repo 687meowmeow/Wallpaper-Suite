@@ -4,6 +4,8 @@ import android.content.Context
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.wepwawet.log.WepWawetLogger
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.util.UUID
 
@@ -100,17 +102,110 @@ object SuitePlaylistStore {
         return try {
             val f = file(context)
             if (!f.isFile) return StoreFile()
-            val raw = gson.fromJson<StoreFileRaw>(f.readText(), storeRawType) ?: return StoreFile()
-            StoreFile(
-                playlists = raw.playlists ?: ArrayList(),
-                activePlaylistId = raw.activePlaylistId ?: "",
-            )
+            val text = f.readText()
+            val raw = gson.fromJson<StoreFileRaw>(text, storeRawType)
+            if (raw?.playlists != null) {
+                // Named-field JSON (every build with the v0.8.14 keep rule).
+                // Sanitize entry-by-entry: a hand-edited or half-corrupt file
+                // can leave Gson nulls inside a non-null Kotlin type, and a
+                // null name/id would crash the UI further up.
+                val clean = raw.playlists.mapNotNull { it.sanitized() }.toMutableList()
+                StoreFile(playlists = clean, activePlaylistId = raw.activePlaylistId ?: "")
+            } else {
+                // v0.8.11–v0.8.13 release builds: R8 renamed every field of
+                // every Gson-serialized class here (no keep rule covered this
+                // package), so Gson sees NO fields and the parse comes back
+                // empty even though the file holds the user's playlists.
+                // Those builds wrote obfuscated keys in declaration order
+                // (Playlist a=id b=name c=orderMode d=intervalMinutes
+                // e=entries f=timeRules; StoreFile a=playlists
+                // b=activePlaylistId) — recover them instead of silently
+                // resetting the store.
+                migrateR8Obfuscated(text) ?: StoreFile()
+            }
         } catch (e: Exception) {
             WepWawetLogger.appWarn("SuitePlaylistStore: read failed — resetting",
                 "exception" to e.javaClass.name)
             StoreFile()
         }
     }
+
+    /** Drops playlists with a null/blank id or name; fills safe defaults. */
+    private fun Playlist.sanitized(): Playlist? {
+        if (id.isNullOrBlank() || name == null) return null
+        return Playlist(
+            id = id,
+            name = name,
+            orderMode = orderMode ?: ORDER_RANDOM,
+            intervalMinutes = intervalMinutes,
+            entries = (entries ?: emptyList()).toMutableList(),
+            timeRules = (timeRules ?: emptyList()).toMutableList(),
+        )
+    }
+
+    /** Reads the v0.8.11–13 R8-obfuscated layout via [org.json]. */
+    private fun migrateR8Obfuscated(text: String): StoreFile? = try {
+        val root = JSONObject(text)
+        val arr = root.optJSONArray("playlists") ?: root.optJSONArray("a") ?: return null
+        val migrated = ArrayList<Playlist>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val id = o.optStringOrNull("id") ?: o.optStringOrNull("a") ?: continue
+            if (id.isBlank()) continue
+            migrated.add(Playlist(
+                id = id,
+                name = o.optStringOrNull("name") ?: o.optStringOrNull("b") ?: "Playlist",
+                orderMode = o.optStringOrNull("orderMode") ?: o.optStringOrNull("c") ?: ORDER_RANDOM,
+                intervalMinutes = o.optInt("intervalMinutes", o.optInt("d", 15)),
+                entries = readEntries(o.optJSONArray("entries") ?: o.optJSONArray("e")),
+                timeRules = readRules(o.optJSONArray("timeRules") ?: o.optJSONArray("f")),
+            ))
+        }
+        val active = root.optStringOrNull("activePlaylistId")
+            ?: root.optStringOrNull("b") ?: ""
+        if (migrated.isEmpty() && active.isBlank()) return null
+        WepWawetLogger.appInfo("SuitePlaylistStore: migrated legacy obfuscated store",
+            "playlists" to migrated.size)
+        StoreFile(playlists = migrated, activePlaylistId = active)
+    } catch (e: Exception) {
+        WepWawetLogger.appWarn("SuitePlaylistStore: legacy migration failed",
+            "exception" to e.javaClass.name)
+        null
+    }
+
+    private fun readEntries(arr: JSONArray?): MutableList<Entry> {
+        if (arr == null) return ArrayList()
+        val out = ArrayList<Entry>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            out.add(Entry(
+                filepath = o.optStringOrNull("filepath") ?: o.optStringOrNull("a") ?: continue,
+                title = o.optStringOrNull("title") ?: o.optStringOrNull("b") ?: "",
+                type = o.optStringOrNull("type") ?: o.optStringOrNull("c") ?: "",
+            ))
+        }
+        return out
+    }
+
+    private fun readRules(arr: JSONArray?): MutableList<TimeRule> {
+        if (arr == null) return ArrayList()
+        val out = ArrayList<TimeRule>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val paths = o.optJSONArray("entryFilePaths") ?: o.optJSONArray("c")
+            out.add(TimeRule(
+                startMinute = o.optInt("startMinute", o.optInt("a", 0)),
+                endMinute = o.optInt("endMinute", o.optInt("b", 0)),
+                entryFilePaths = ArrayList<String>().also { list ->
+                    paths?.let { for (j in 0 until it.length()) list.add(it.optString(j)) }
+                },
+            ))
+        }
+        return out
+    }
+
+    private fun JSONObject.optStringOrNull(key: String): String? =
+        if (has(key) && !isNull(key)) optString(key) else null
 
     @Synchronized
     private fun writeStore(context: Context, store: StoreFile) {
