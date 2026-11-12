@@ -144,33 +144,35 @@ object SuitePlaylistStore {
     }
 
     /** Reads the v0.8.11–13 R8-obfuscated layout via [org.json]. */
-    private fun migrateR8Obfuscated(text: String): StoreFile? = try {
-        val root = JSONObject(text)
-        val arr = root.optJSONArray("playlists") ?: root.optJSONArray("a") ?: return null
-        val migrated = ArrayList<Playlist>(arr.length())
-        for (i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
-            val id = o.optStringOrNull("id") ?: o.optStringOrNull("a") ?: continue
-            if (id.isBlank()) continue
-            migrated.add(Playlist(
-                id = id,
-                name = o.optStringOrNull("name") ?: o.optStringOrNull("b") ?: "Playlist",
-                orderMode = o.optStringOrNull("orderMode") ?: o.optStringOrNull("c") ?: ORDER_RANDOM,
-                intervalMinutes = o.optInt("intervalMinutes", o.optInt("d", 15)),
-                entries = readEntries(o.optJSONArray("entries") ?: o.optJSONArray("e")),
-                timeRules = readRules(o.optJSONArray("timeRules") ?: o.optJSONArray("f")),
-            ))
+    private fun migrateR8Obfuscated(text: String): StoreFile? {
+        return try {
+            val root = JSONObject(text)
+            val arr = root.optJSONArray("playlists") ?: root.optJSONArray("a") ?: return null
+            val migrated = ArrayList<Playlist>(arr.length())
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val id = o.optStringOrNull("id") ?: o.optStringOrNull("a") ?: continue
+                if (id.isBlank()) continue
+                migrated.add(Playlist(
+                    id = id,
+                    name = o.optStringOrNull("name") ?: o.optStringOrNull("b") ?: "Playlist",
+                    orderMode = o.optStringOrNull("orderMode") ?: o.optStringOrNull("c") ?: ORDER_RANDOM,
+                    intervalMinutes = o.optInt("intervalMinutes", o.optInt("d", 15)),
+                    entries = readEntries(o.optJSONArray("entries") ?: o.optJSONArray("e")),
+                    timeRules = readRules(o.optJSONArray("timeRules") ?: o.optJSONArray("f")),
+                ))
+            }
+            val active = root.optStringOrNull("activePlaylistId")
+                ?: root.optStringOrNull("b") ?: ""
+            if (migrated.isEmpty() && active.isBlank()) return null
+            WepWawetLogger.appInfo("SuitePlaylistStore: migrated legacy obfuscated store",
+                "playlists" to migrated.size)
+            StoreFile(playlists = migrated, activePlaylistId = active)
+        } catch (e: Exception) {
+            WepWawetLogger.appWarn("SuitePlaylistStore: legacy migration failed",
+                "exception" to e.javaClass.name)
+            null
         }
-        val active = root.optStringOrNull("activePlaylistId")
-            ?: root.optStringOrNull("b") ?: ""
-        if (migrated.isEmpty() && active.isBlank()) return null
-        WepWawetLogger.appInfo("SuitePlaylistStore: migrated legacy obfuscated store",
-            "playlists" to migrated.size)
-        StoreFile(playlists = migrated, activePlaylistId = active)
-    } catch (e: Exception) {
-        WepWawetLogger.appWarn("SuitePlaylistStore: legacy migration failed",
-            "exception" to e.javaClass.name)
-        null
     }
 
     private fun readEntries(arr: JSONArray?): MutableList<Entry> {
