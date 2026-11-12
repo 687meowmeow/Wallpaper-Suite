@@ -1803,7 +1803,7 @@ enum class LibraryTileSize(val label: String) {
 }
 
 /** Pinned-wallpaper + groups + tile-size + filter persistence. */
-private object LibraryPrefs {
+internal object LibraryPrefs {
     private const val PREFS = "wallpapersuite_library"
     private const val KEY_PINNED = "pinned_wallpapers"
 

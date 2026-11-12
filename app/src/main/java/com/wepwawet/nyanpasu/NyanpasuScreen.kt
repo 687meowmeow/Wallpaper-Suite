@@ -495,7 +495,6 @@ fun NyanpasuScreen(
                     history = NyanpasuApplier.readHistory(context)
                     previewBitmap = bmp
                     previewIsFresh = false
-                    zoom = 1f; panX = 0f; panY = 0f
                     statusLine = "Previous wallpaper restored"
                     snackbar.showSnackbar("Previous wallpaper restored")
                     WepWawetLogger.appInfo("DiscoverScreen: undone from history",
@@ -967,7 +966,6 @@ fun NyanpasuScreen(
                                         if (result.ok) {
                                             previewBitmap = bmp
                                             previewIsFresh = false
-                                            zoom = 1f; panX = 0f; panY = 0f
                                             statusLine = "Restored"
                                             snackbar.showSnackbar("Restored")
                                             WepWawetLogger.appInfo(

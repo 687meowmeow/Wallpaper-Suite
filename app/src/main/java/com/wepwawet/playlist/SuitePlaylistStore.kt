@@ -38,10 +38,13 @@ import java.util.UUID
 object SuitePlaylistStore {
 
     /** A wallpaper inside a playlist. [type] is "Scene"/"Video"/"" (informational). */
+    // v0.8.16: `var` — renameFilepathEverywhere re-points entries at a
+    // folder image's new crop file, and Gson rewrites fields by reflection
+    // (same rationale as the Playlist fields above).
     data class Entry(
-        val filepath: String,
-        val title: String,
-        val type: String,
+        var filepath: String,
+        var title: String,
+        var type: String,
     )
 
     /**
@@ -330,23 +333,31 @@ object SuitePlaylistStore {
         // activating a playlist used to do NOTHING visible — the notify
         // above is a no-op without a running service, and nothing changed
         // when the user went home either ("the buttons in the playlist
-        // menu dont update live"). Switch the wallpaper component to our
-        // engine: it boots, syncs the active playlist and rotates into it.
+        // menu dont update live"). Programmatic live-wallpaper switching
+        // (WallpaperManager.setWallpaperComponent) is NOT public API, so
+        // the supported path is the system's live-wallpaper confirm flow:
+        // ACTION_CHANGE_LIVE_WALLPAPER preselects OUR engine and the user
+        // confirms with one tap. The engine then boots, syncs the active
+        // playlist and rotates into it.
         if (id != null &&
             io.wallpaperengine.weclient.WEWallpaperService.instance == null
         ) {
             runCatching {
-                val wm = android.app.WallpaperManager.getInstance(context)
-                wm.setWallpaperComponent(
-                    android.content.ComponentName(
-                        context,
-                        io.wallpaperengine.weclient.WEWallpaperService::class.java))
+                val intent = android.content.Intent(
+                    android.app.WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER)
+                    .putExtra(
+                        android.app.WallpaperManager.EXTRA_LIVE_WALLPAPER_COMPONENT,
+                        android.content.ComponentName(
+                            context,
+                            io.wallpaperengine.weclient.WEWallpaperService::class.java))
+                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
                 WepWawetLogger.appInfo(
-                    "SuitePlaylistStore: activation switched the wallpaper " +
-                        "component to the engine")
+                    "SuitePlaylistStore: activation opened the live-wallpaper " +
+                        "confirm flow for the engine")
             }.onFailure {
                 WepWawetLogger.appWarn(
-                    "SuitePlaylistStore: could not switch the wallpaper component",
+                    "SuitePlaylistStore: could not open the live-wallpaper flow",
                     "exception" to it.javaClass.simpleName,
                     "message" to (it.message ?: ""))
             }

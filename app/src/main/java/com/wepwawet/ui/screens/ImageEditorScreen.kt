@@ -1,7 +1,7 @@
 package com.wepwawet.ui.screens
 
 import android.graphics.Bitmap
-import android.graphics.BitmapDrawable
+import android.graphics.drawable.BitmapDrawable
 import android.graphics.Canvas
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -267,10 +267,14 @@ fun ImageEditorScreen(
                             rect.bottom * size.height,
                         )
                         val dim = Color.Black.copy(alpha = 0.55f)
-                        drawRect(dim, Offset.Zero, Offset(size.width, r.top))
-                        drawRect(dim, Offset(0f, r.bottom), Offset(size.width, size.height))
-                        drawRect(dim, Offset(0f, r.top), Offset(r.left, r.bottom))
-                        drawRect(dim, Offset(r.right, r.top), Offset(size.width, r.bottom))
+                        drawRect(dim, topLeft = Offset.Zero,
+                            size = Size(size.width, r.top))
+                        drawRect(dim, topLeft = Offset(0f, r.bottom),
+                            size = Size(size.width, size.height - r.bottom))
+                        drawRect(dim, topLeft = Offset(0f, r.top),
+                            size = Size(r.left, r.height))
+                        drawRect(dim, topLeft = Offset(r.right, r.top),
+                            size = Size(size.width - r.right, r.height))
                         val third = Color.White.copy(alpha = 0.28f)
                         for (i in 1..2) {
                             val x = r.left + (r.right - r.left) * i / 3f
