@@ -262,8 +262,9 @@ fun WepWawetNavHost() {
 
         // v0.8.0: the library is the main page — the device's wallpaper
         // collection (engine-enumerated) + manual import. The Workshop /
-        // Discover entry points live in the bottom navigation bar; folders
-        // and tags live ON this page as filter chips (v0.8.11).
+        // Discover entry points live in the bottom navigation bar; folders,
+        // groups and workshop-tag filters live ON this page as chips
+        // (v0.8.12). The shared steamApi powers the workshop-tag back-fill.
         composable("library") {
             LibraryScreen(
                 onOpenSettings = { nav.navigate("settings") },
@@ -274,6 +275,7 @@ fun WepWawetNavHost() {
                     nav.navigate("preview")
                 },
                 onOpenPlaylists = { nav.navigate("playlists") },
+                steamApi = steamApi,
             )
         }
 

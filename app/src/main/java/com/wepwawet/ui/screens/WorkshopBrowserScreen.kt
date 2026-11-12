@@ -77,7 +77,9 @@ import com.wepwawet.data.SteamApiService
 import com.wepwawet.data.WorkshopRepository
 import com.wepwawet.data.model.WorkshopItemTyped
 import com.wepwawet.log.WepWawetLogger
+import com.wepwawet.ui.components.CompactSearchBar
 import com.wepwawet.ui.components.SlimTopBar
+import com.wepwawet.ui.components.SlimTopBarIcon
 import com.wepwawet.ui.components.TagPickerSheet
 import com.wepwawet.ui.components.TileSize
 import com.wepwawet.ui.components.WallpaperCard
@@ -675,74 +677,63 @@ fun WorkshopBrowserScreen(
 
     Scaffold(
         topBar = {
-            // v0.8.11: the SAME SlimTopBar every other screen uses — 56dp
-            // + status bar, surface background, default 24dp icons tinted
-            // onSurface (the user asked for the workshop top bar to match
-            // the other screens' size, icon size and icon color; the old
-            // custom TopAppBar rendered 22dp onSurfaceVariant icons).
+            // v0.8.11: the SAME SlimTopBar every other screen uses.
+            // v0.8.12: the "Workshop" TITLE is back (it had been removed
+            // with the old custom TopAppBar) and the actions use the
+            // shared 40dp SlimTopBarIcon so the whole app matches.
             // Left: back arrow (creator mode only). Right: Pairing,
             // Refresh, Downloads, Favorites, Settings.
             SlimTopBar(
-                title = "",
+                title = "Workshop",
                 onBack = onBack,
                 actions = {
                     // Pairing (Bluetooth) button — only visible while the
                     // pairing subsystem is enabled in Settings ("Send to
                     // phone" toggle).
                     if (pairingEnabled) {
-                        IconButton(onClick = {
-                            WepWawetLogger.workshop("topbar pairing tapped")
-                            onOpenPairing()
-                        }) {
-                            Icon(
-                                Icons.Filled.Bluetooth,
-                                contentDescription = "Pairing",
-                                tint = MaterialTheme.colorScheme.onSurface,
-                            )
-                        }
+                        SlimTopBarIcon(
+                            onClick = {
+                                WepWawetLogger.workshop("topbar pairing tapped")
+                                onOpenPairing()
+                            },
+                            contentDescription = "Pairing",
+                            icon = Icons.Filled.Bluetooth,
+                        )
                     }
                     // v0.7.1: Re-added Refresh button (user clarified they meant
                     // remove the PIN refresh button, not the browse refresh).
-                    IconButton(onClick = {
-                        WepWawetLogger.workshop("topbar refresh tapped")
-                        onRefresh()
-                    }) {
-                        Icon(
-                            Icons.Filled.Refresh,
-                            contentDescription = "Refresh",
-                            tint = MaterialTheme.colorScheme.onSurface,
-                        )
-                    }
-                    IconButton(onClick = {
-                        WepWawetLogger.workshop("topbar downloads tapped")
-                        onOpenDownloads()
-                    }) {
-                        Icon(
-                            Icons.Filled.Download,
-                            contentDescription = "Downloads",
-                            tint = MaterialTheme.colorScheme.onSurface,
-                        )
-                    }
-                    IconButton(onClick = {
-                        WepWawetLogger.workshop("topbar favorites tapped")
-                        onOpenFavorites()
-                    }) {
-                        Icon(
-                            Icons.Filled.Favorite,
-                            contentDescription = "Favorites",
-                            tint = MaterialTheme.colorScheme.onSurface,
-                        )
-                    }
-                    IconButton(onClick = {
-                        WepWawetLogger.workshop("topbar settings tapped")
-                        onOpenSettings()
-                    }) {
-                        Icon(
-                            Icons.Filled.Settings,
-                            contentDescription = "Settings",
-                            tint = MaterialTheme.colorScheme.onSurface,
-                        )
-                    }
+                    SlimTopBarIcon(
+                        onClick = {
+                            WepWawetLogger.workshop("topbar refresh tapped")
+                            onRefresh()
+                        },
+                        contentDescription = "Refresh",
+                        icon = Icons.Filled.Refresh,
+                    )
+                    SlimTopBarIcon(
+                        onClick = {
+                            WepWawetLogger.workshop("topbar downloads tapped")
+                            onOpenDownloads()
+                        },
+                        contentDescription = "Downloads",
+                        icon = Icons.Filled.Download,
+                    )
+                    SlimTopBarIcon(
+                        onClick = {
+                            WepWawetLogger.workshop("topbar favorites tapped")
+                            onOpenFavorites()
+                        },
+                        contentDescription = "Favorites",
+                        icon = Icons.Filled.Favorite,
+                    )
+                    SlimTopBarIcon(
+                        onClick = {
+                            WepWawetLogger.workshop("topbar settings tapped")
+                            onOpenSettings()
+                        },
+                        contentDescription = "Settings",
+                        icon = Icons.Filled.Settings,
+                    )
                     // v0.7.1: Removed logs icon per user request.
                 },
             )
@@ -788,34 +779,26 @@ fun WorkshopBrowserScreen(
             }
 
             // === Search bar (hidden in creator mode) ===
+            // v0.8.12: the shared compact 44dp search pill — the old
+            // OutlinedTextField was 56dp+ tall; space for the previews is
+            // the priority.
             if (!isCreatorMode) {
-                OutlinedTextField(
+                CompactSearchBar(
                     value = query,
                     onValueChange = { updateQuery(it) },
-                    placeholder = { Text("Search wallpapers…") },
-                    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                    placeholder = "Search wallpapers…",
+                    onImeSearch = {
+                        WepWawetLogger.workshop(
+                            "ime search action — startSearch",
+                            "query" to query.take(80),
+                        )
+                        // v0.8.5: appScope — see filter-change LaunchedEffect.
+                        if (query.isBlank()) com.wepwawet.WepWawetApplication.appScope.launch { repo.clearSearch() }
+                        else com.wepwawet.WepWawetApplication.appScope.launch { repo.startSearch(query) }
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
-                        // v0.8.11: smaller top margins — 12dp horizontal (was
-                        // 16) + a 2dp top pad so the field sits close under
-                        // the top bar; the filter bar below stays flush.
-                        .padding(horizontal = 12.dp, vertical = 2.dp),
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Text,
-                        imeAction = ImeAction.Search,
-                    ),
-                    keyboardActions = KeyboardActions(
-                        onSearch = {
-                            WepWawetLogger.workshop(
-                                "ime search action — startSearch",
-                                "query" to query.take(80),
-                            )
-                            // v0.8.5: appScope — see filter-change LaunchedEffect.
-                            if (query.isBlank()) com.wepwawet.WepWawetApplication.appScope.launch { repo.clearSearch() }
-                            else com.wepwawet.WepWawetApplication.appScope.launch { repo.startSearch(query) }
-                        },
-                    ),
-                    singleLine = true,
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
                 )
             }
 

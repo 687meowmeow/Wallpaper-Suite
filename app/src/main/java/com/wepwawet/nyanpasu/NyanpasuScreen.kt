@@ -1,6 +1,8 @@
 package com.wepwawet.nyanpasu
 
 import android.graphics.Bitmap
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -28,15 +30,18 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Undo
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -72,6 +77,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.wepwawet.log.WepWawetLogger
 import com.wepwawet.ui.components.SlimTopBar
+import com.wepwawet.ui.screens.ImageFolderAssets
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -136,6 +142,62 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
     var applying by remember { mutableStateOf(false) }
     var statusLine by remember { mutableStateOf<String?>(null) }
     var history by remember { mutableStateOf(NyanpasuApplier.readHistory(context)) }
+
+    // ---- v0.8.12: save-to-folder state ----
+    var showSaveToFolder by remember { mutableStateOf(false) }
+    var saveFolders by remember { mutableStateOf<List<ImageFolderAssets.SavedFolder>>(emptyList()) }
+    var savingToFolder by remember { mutableStateOf(false) }
+
+    /** The image to save — the visible preview, else the newest history entry. */
+    suspend fun imageForSaving(): Bitmap? {
+        previewBitmap?.let { return it }
+        return history.firstOrNull()?.let {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    android.graphics.BitmapFactory.decodeFile(it.file.absolutePath)
+                }.getOrNull()
+            }
+        }
+    }
+
+    /** v0.8.12: save the current image into a picked library folder. */
+    fun saveToFolder(treeUri: String) {
+        if (savingToFolder) return
+        savingToFolder = true
+        scope.launch {
+            try {
+                val bmp = imageForSaving()
+                if (bmp == null) {
+                    snackbar.showSnackbar("Nothing to save yet")
+                } else {
+                    val ok = withContext(Dispatchers.IO) {
+                        ImageFolderAssets.saveImageToFolder(context, treeUri, bmp)
+                    }
+                    snackbar.showSnackbar(
+                        if (ok) "Saved to ${ImageFolderAssets.folderDisplayName(treeUri)}"
+                        else "Save failed (see logs)")
+                    if (ok) WepWawetLogger.appInfo(
+                        "DiscoverScreen: saved to folder",
+                        "folder" to ImageFolderAssets.folderDisplayName(treeUri))
+                }
+            } finally {
+                savingToFolder = false
+                showSaveToFolder = false
+            }
+        }
+    }
+
+    // Pick a NEW folder and save the current image into it right away.
+    val saveFolderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            ImageFolderAssets.takePersistableGrants(context, uri)
+            ImageFolderAssets.addFolder(context, uri.toString())
+            saveFolders = ImageFolderAssets.readFolders(context)
+            saveToFolder(uri.toString())
+        }
+    }
 
     val metrics = context.resources.displayMetrics
     val screenAspect = metrics.widthPixels.toFloat() / metrics.heightPixels
@@ -514,14 +576,16 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                 }
             }
 
-            // ===== Tools row (v1.0.0: Undo / Home / Lock / Save) =====
+            // ===== Tools row (v1.0.0: Undo / Home / Lock — all LABELED) =====
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                FilledTonalIconButton(onClick = { undoWallpaper() }) {
-                    Icon(Icons.Filled.Undo, contentDescription = "Undo")
+                FilledTonalButton(onClick = { undoWallpaper() }) {
+                    Icon(Icons.Filled.Undo, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Undo")
                 }
                 TriStateButton(
                     label = "Home",
@@ -535,9 +599,6 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                     onCycle = { cycleScreen(isHome = false) },
                     modifier = Modifier.weight(1f),
                 )
-                FilledTonalIconButton(onClick = { saveCurrentToGallery() }) {
-                    Icon(Icons.Filled.SaveAlt, contentDescription = "Save to gallery")
-                }
             }
             Text(
                 "Home and Lock cycle Off → Pink → Blue. Same color = one image " +
@@ -570,6 +631,32 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
             }
             if (fetching || applying) {
                 LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+
+            // ===== Save row (v0.8.12: gallery + folder — visible buttons) =====
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = { saveCurrentToGallery() },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(Icons.Filled.SaveAlt, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Save to gallery", maxLines = 1)
+                }
+                OutlinedButton(
+                    onClick = {
+                        saveFolders = ImageFolderAssets.readFolders(context)
+                        showSaveToFolder = true
+                    },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(Icons.Filled.Folder, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Save to folder", maxLines = 1)
+                }
             }
 
             // ===== Tags (tap a chip to flip strict/soft) =====
@@ -766,6 +853,80 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
             )
         }
     }
+
+    // ===== v0.8.12: Save-to-folder picker (Discover → library folders) =====
+    if (showSaveToFolder) {
+        AlertDialog(
+            onDismissRequest = { if (!savingToFolder) showSaveToFolder = false },
+            title = { Text("Save to folder") },
+            text = {
+                Column {
+                    Text(
+                        "The current image is saved as a JPEG — it then shows " +
+                            "up in the Wallpapers section under that folder.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    if (saveFolders.isEmpty()) {
+                        Text(
+                            "No folders yet — pick one below.",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    } else {
+                        for (folder in saveFolders) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(enabled = !savingToFolder) {
+                                        saveToFolder(folder.treeUri)
+                                    }
+                                    .padding(vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(
+                                    Icons.Filled.FolderOpen,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                )
+                                Spacer(Modifier.width(12.dp))
+                                Text(
+                                    folder.name,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            try {
+                                saveFolderPicker.launch(null)
+                            } catch (t: Throwable) {
+                                WepWawetLogger.appWarn(
+                                    "DiscoverScreen: folder picker failed",
+                                    "exception" to t.javaClass.name)
+                            }
+                        },
+                        enabled = !savingToFolder,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(Icons.Filled.Add, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Pick a folder…")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { showSaveToFolder = false },
+                    enabled = !savingToFolder,
+                ) { Text("Cancel") }
+            },
+        )
+    }
 }
 
 /** Apply the pinch/drag transform to the preview image. */
@@ -823,6 +984,10 @@ private fun TriStateButton(
 /**
  * v1.0.0's tag chips: a wrapping FlowRow. Tap = flip strict (filled) ↔
  * soft (outline); the X trailing icon removes the tag.
+ *
+ * v0.8.12: the add field is THE prominent "place to put the tags" — a
+ * full-width labeled field with a visible, LABELED Add button, and it
+ * accepts several tags at once (comma separated).
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -835,7 +1000,40 @@ private fun TagEditor(
 ) {
     var field by remember { mutableStateOf("") }
 
+    fun addField() {
+        field.split(',', '，')
+            .map { it.trim().take(30) }
+            .filter { it.isNotEmpty() }
+            .forEach { onAdd(it) }
+        field = ""
+    }
+
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        // The input — one clear place to put the tags.
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = field,
+                onValueChange = { field = it.take(120) },
+                singleLine = true,
+                label = { Text("Tags (comma separated)") },
+                modifier = Modifier.weight(1f),
+                keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                    onDone = { addField() },
+                ),
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                    imeAction = androidx.compose.ui.text.input.ImeAction.Done,
+                ),
+            )
+            Spacer(Modifier.width(8.dp))
+            Button(
+                onClick = { addField() },
+                enabled = field.isNotBlank(),
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = null)
+                Spacer(Modifier.width(4.dp))
+                Text("Add")
+            }
+        }
         if (strictTags.isNotEmpty() || softTags.isNotEmpty()) {
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
@@ -861,31 +1059,12 @@ private fun TagEditor(
                     )
                 }
             }
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = field,
-                onValueChange = { field = it.take(30) },
-                singleLine = true,
-                label = { Text("Add tag") },
-                modifier = Modifier.weight(1f),
+            Text(
+                "Tap a chip to switch between strict (filled) and soft (outline).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Spacer(Modifier.width(8.dp))
-            TextButton(
-                onClick = {
-                    val trimmed = field.trim()
-                    if (trimmed.isNotEmpty()) {
-                        onAdd(trimmed)
-                        field = ""
-                    }
-                },
-            ) { Icon(Icons.Filled.Add, contentDescription = "Add tag") }
         }
-        Text(
-            "Tap a chip to switch between strict (filled) and soft (outline).",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
 }
 

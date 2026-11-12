@@ -96,25 +96,22 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
     // rendering but the scene is frozen": the frame-SPIKE detector only
     // measures deltas BETWEEN consecutive onDrawFrame calls, so a full
     // stall (updateScene never returning / the GL thread dead) logged
-    // nothing at all. These three new probes close that gap:
+    // nothing at all. These probes close that gap:
     //   1. glFrameCount — @Volatile monotonic frame counter, written on the
     //      GL thread, readable from anywhere.
     //   2. A 5-second render heartbeat logged from onDrawFrame (frames +
     //      average frame time). If the heartbeat stops after a touch, the
     //      GL thread is stuck INSIDE native code (updateScene or the
     //      sendTouchInput call itself).
-    //   3. sendTouchInput enter/exit traces on the GL thread + a
-    //      between-touches stall check on the main thread — together they
-    //      name the exact native call that never returned.
+    //   3. A between-touches stall check on the main thread (v0.8.12: the
+    //      per-touch enter/exit DEBUG traces are REMOVED per user request —
+    //      only the rare stall WARNING remains).
     @Volatile var glFrameCount: Long = 0L
         private set
     private var heartbeatFrameBase = 0L
     private var heartbeatLastNs = 0L
     @Volatile private var lastTouchFrameCount = -1L
     @Volatile private var lastTouchTimeMs = 0L
-    // v0.8.8: touch-trace rate limiting (see sendTouchInput).
-    @Volatile private var lastTracedTouchDown: Boolean? = null
-    @Volatile private var lastTouchTraceNs = 0L
 
     private var supportsAudioProcessing: Boolean = false
     private var supportsAlignment: Boolean = false
@@ -172,16 +169,15 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
         // toggle (TRACE level is suppressed when verbose is off).
         when (action) {
             MotionEvent.ACTION_DOWN -> {
-                WepWawetLogger.engineDebug("SceneView: touch DOWN",
-                    "x" to motionEvent.x.toInt(), "y" to motionEvent.y.toInt())
+                // v0.8.12: the per-touch DEBUG logging is gone (user
+                // request — "no need for the touch up and down logging");
+                // the rare render-stall WARNING below stays.
                 noteTouchForStallCheck("DOWN")
                 if (enablePreviewTouchInput) {
                     sendTouchInput(motionEvent.x, motionEvent.y, true)
                 }
             }
             MotionEvent.ACTION_UP -> {
-                WepWawetLogger.engineDebug("SceneView: touch UP",
-                    "x" to motionEvent.x.toInt(), "y" to motionEvent.y.toInt())
                 noteTouchForStallCheck("UP")
                 if (enablePreviewTouchInput) {
                     sendTouchInput(motionEvent.x, motionEvent.y, false)
@@ -505,31 +501,10 @@ class SceneWallpaperView(context: Context) : GLSurfaceView(context), WallpaperCo
 
     override fun sendTouchInput(x: Float, y: Float, down: Boolean) {
         queueEvent {
-            // v0.8.8 (xray-freeze diagnosis): trace the native call on the
-            // GL thread. If the engine never returns from sendTouchInput,
-            // the "exit" line is missing from the log — naming the hang
-            // site directly. Also logs the sceneContext: a 0 here means the
-            // touches are being delivered to a dead context (silent no-op).
-            //
-            // Rate limit: DOWN/UP transitions are ALWAYS traced (the freeze
-            // correlates with them); ACTION_MOVE is traced at most once per
-            // 200 ms so a drag doesn't flood the ring buffer at 120 Hz.
-            val trace = lastTracedTouchDown != down ||
-                System.nanoTime() - lastTouchTraceNs >= 200_000_000L
-            if (trace) {
-                lastTracedTouchDown = down
-                lastTouchTraceNs = System.nanoTime()
-                WepWawetLogger.engineDebug("SceneView: sendTouchInput native enter",
-                    "down" to down,
-                    "x" to x.toInt(),
-                    "y" to y.toInt(),
-                    "scene_context" to (sceneRenderer?.sceneContext ?: 0))
-            }
+            // v0.8.12: the native enter/exit DEBUG traces are removed
+            // (user request — no touch logging); the between-touches stall
+            // WARNING on the main thread still covers the freeze case.
             lib?.sendTouchInput(sceneRenderer?.sceneContext ?: 0, down, x, y)
-            if (trace) {
-                WepWawetLogger.engineDebug("SceneView: sendTouchInput native exit",
-                    "down" to down)
-            }
         }
     }
 

@@ -129,10 +129,18 @@ object ImageFolderAssets {
     /**
      * Memory-efficient decode — two passes over a STREAM (bounds, then
      * subsampled pixels) with inSampleSize targeting [maxDim].
+     *
+     * v0.8.12 robustness pass ("images in the folder are not loading"):
+     *  • falls back to an AssetFileDescriptor + decodeFileDescriptor pass
+     *    when the plain stream decode yields nothing (some providers —
+     *    cloud/OTG/scoped-storage bridges — serve seekable fds but flaky
+     *    streams);
+     *  • logs a WARN with the reason on failure so the next log dump tells
+     *    us exactly which images and why (the old code failed silently).
      */
     fun decodeBitmapScaled(context: Context, uriStr: String, maxDim: Int): Bitmap? {
-        return try {
-            val uri = Uri.parse(uriStr)
+        val uri = Uri.parse(uriStr)
+        val streamResult = try {
             val bounds = android.graphics.BitmapFactory.Options().apply {
                 inJustDecodeBounds = true
             }
@@ -147,7 +155,94 @@ object ImageFolderAssets {
                 android.graphics.BitmapFactory.decodeStream(it, null, opts)
             }
         } catch (t: Throwable) {
+            WepWawetLogger.appWarn("ImageFolderAssets: stream decode failed",
+                "uri" to uriStr.takeLast(60),
+                "exception" to t.javaClass.simpleName)
             null
+        }
+        if (streamResult != null) return streamResult
+
+        // Fallback: fd-based decode (providers that serve seekable fds).
+        return try {
+            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
+                val bounds = android.graphics.BitmapFactory.Options().apply {
+                    inJustDecodeBounds = true
+                }
+                android.graphics.BitmapFactory.decodeFileDescriptor(
+                    afd.fileDescriptor, null, bounds)
+                if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+                var sample = 1
+                while (maxOf(bounds.outWidth, bounds.outHeight) / sample > maxDim) sample *= 2
+                val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+                // Re-open: the bounds pass consumed the fd position.
+                context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd2 ->
+                    android.graphics.BitmapFactory.decodeFileDescriptor(afd2.fileDescriptor, null, opts)
+                }
+            } ?: run {
+                WepWawetLogger.appWarn("ImageFolderAssets: no fd for image",
+                    "uri" to uriStr.takeLast(60))
+                null
+            }
+        } catch (t: Throwable) {
+            WepWawetLogger.appWarn("ImageFolderAssets: fd decode failed",
+                "uri" to uriStr.takeLast(60),
+                "exception" to t.javaClass.simpleName)
+            null
+        }
+    }
+
+    // ── Saving INTO a folder (Discover → "Save to folder") ───────────
+
+    /**
+     * v0.8.12: write [bitmap] as a JPEG into a picked SAF folder. Used by
+     * Discover's "Save to folder" so a booru image lands in one of the
+     * user's library folders (and then shows in the Wallpapers section).
+     *
+     * Requires the persistable WRITE grant — [takePersistableGrants].
+     */
+    fun saveImageToFolder(context: Context, treeUriStr: String, bitmap: Bitmap): Boolean {
+        return try {
+            val tree = Uri.parse(treeUriStr)
+            val docId = android.provider.DocumentsContract.getTreeDocumentId(tree)
+            val parentDoc = android.provider.DocumentsContract.buildDocumentUriUsingTree(tree, docId)
+            val name = "wallpaper_${System.currentTimeMillis()}.jpg"
+            val docUri = android.provider.DocumentsContract.createDocument(
+                context.contentResolver, parentDoc, "image/jpeg", name) ?: run {
+                WepWawetLogger.appWarn("ImageFolderAssets: createDocument returned null",
+                    "folder" to folderDisplayName(treeUriStr))
+                return false
+            }
+            context.contentResolver.openOutputStream(docUri)?.use { out ->
+                bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, out)
+            } ?: run {
+                WepWawetLogger.appWarn("ImageFolderAssets: openOutputStream failed",
+                    "folder" to folderDisplayName(treeUriStr))
+                return false
+            }
+            WepWawetLogger.appInfo("ImageFolderAssets: image saved to folder",
+                "folder" to folderDisplayName(treeUriStr))
+            true
+        } catch (t: Throwable) {
+            WepWawetLogger.appWarn("ImageFolderAssets: save to folder failed",
+                "exception" to t.javaClass.name,
+                "message" to (t.message ?: ""))
+            false
+        }
+    }
+
+    /**
+     * v0.8.12: take BOTH the read and the write persistable grants for a
+     * picked tree — read for enumeration, write so images can be saved
+     * into the folder later (Discover's "Save to folder").
+     */
+    fun takePersistableGrants(context: Context, uri: Uri) {
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                uri, android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         }
     }
 

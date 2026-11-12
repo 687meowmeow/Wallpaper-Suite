@@ -130,6 +130,9 @@ object DownloadManager {
             statusMessage = "Connecting to Steam...",
         )
         _activeDownloads.update { it + (item.id to progress) }
+        // v0.8.12: remember the workshop item's own tags — the Wallpapers
+        // section's tag filter ("sort by tag") is driven by them.
+        appContext?.let { ctx -> WorkshopTagStore.put(ctx, item.id, item.tags) }
         WepWawetLogger.workshop("DownloadManager: started download",
             "item_id" to item.id, "title" to item.title)
     }

@@ -24,14 +24,18 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
 /**
- * v0.7.21: A slim (56dp + status bar) top app bar with properly vertically
- * centered title text.
+ * v0.7.21: A slim top app bar with properly vertically centered title
+ * text.
  *
- * The Material 3 [androidx.compose.material3.TopAppBar] has an internal layout
- * that doesn't vertically center the title correctly at custom heights below
- * 64dp — the title appears shifted up. This composable uses a plain [Row]
- * with [Alignment.CenterVertically] to guarantee the title + navigation icon
- * + actions are all vertically centered regardless of the height.
+ * v0.8.12 ("make the top bars smaller — space for the previews is the
+ * priority"): 48dp bar (was 56), `titleMedium` title (was `titleLarge`)
+ * and 40dp icon buttons — every screen in the app uses this bar, so the
+ * whole app gains a row of preview space at once. The Material 3
+ * [androidx.compose.material3.TopAppBar] has an internal layout that
+ * doesn't vertically center the title correctly at custom heights below
+ * 64dp — this composable uses a plain [Row] with [Alignment.CenterVertically]
+ * to guarantee the title + navigation icon + actions are all vertically
+ * centered regardless of the height.
  *
  * Usage:
  * ```
@@ -59,7 +63,7 @@ fun SlimTopBar(
         modifier = modifier
             .fillMaxWidth()
             .statusBarsPadding()
-            .height(56.dp),
+            .height(48.dp),
         color = MaterialTheme.colorScheme.surface,
     ) {
         Row(
@@ -75,18 +79,19 @@ fun SlimTopBar(
                 if (onBack != null) {
                     IconButton(
                         onClick = onBack,
-                        modifier = Modifier.size(48.dp),
+                        modifier = Modifier.size(40.dp),
                     ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "Back",
+                            modifier = Modifier.size(22.dp),
                         )
                     }
-                    Spacer(Modifier.width(4.dp))
+                    Spacer(Modifier.width(2.dp))
                 }
                 Text(
                     title,
-                    style = MaterialTheme.typography.titleLarge,
+                    style = MaterialTheme.typography.titleMedium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -98,5 +103,32 @@ fun SlimTopBar(
                 actions()
             }
         }
+    }
+}
+
+/**
+ * v0.8.12: the compact icon button used inside [SlimTopBar] actions —
+ * 40dp instead of the default 48dp minimum touch target, matching the
+ * slimmer 48dp bar. Screens that pass actions to SlimTopBar should use
+ * this instead of a bare [IconButton] so every top bar has the same
+ * action density.
+ */
+@Composable
+fun SlimTopBarIcon(
+    onClick: () -> Unit,
+    contentDescription: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    tint: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurface,
+) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier.size(40.dp),
+    ) {
+        Icon(
+            icon,
+            contentDescription = contentDescription,
+            tint = tint,
+            modifier = Modifier.size(22.dp),
+        )
     }
 }
