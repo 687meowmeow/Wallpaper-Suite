@@ -2,6 +2,7 @@ package com.wepwawet.ui.screens
 
 import android.graphics.Bitmap
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -573,8 +574,9 @@ fun LibraryScreen(
                                 if (folder != null) {
                                     try {
                                         folderImagePicker.launch(
-                                            ActivityResultContracts
-                                                .PickVisualMedia.ImageOnly)
+                                            PickVisualMediaRequest(
+                                                ActivityResultContracts
+                                                    .PickVisualMedia.ImageOnly))
                                     } catch (t: Throwable) {
                                         WepWawetLogger.appWarn(
                                             "LibraryScreen: image picker failed",

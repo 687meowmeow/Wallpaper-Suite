@@ -53,10 +53,13 @@ import com.wepwawet.ui.components.SlimTopBar
  * and editable: rename, delete, set which one is ACTIVE (drives the live
  * wallpaper rotation), and open the editor for entries / order /
  * interval / time rules.
+ *
+ * v0.8.13: this is a bottom-navigation TAB — [onBack] is nullable and
+ * null when opened as a tab (no back arrow, like the other tabs).
  */
 @Composable
 fun PlaylistsScreen(
-    onBack: () -> Unit,
+    onBack: (() -> Unit)?,
     onOpenEditor: (playlistId: String) -> Unit,
 ) {
     val context = LocalContext.current

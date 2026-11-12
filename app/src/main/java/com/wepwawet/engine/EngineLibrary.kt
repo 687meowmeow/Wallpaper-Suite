@@ -210,8 +210,12 @@ object EngineLibrary {
 
     /**
      * v0.8.13: the engine-library type for a SAF-registered local media
-     * file: "Image" for image/* URIs, "Video" for everything else (the
-     * VideoWallpaperView plays those). Animated GIFs count as Image.
+     * file: "Image" for image-kind MIME URIs, "Video" for everything
+     * else (the VideoWallpaperView plays those). Animated GIFs count as
+     * Image. NOTE: no literal "image slash star" glob in this KDoc —
+     * Kotlin block comments NEST, so that glob would open a nested
+     * comment and eat the rest of the file (the exact ImageFolderScreen
+     * bug from earlier rounds).
      */
     private fun localMediaType(context: Context, uriString: String): String {
         return try {
