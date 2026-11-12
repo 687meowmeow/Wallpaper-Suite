@@ -157,6 +157,24 @@ object WorkshopDownloadJob {
         _states.value[itemId]?.pendingVideoMode ?: "send"
 
     /**
+     * v0.8.11: the item ids of downloads CURRENTLY in flight (or waiting
+     * on a trim decision) — the ONLY cache files "Clear cache" must not
+     * touch. Every cache artifact of a workshop item is either named
+     * `<id>_<sendId>_*.pkg/.mpkg`, `<id>_trimmed.mp4` or lives under
+     * `workshop_downloads/<id>/`, so an id match is enough.
+     *
+     * The old clear-cache guard skipped every `*_debug.pkg`/`*_send.pkg`
+     * file by PATTERN — i.e. it also skipped the leftovers of every
+     * COMPLETED download, so the cache never shrank ("the clear cache
+     * button doesn't work anymore"). This is the precise replacement.
+     */
+    fun activeDownloadItemIds(): Set<String> =
+        _states.value.values
+            .filter { (it.isRunning && it.workshopId != null) || it.pendingVideoFile != null }
+            .mapNotNull { s -> s.workshopId ?: s.pendingVideoItem?.id }
+            .toSet()
+
+    /**
      * v0.7.20: Update a specific item's state.
      *
      * v0.7.24 (H-D9): the legacy `_state` mirror previously wrote the

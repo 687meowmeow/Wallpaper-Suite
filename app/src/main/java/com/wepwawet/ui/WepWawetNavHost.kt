@@ -16,7 +16,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Explore
-import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -46,6 +45,7 @@ import com.wepwawet.ui.screens.DownloadManagerScreen
 import com.wepwawet.ui.screens.LibraryScreen
 import com.wepwawet.ui.screens.FavoritesScreen
 import com.wepwawet.ui.screens.LogsScreen
+import com.wepwawet.ui.screens.PlaylistsScreen
 import com.wepwawet.ui.screens.PlaylistEditorScreen
 import com.wepwawet.ui.screens.PairingScreen
 import com.wepwawet.ui.screens.SettingsScreen
@@ -57,19 +57,19 @@ import com.wepwawet.ui.screens.WorkshopBrowserScreen
 /**
  * A bottom-navigation tab of the main Scaffold.
  *
- * v0.8.9 UI/UX rework: the library screen's two stacked button rows
- * (Browse Workshop / Import / Auto wallpaper / Image folders) are gone.
- * Material 3's own guidance (m3.material.io/components/navigation-bar)
- * prescribes a bottom navigation bar for "three to five destinations of
- * equal importance" — exactly our case — which frees the entire top of
- * every screen for content. Import moved to a top-bar "+" action on the
- * Wallpapers tab; Settings and Downloads remain top-bar icons.
+ * v0.8.9: Material 3's own guidance prescribes a bottom navigation bar
+ * for "three to five destinations of equal importance" — exactly our
+ * case — which frees the entire top of every screen for content.
  *
- * v0.8.10 (device report): the M3 NavigationBar's stock 80dp height read
- * as "buttons at the bottom are too tall", and the outer Scaffold's
- * default contentWindowInsets stacked a SECOND status-bar gap on top of
- * every screen's own top bar ("a big empty space at the top, everything
- * shifted down"). The bar is now a compact custom 60dp Surface row and
+ * v0.8.11: THREE tabs — Wallpapers / Workshop / Discover. The Folders
+ * tab is gone (folders are chips on the Wallpapers page now), and the
+ * auto-wallpaper tab is "Discover" (renamed from "Anime", formerly
+ * "Daily", per user request).
+ *
+ * v0.8.10: the M3 NavigationBar's stock 80dp height read as "buttons at
+ * the bottom are too tall", and the outer Scaffold's default
+ * contentWindowInsets stacked a SECOND status-bar gap on top of every
+ * screen's own top bar. The bar is a compact custom 60dp Surface row and
  * the outer Scaffold no longer insets its content — each screen's own
  * top bar already handles the status bar exactly once.
  */
@@ -82,24 +82,24 @@ private data class BottomTab(
 private val BOTTOM_TABS = listOf(
     BottomTab("library", "Wallpapers", Icons.Filled.Wallpaper),
     BottomTab("workshop", "Workshop", Icons.Filled.Explore),
-    BottomTab("imageFolders", "Folders", Icons.Filled.PhotoLibrary),
-    // v0.8.10: renamed per user request (was "Daily").
-    BottomTab("daily", "Anime", Icons.Filled.AutoAwesome),
+    BottomTab("discover", "Discover", Icons.Filled.AutoAwesome),
 )
 
 /**
- * WepWawet navigation host — a Material 3 bottom bar with the four
+ * WepWawet navigation host — a Material 3 bottom bar with the three
  * top-level destinations plus the drill-down routes above it:
  *
- *   - library            (Wallpapers tab — the device's wallpaper collection)
+ *   - library            (Wallpapers tab — the device's wallpaper
+ *                         collection, tags + folder chips + playlists)
  *   - workshop           (Workshop tab — global Steam Workshop browse)
- *   - imageFolders       (Folders tab — pick a device folder of images)
- *   - daily              (Daily tab — auto wallpaper from booru sources)
+ *   - discover           (Discover tab — auto wallpaper from booru sources)
  *   - creator/{steamId}  (WorkshopBrowserScreen scoped to a single creator)
  *   - downloads          (DownloadManagerScreen showing active + completed)
  *   - detail/{itemId}    (WallpaperDetailScreen — workshop item detail)
  *   - preview            (live-rendering preview + apply + properties)
- *   - playlist / pairing / settings / logs / favorites / videoTrim
+ *   - playlists          (the saved WallpaperSuite playlists)
+ *   - playlist/{id}      (one playlist's editor)
+ *   - pairing / settings / logs / favorites / videoTrim
  *
  * Tab switches use the canonical M3 pattern (popUpTo the start
  * destination with saveState + launchSingleTop + restoreState) so every
@@ -115,31 +115,6 @@ private val BOTTOM_TABS = listOf(
  * `creatorSteamId` set — the repo's `creatorSteamId` filter scopes the
  * fetch to that creator's /profiles/<steamId>/myworkshop/ page. A back arrow
  * is shown so the user can return to the global browse.
- *
- * v0.7.1 — the [com.wepwawet.ui.screens.WorkshopBrowserScreen] top bar
- * now has a Favorites (heart) icon. That icon's `onOpenFavorites` callback
- * is wired here to navigate to the new `favorites` route. The placeholder
- * screen for now shows "Favorites coming soon" — the full implementation
- * (a grid of saved creators + their wallpaper counts) is tracked as a
- * follow-up task.
- *
- * v0.5.3 — the [SteamApiService] instance is now created separately (rather
- * than anonymously inside the [WorkshopRepository] constructor) so that the
- * saved Steam Web API key can be loaded from SharedPreferences (written by
- * the Settings screen under the `steam_api_key` key in the
- * `wepwawet_settings` prefs file) and set on `steamApi.apiKey` via a
- * [LaunchedEffect]. This makes the server-side sort options (Most Up Votes,
- * Most Subscriptions) available as soon as the user re-enters the workshop
- * browser, without requiring an app restart.
- *
- * v0.5.2 — the "Open Pairing Screen" button was removed from the Settings
- * screen entirely. Instead, a Bluetooth (pairing) icon was added to the
- * WorkshopBrowserScreen's top bar — both the global and creator routes wire
- * up `onOpenPairing` here to navigate to the `pairing` destination.
- *
- * The previous `steam_login` route and its wrapping `SteamLoginScreen`
- * composable have been removed — Steam credentials are now managed directly
- * on the Settings screen (see [SettingsScreen] / [com.wepwawet.pairing.SteamCredentialsStore]).
  */
 @Composable
 fun WepWawetNavHost() {
@@ -287,7 +262,8 @@ fun WepWawetNavHost() {
 
         // v0.8.0: the library is the main page — the device's wallpaper
         // collection (engine-enumerated) + manual import. The Workshop /
-        // Folders / Daily entry points live in the bottom navigation bar.
+        // Discover entry points live in the bottom navigation bar; folders
+        // and tags live ON this page as filter chips (v0.8.11).
         composable("library") {
             LibraryScreen(
                 onOpenSettings = { nav.navigate("settings") },
@@ -297,20 +273,15 @@ fun WepWawetNavHost() {
                     com.wepwawet.engine.PreviewRequestHolder.set(wallpaper)
                     nav.navigate("preview")
                 },
+                onOpenPlaylists = { nav.navigate("playlists") },
             )
         }
 
-        // v0.8.9: local image folders — a bottom-nav tab: pick a folder,
-        // grid its images, one-tap set-as-wallpaper.
-        composable("imageFolders") {
-            com.wepwawet.ui.screens.ImageFolderScreen(onBack = null)
-        }
-
-        // v0.8.9: Daily — the auto-wallpaper screen (booru sources, tag
-        // ladder, schedule). A bottom-nav tab, so no back arrow; the
+        // v0.8.11: Discover — the auto-wallpaper screen (booru sources,
+        // tag chips, schedule). A bottom-nav tab, so no back arrow; the
         // implementation package keeps its historical name but NO
         // user-visible string carries it.
-        composable("daily") {
+        composable("discover") {
             com.wepwawet.nyanpasu.NyanpasuScreen(onBack = null)
         }
 
@@ -327,12 +298,27 @@ fun WepWawetNavHost() {
                 onBack = { nav.popBackStack() },
                 onOpenWorkshop = { itemId -> nav.navigate("detail/$itemId") },
                 onOpenSettings = { nav.navigate("settings") },
+                onOpenPlaylists = { nav.navigate("playlists") },
             )
         }
 
-        // v0.8.0: playlist editor.
-        composable("playlist") {
-            PlaylistEditorScreen(onBack = { nav.popBackStack() })
+        // v0.8.11: the multi-playlist manager + per-playlist editor.
+        composable("playlists") {
+            PlaylistsScreen(
+                onBack = { nav.popBackStack() },
+                onOpenEditor = { id -> nav.navigate("playlist/$id") },
+            )
+        }
+
+        composable(
+            route = "playlist/{playlistId}",
+            arguments = listOf(navArgument("playlistId") { type = NavType.StringType }),
+        ) { entry ->
+            val playlistId = entry.arguments?.getString("playlistId").orEmpty()
+            PlaylistEditorScreen(
+                playlistId = playlistId,
+                onBack = { nav.popBackStack() },
+            )
         }
 
         composable("workshop") {

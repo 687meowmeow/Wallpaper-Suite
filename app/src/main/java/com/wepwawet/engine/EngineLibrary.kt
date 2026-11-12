@@ -36,9 +36,35 @@ object EngineLibrary {
             if (current != null) return current
             val created = SceneLib()
             created.initLibrary(context.applicationContext)
+            // v0.8.11: the bundled Wallpaper Engine sample wallpapers are
+            // NOT part of this app's library (user request) — the engine
+            // extracts them from the APK assets on init, so delete them
+            // right after init and filter them from every enumeration.
+            // If an app update re-extracts them (assetTime changes), the
+            // next init purges them again.
+            runCatching { purgeOfficialWallpapers(context.applicationContext) }
             lib = created
             return created
         }
+    }
+
+    /**
+     * v0.8.11: deletes the extracted official/sample wallpapers from
+     * `filesDir/wallpapers/` (the engine re-extracts them from APK assets
+     * on init when its asset timestamp changes — the purge runs after
+     * every init, so re-extractions are cleaned up too). Idempotent.
+     */
+    private fun purgeOfficialWallpapers(context: Context) {
+        val wallpapersDir = File(context.filesDir, "wallpapers")
+        if (!wallpapersDir.isDirectory) return
+        val files = wallpapersDir.listFiles() ?: return
+        if (files.isEmpty()) return
+        var deleted = 0
+        for (f in files) {
+            runCatching { if (f.delete()) deleted++ }
+        }
+        WepWawetLogger.engine("Library: official sample wallpapers purged",
+            "deleted" to deleted)
     }
 
     /**
@@ -86,9 +112,13 @@ object EngineLibrary {
 
     /**
      * Enumerates every wallpaper the engine knows about:
-     *  - the bundled official wallpapers (`wallpapers/` under filesDir);
      *  - imported mpkgs (`downloads/` under filesDir);
      *  - SAF-registered local image/video/GIF wallpapers.
+     *
+     * v0.8.11: the bundled official/sample wallpapers are REMOVED — they
+     * are purged from disk after engine init (see [purgeOfficialWallpapers])
+     * and filtered here as a belt-and-braces guard (an extraction racing
+     * the purge can still surface for one frame otherwise).
      *
      * Order: newest first (same default as the official client's grid).
      */
@@ -100,14 +130,13 @@ object EngineLibrary {
             var downloads = 0
             try {
                 val engine = sceneLib(context)
-                val blacklisted = WeEnginePrefs.readOfficialBlacklist(context)
                 for (wallpaper in engine.enumerateWallpapers()) {
-                    if (blacklisted.contains(wallpaper.filePath)) continue
+                    // v0.8.11: never surface the bundled sample wallpapers.
+                    if (wallpaper.isOfficial) {
+                        officials++
+                        continue
+                    }
                     if (wallpaper.isError) {
-                        if (wallpaper.isOfficial) {
-                            // official wallpapers that failed to extract are hidden entirely
-                            continue
-                        }
                         WepWawetLogger.engineWarn("Library: corrupt wallpaper entry",
                             "file" to wallpaper.filePath)
                         wallpaper.title = "(corrupt)"
@@ -125,7 +154,7 @@ object EngineLibrary {
                             ""
                         }
                     }
-                    if (wallpaper.isOfficial) officials++ else downloads++
+                    downloads++
                     result.add(wallpaper)
                 }
             } catch (t: Throwable) {
@@ -347,22 +376,6 @@ object EngineLibrary {
                 true
             } catch (t: Throwable) {
                 WepWawetLogger.engineError("Library: deleteWallpaper failed", exception = t)
-                false
-            }
-        }
-
-    /** Clears the extracted official wallpapers so the engine re-extracts them. */
-    suspend fun restoreOfficialWallpapers(context: Context): Boolean =
-        withContext(Dispatchers.IO) {
-            try {
-                val wallpapersDir = File(context.filesDir, "wallpapers")
-                if (wallpapersDir.exists()) {
-                    wallpapersDir.listFiles()?.forEach { it.delete() }
-                }
-                // The engine re-extracts the assets on the next init when the
-                // directory is missing (assetTime-based invalidation).
-                true
-            } catch (t: Throwable) {
                 false
             }
         }

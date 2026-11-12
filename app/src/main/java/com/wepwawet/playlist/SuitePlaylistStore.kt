@@ -1,0 +1,254 @@
+package com.wepwawet.playlist
+
+import android.content.Context
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
+import com.wepwawet.log.WepWawetLogger
+import java.io.File
+import java.util.UUID
+
+/**
+ * WallpaperSuite playlists — the multi-playlist store.
+ *
+ * The official Wallpaper Engine client keeps exactly ONE playlist
+ * (see [io.wallpaperengine.wedata.PlaylistData]); our users asked for
+ * many playlists, each:
+ *   • holding any mix of animated (Scene/Video) and static wallpapers —
+ *     an entry is just an engine-relative file path, the type tag is
+ *     informational;
+ *   • rotating in RANDOM or ORDERED (preset) order;
+ *   • on a change interval (minutes);
+ *   • with optional TIME RULES — "from 22:00 to 06:00 show this wallpaper
+ *     (or rotate within this group)". A rule whose window matches the
+ *     current clock restricts the rotation to that rule's entries; a
+ *     single-entry rule simply pins one wallpaper for its window.
+ *
+ * Persistence: one JSON file (filesDir/suite_playlists.json, Gson) plus
+ * the active playlist id in the same file. All writes are synchronous +
+ * small — playlists are tiny compared to wallpapers.
+ *
+ * The live wallpaper service ([io.wallpaperengine.weclient.WEWallpaperService])
+ * reads the ACTIVE playlist on every settings sync and drives the
+ * rotation from its existing 1-second playlist tick; when no suite
+ * playlist is active the official single-playlist machinery keeps
+ * working unchanged.
+ */
+object SuitePlaylistStore {
+
+    /** A wallpaper inside a playlist. [type] is "Scene"/"Video"/"" (informational). */
+    data class Entry(
+        val filepath: String,
+        val title: String,
+        val type: String,
+    )
+
+    /**
+     * A time window + the subset of the playlist's entries that owns it.
+     * `startMinute`/`endMinute` are minutes-of-day; a window may wrap
+     * past midnight (e.g. 22:00→06:00). endMinute == startMinute is
+     * treated as a full-day window.
+     */
+    data class TimeRule(
+        val startMinute: Int,
+        val endMinute: Int,
+        val entryFilePaths: MutableList<String>,
+    )
+
+    data class Playlist(
+        val id: String = UUID.randomUUID().toString(),
+        var name: String = "Playlist",
+        /** "random" | "ordered". */
+        var orderMode: String = ORDER_RANDOM,
+        /** Rotation interval in minutes (random/ordered modes). */
+        var intervalMinutes: Int = 15,
+        var entries: MutableList<Entry> = ArrayList(),
+        var timeRules: MutableList<TimeRule> = ArrayList(),
+    )
+
+    const val ORDER_RANDOM = "random"
+    const val ORDER_ORDERED = "ordered"
+
+    private data class StoreFile(
+        var playlists: MutableList<Playlist> = ArrayList(),
+        var activePlaylistId: String = "",
+    )
+
+    /** Gson parse target with nullable fields — Gson bypasses constructors,
+     * so a partial JSON leaves nulls; normalized into [StoreFile]. */
+    private data class StoreFileRaw(
+        var playlists: MutableList<Playlist>? = null,
+        var activePlaylistId: String? = null,
+    )
+
+    private val gson = Gson()
+    private val storeRawType = object : TypeToken<StoreFileRaw>() {}.type
+
+    private fun file(context: Context): File =
+        File(context.filesDir, "suite_playlists.json")
+
+    @Synchronized
+    private fun readStore(context: Context): StoreFile {
+        return try {
+            val f = file(context)
+            if (!f.isFile) return StoreFile()
+            val raw = gson.fromJson<StoreFileRaw>(f.readText(), storeRawType) ?: return StoreFile()
+            StoreFile(
+                playlists = raw.playlists ?: ArrayList(),
+                activePlaylistId = raw.activePlaylistId ?: "",
+            )
+        } catch (e: Exception) {
+            WepWawetLogger.appWarn("SuitePlaylistStore: read failed — resetting",
+                "exception" to e.javaClass.name)
+            StoreFile()
+        }
+    }
+
+    @Synchronized
+    private fun writeStore(context: Context, store: StoreFile) {
+        try {
+            file(context).writeText(gson.toJson(store))
+        } catch (e: Exception) {
+            WepWawetLogger.appError("SuitePlaylistStore: write failed",
+                "exception" to e.javaClass.name)
+        }
+    }
+
+    // ── Playlist CRUD ────────────────────────────────────────────────
+
+    fun readAll(context: Context): List<Playlist> = readStore(context).playlists.toList()
+
+    fun read(context: Context, id: String): Playlist? =
+        readStore(context).playlists.firstOrNull { it.id == id }
+
+    fun upsert(context: Context, playlist: Playlist) {
+        val store = readStore(context)
+        val idx = store.playlists.indexOfFirst { it.id == playlist.id }
+        if (idx >= 0) store.playlists[idx] = playlist else store.playlists.add(playlist)
+        writeStore(context, store)
+        WepWawetLogger.appInfo("SuitePlaylistStore: saved",
+            "id" to playlist.id,
+            "name" to playlist.name,
+            "entries" to playlist.entries.size,
+            "time_rules" to playlist.timeRules.size,
+            "order" to playlist.orderMode)
+        notifyService(context)
+    }
+
+    fun delete(context: Context, id: String) {
+        val store = readStore(context)
+        store.playlists.removeAll { it.id == id }
+        if (store.activePlaylistId == id) store.activePlaylistId = ""
+        writeStore(context, store)
+        WepWawetLogger.appInfo("SuitePlaylistStore: deleted", "id" to id)
+        notifyService(context)
+    }
+
+    fun rename(context: Context, id: String, name: String) {
+        val store = readStore(context)
+        val target = store.playlists.firstOrNull { it.id == id } ?: return
+        target.name = name.trim().take(40).ifEmpty { target.name }
+        writeStore(context, store)
+        notifyService(context)
+    }
+
+    fun create(context: Context, name: String): Playlist {
+        val playlist = Playlist(name = name.trim().take(40).ifEmpty { "Playlist" })
+        val store = readStore(context)
+        store.playlists.add(playlist)
+        writeStore(context, store)
+        WepWawetLogger.appInfo("SuitePlaylistStore: created",
+            "id" to playlist.id, "name" to playlist.name)
+        return playlist
+    }
+
+    // ── Active playlist ──────────────────────────────────────────────
+
+    fun activePlaylist(context: Context): Playlist? {
+        val store = readStore(context)
+        return store.playlists.firstOrNull { it.id == store.activePlaylistId }
+    }
+
+    fun isActive(context: Context, id: String): Boolean =
+        readStore(context).activePlaylistId == id
+
+    fun setActive(context: Context, id: String?) {
+        val store = readStore(context)
+        store.activePlaylistId = id ?: ""
+        writeStore(context, store)
+        WepWawetLogger.appInfo("SuitePlaylistStore: active changed",
+            "id" to (id ?: "none"))
+        notifyService(context)
+    }
+
+    // ── Entry helpers ────────────────────────────────────────────────
+
+    /** Adds an entry to a playlist (no duplicates by filepath). */
+    fun addEntry(context: Context, playlistId: String, entry: Entry): Boolean {
+        val store = readStore(context)
+        val playlist = store.playlists.firstOrNull { it.id == playlistId } ?: return false
+        if (playlist.entries.any { it.filepath == entry.filepath }) return false
+        playlist.entries.add(entry)
+        writeStore(context, store)
+        WepWawetLogger.appInfo("SuitePlaylistStore: entry added",
+            "playlist" to playlist.name,
+            "file" to entry.filepath)
+        notifyService(context)
+        return true
+    }
+
+    /** Removes every entry whose filepath matches (also from time rules). */
+    fun removeEntryEverywhere(context: Context, filepath: String) {
+        val store = readStore(context)
+        var changed = false
+        for (playlist in store.playlists) {
+            if (playlist.entries.removeAll { it.filepath == filepath }) changed = true
+            for (rule in playlist.timeRules) {
+                if (rule.entryFilePaths.removeAll { it == filepath }) changed = true
+            }
+        }
+        if (changed) {
+            writeStore(context, store)
+            WepWawetLogger.appInfo("SuitePlaylistStore: entry removed everywhere",
+                "file" to filepath)
+            notifyService(context)
+        }
+    }
+
+    // ── Rule evaluation (used by the live service) ───────────────────
+
+    /**
+     * The entries that own the CURRENT minute of day: the first time rule
+     * whose window contains `minuteOfDay`, or null when no rule matches
+     * (the whole playlist rotates). Windows may wrap midnight.
+     */
+    fun entriesForMinute(playlist: Playlist, minuteOfDay: Int): List<String>? {
+        for (rule in playlist.timeRules) {
+            if (rule.entryFilePaths.isEmpty()) continue
+            val inWindow = if (rule.startMinute == rule.endMinute) {
+                true // full-day window
+            } else if (rule.startMinute < rule.endMinute) {
+                minuteOfDay >= rule.startMinute && minuteOfDay < rule.endMinute
+            } else {
+                // wraps midnight (e.g. 22:00→06:00)
+                minuteOfDay >= rule.startMinute || minuteOfDay < rule.endMinute
+            }
+            if (inWindow) {
+                return rule.entryFilePaths
+                    .filter { path -> playlist.entries.any { it.filepath == path } }
+            }
+        }
+        return null
+    }
+
+    /** minute-of-day for "now" (local timezone). */
+    fun currentMinuteOfDay(): Int {
+        val cal = java.util.Calendar.getInstance()
+        return cal.get(java.util.Calendar.HOUR_OF_DAY) * 60 + cal.get(java.util.Calendar.MINUTE)
+    }
+
+    private fun notifyService(context: Context) {
+        // The live service re-syncs its playlist state machine on demand.
+        io.wallpaperengine.weclient.WEWallpaperService.instance
+            ?.requestPlaylistSettingsChanged()
+    }
+}

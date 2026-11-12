@@ -905,13 +905,22 @@ private fun AboutCard() {
  * Section 4 — Cache.
  *
  * Shows the current cache size and provides a "Clear cache" button that
- * deletes all files in the app's cache directory (downloaded .pkg files,
- * .mpkg files, texture conversion cache, etc.).
+ * deletes the cache directory's contents.
+ *
+ * v0.8.11 FIX ("the clear cache button doesn't work anymore"): the old
+ * guard skipped cache files by NAME PATTERN (`*_send.pkg`, `*_debug.pkg`,
+ * `*_send.mpkg`, `*_debug.mpkg`, `*_trimmed.mp4`, `workshop_downloads/`)
+ * — but completed downloads also leave exactly those names behind, so
+ * the button deleted almost nothing and the reported size never moved.
+ * The guard is now precise: only the artifacts of downloads that are
+ * CURRENTLY in flight (or waiting on a trim decision) survive — see
+ * [com.wepwawet.pairing.WorkshopDownloadJob.activeDownloadItemIds].
  */
 @Composable
 private fun CacheCard(context: Context) {
     var cacheSize by remember { mutableStateOf(0L) }
     var cleared by remember { mutableStateOf(false) }
+    var clearReport by remember { mutableStateOf<String?>(null) }
     // v0.7.24 (C-U3): the clear operation now runs on Dispatchers.IO — the
     // walk + deletes of hundreds of .pkg files blocked the main thread for
     // seconds. Show a spinner while it runs and disable the button.
@@ -927,6 +936,9 @@ private fun CacheCard(context: Context) {
             withContext(kotlinx.coroutines.Dispatchers.IO) {
                 var size = 0L
                 context.cacheDir.walkTopDown().forEach { f ->
+                    if (f.isFile) size += f.length()
+                }
+                context.externalCacheDir?.walkTopDown()?.forEach { f ->
                     if (f.isFile) size += f.length()
                 }
                 size
@@ -945,10 +957,8 @@ private fun CacheCard(context: Context) {
             )
             Spacer(Modifier.height(8.dp))
             Text(
-                // v0.7.20: .mpkg files are NOT cached (they are packed on-demand
-                // and queued for transfer, then deleted). Only .pkg files and the
-                // texture conversion cache are cleared here.
-                "Clears downloaded .pkg files and texture conversion cache.",
+                "Clears downloaded .pkg files, texture conversions and pack " +
+                    "leftovers. Files of downloads still in progress are kept.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -959,58 +969,72 @@ private fun CacheCard(context: Context) {
                     if (clearInProgress) return@Button
                     WepWawetLogger.appInfo("settings_clear_cache_clicked")
                     clearInProgress = true
+                    clearReport = null
                     clearScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    try {
-                        // v0.7.21 BUG FIX: Skip files that are actively being
-                        // written by in-flight downloads. Deleting these causes
-                        // silent download failures (FileNotFoundException when
-                        // the download/pack tries to read the deleted file).
-                        // Skip patterns: *_send.pkg, *_debug.pkg, *_send.mpkg,
-                        // *_debug.mpkg, *_trimmed.mp4, and the entire
-                        // workshop_downloads/ directory.
-                        context.cacheDir.walkTopDown().forEach { f ->
-                            if (!f.isFile) return@forEach
-                            val name = f.name
-                            val path = f.absolutePath
-                            if (name.endsWith("_send.pkg") ||
-                                name.endsWith("_debug.pkg") ||
-                                name.endsWith("_send.mpkg") ||
-                                name.endsWith("_debug.mpkg") ||
-                                name.endsWith("_trimmed.mp4") ||
-                                path.contains("workshop_downloads/")
-                            ) {
-                                return@forEach
+                        try {
+                            // v0.8.11: the ONLY survivors are the artifacts of
+                            // downloads currently in flight / pending a trim
+                            // decision. Everything else — completed-download
+                            // leftovers included — goes.
+                            val activeIds = com.wepwawet.pairing.WorkshopDownloadJob
+                                .activeDownloadItemIds()
+                            var deletedFiles = 0
+                            var deletedBytes = 0L
+
+                            fun belongsToActiveDownload(name: String, path: String): Boolean {
+                                if (path.contains("workshop_downloads/")) {
+                                    val segment = path.substringAfter("workshop_downloads/", "")
+                                        .substringBefore('/')
+                                    return segment in activeIds
+                                }
+                                // Cache files are "<itemId>_<sendId>_…" or
+                                // "<itemId>_trimmed.mp4" / "image_folder_…".
+                                val prefix = name.substringBefore('_', "")
+                                return prefix.isNotEmpty() && prefix in activeIds
                             }
-                            f.delete()
-                        }
-                        context.externalCacheDir?.walkTopDown()?.forEach { f ->
-                            if (!f.isFile) return@forEach
-                            val name = f.name
-                            val path = f.absolutePath
-                            if (name.endsWith("_send.pkg") ||
-                                name.endsWith("_debug.pkg") ||
-                                name.endsWith("_send.mpkg") ||
-                                name.endsWith("_debug.mpkg") ||
-                                name.endsWith("_trimmed.mp4") ||
-                                path.contains("workshop_downloads/")
-                            ) {
-                                return@forEach
+
+                            for (root in listOfNotNull(context.cacheDir, context.externalCacheDir)) {
+                                root.walkTopDown().forEach { f ->
+                                    if (!f.isFile) return@forEach
+                                    if (belongsToActiveDownload(f.name, f.absolutePath)) {
+                                        return@forEach
+                                    }
+                                    deletedBytes += f.length()
+                                    if (f.delete()) deletedFiles++
+                                }
+                                // Sweep now-empty directories (keep the root).
+                                root.walkTopDown()
+                                    .filter { it.isDirectory && it != root }
+                                    .toList()
+                                    .asReversed()
+                                    .forEach { dir -> runCatching { dir.delete() } }
                             }
-                            f.delete()
+                            cleared = !cleared
+                            clearReport = "Freed ${formatCacheSize(deletedBytes)} ($deletedFiles files)"
+                            WepWawetLogger.appInfo("settings_clear_cache_done",
+                                "deleted_files" to deletedFiles,
+                                "deleted_bytes" to deletedBytes,
+                                "active_ids_kept" to activeIds.size)
+                        } catch (e: Exception) {
+                            WepWawetLogger.appInfo("settings_clear_cache_failed",
+                                "exception" to e.javaClass.name)
+                            clearReport = "Clear failed — see logs"
+                        } finally {
+                            clearInProgress = false
                         }
-                        cleared = !cleared
-                        WepWawetLogger.appInfo("settings_clear_cache_done")
-                    } catch (e: Exception) {
-                        WepWawetLogger.appInfo("settings_clear_cache_failed",
-                            "exception" to e.javaClass.name)
-                    } finally {
-                        clearInProgress = false
-                    }
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(if (clearInProgress) "Clearing…" else "Clear Cache")
+            }
+            clearReport?.let {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
             }
         }
     }
@@ -1031,14 +1055,14 @@ private fun formatCacheSize(bytes: Long): String {
 
 /**
  * v0.8.0 — the integrated Wallpaper Engine settings card: FPS limit,
- * battery-saving pause, touch input, Wallpaper Colors integration and
- * official-wallpaper restore. Values use the SAME SharedPreferences keys
- * the official client uses.
+ * battery-saving pause, touch input, Wallpaper Colors integration.
+ * Values use the SAME SharedPreferences keys the official client uses.
+ * (v0.8.11: the official-wallpaper restore button is gone — the bundled
+ * samples are removed from the library entirely.)
  */
 @Composable
 private fun EngineSettingsCard() {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
 
     var maxFps by remember {
         mutableStateOf(
@@ -1068,7 +1092,6 @@ private fun EngineSettingsCard() {
             ) ?: "enabled"
         )
     }
-    var restoreConfirm by remember { mutableStateOf(false) }
     var playlistSummary by remember { mutableStateOf("") }
     var snackbarResult by remember { mutableStateOf<String?>(null) }
 
@@ -1193,31 +1216,10 @@ private fun EngineSettingsCard() {
                 }
             }
 
-            OutlinedButton(
-                onClick = { restoreConfirm = true },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Restore official wallpapers")
-            }
-
-            if (restoreConfirm) {
-                AlertDialog(
-                    onDismissRequest = { restoreConfirm = false },
-                    title = { Text("Restore official wallpapers?") },
-                    text = { Text("The bundled wallpapers will be re-extracted on the next app restart.") },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            restoreConfirm = false
-                            scope.launch {
-                                com.wepwawet.engine.EngineLibrary.restoreOfficialWallpapers(context)
-                            }
-                        }) { Text("Restore") }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { restoreConfirm = false }) { Text("Cancel") }
-                    },
-                )
-            }
+            // v0.8.11: the "Restore official wallpapers" button is REMOVED —
+            // the bundled Wallpaper Engine sample wallpapers are no longer
+            // part of the library (purged after engine init and filtered
+            // from enumeration; see EngineLibrary.purgeOfficialWallpapers).
 
             // ===== v0.9.0: the Developer section is REMOVED (user request — =====
             // ===== "remove the developer section … its not necessary").    =====

@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -54,7 +53,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -79,6 +77,7 @@ import com.wepwawet.data.SteamApiService
 import com.wepwawet.data.WorkshopRepository
 import com.wepwawet.data.model.WorkshopItemTyped
 import com.wepwawet.log.WepWawetLogger
+import com.wepwawet.ui.components.SlimTopBar
 import com.wepwawet.ui.components.TagPickerSheet
 import com.wepwawet.ui.components.TileSize
 import com.wepwawet.ui.components.WallpaperCard
@@ -676,97 +675,76 @@ fun WorkshopBrowserScreen(
 
     Scaffold(
         topBar = {
-            // Compact TopAppBar — no title text, only icon actions.
-            // The Filter button was moved OUT of the top bar and INTO the
-            // FilterBar (the row below the search bar that also hosts the
-            // Sort and Tile size selectors). What's left on the top bar:
-            //   - Left (navigationIcon): Back arrow (creator mode only),
-            //     Bluetooth (pairing) button.
-            //   - Right (actions): Refresh, Downloads, Favorites, Settings.
-            //     v0.7.1: Logs was removed (top bar was too crowded) and
-            //     Favorites was added in its place.
-            //
-            // The TopAppBar's windowInsets are set to WindowInsets(0) so
-            // the bar's icons sit right at the top edge of the bar (no
-            // extra status bar inset eating into the 64dp height). The
-            // default status bar padding is preserved by applying
-            // Modifier.statusBarsPadding() to the TopAppBar itself, so the
-            // bar is still pushed below the system status bar.
-            TopAppBar(
-                modifier = Modifier
-                    .statusBarsPadding()
-                    .height(56.dp),
-                title = { },
-                navigationIcon = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        // Back arrow (creator mode only) — leftmost control
-                        // on the top bar when in creator mode.
-                        if (onBack != null) {
-                            IconButton(onClick = onBack) {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.ArrowBack,
-                                    contentDescription = "Back",
-                                )
-                            }
-                        }
-                        // Pairing (Bluetooth) button — v0.8.1: only visible
-                        // while the pairing subsystem is enabled in Settings
-                        // ("Send to phone" toggle). With pairing off, the
-                        // button is hidden entirely so nothing pairing-
-                        // related is reachable.
-                        if (pairingEnabled) {
-                            IconButton(onClick = {
-                                WepWawetLogger.workshop("topbar pairing tapped")
-                                onOpenPairing()
-                            }) {
-                                Icon(
-                                    Icons.Filled.Bluetooth,
-                                    contentDescription = "Pairing",
-                                )
-                            }
+            // v0.8.11: the SAME SlimTopBar every other screen uses — 56dp
+            // + status bar, surface background, default 24dp icons tinted
+            // onSurface (the user asked for the workshop top bar to match
+            // the other screens' size, icon size and icon color; the old
+            // custom TopAppBar rendered 22dp onSurfaceVariant icons).
+            // Left: back arrow (creator mode only). Right: Pairing,
+            // Refresh, Downloads, Favorites, Settings.
+            SlimTopBar(
+                title = "",
+                onBack = onBack,
+                actions = {
+                    // Pairing (Bluetooth) button — only visible while the
+                    // pairing subsystem is enabled in Settings ("Send to
+                    // phone" toggle).
+                    if (pairingEnabled) {
+                        IconButton(onClick = {
+                            WepWawetLogger.workshop("topbar pairing tapped")
+                            onOpenPairing()
+                        }) {
+                            Icon(
+                                Icons.Filled.Bluetooth,
+                                contentDescription = "Pairing",
+                                tint = MaterialTheme.colorScheme.onSurface,
+                            )
                         }
                     }
-                },
-                actions = {
                     // v0.7.1: Re-added Refresh button (user clarified they meant
                     // remove the PIN refresh button, not the browse refresh).
                     IconButton(onClick = {
                         WepWawetLogger.workshop("topbar refresh tapped")
                         onRefresh()
                     }) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "Refresh",
-                            modifier = Modifier.size(22.dp))
+                        Icon(
+                            Icons.Filled.Refresh,
+                            contentDescription = "Refresh",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                        )
                     }
                     IconButton(onClick = {
                         WepWawetLogger.workshop("topbar downloads tapped")
                         onOpenDownloads()
                     }) {
-                        Icon(Icons.Filled.Download, contentDescription = "Downloads",
-                            modifier = Modifier.size(22.dp))
+                        Icon(
+                            Icons.Filled.Download,
+                            contentDescription = "Downloads",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                        )
                     }
                     IconButton(onClick = {
                         WepWawetLogger.workshop("topbar favorites tapped")
                         onOpenFavorites()
                     }) {
-                        Icon(Icons.Filled.Favorite, contentDescription = "Favorites",
-                            modifier = Modifier.size(22.dp))
+                        Icon(
+                            Icons.Filled.Favorite,
+                            contentDescription = "Favorites",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                        )
                     }
                     IconButton(onClick = {
                         WepWawetLogger.workshop("topbar settings tapped")
                         onOpenSettings()
                     }) {
-                        Icon(Icons.Filled.Settings, contentDescription = "Settings",
-                            modifier = Modifier.size(22.dp))
+                        Icon(
+                            Icons.Filled.Settings,
+                            contentDescription = "Settings",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                        )
                     }
                     // v0.7.1: Removed logs icon per user request.
                 },
-                // Strip the TopAppBar's default status bar inset — we apply
-                // statusBarsPadding() ourselves above. This keeps the bar at
-                // its 56dp height (down from the default 64dp + 24dp inset).
-                windowInsets = WindowInsets(0, 0, 0, 0),
             )
         },
         // No additional content window insets — the top app bar already
@@ -818,11 +796,10 @@ fun WorkshopBrowserScreen(
                     leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                     modifier = Modifier
                         .fillMaxWidth()
-                        // v0.7.1: vertical padding removed so the search bar
-                        // sits flush against the filter bar below — the user
-                        // asked for the gap to be 0dp (was 2dp top + 2dp bottom
-                        // of the filter row = 4dp gap).
-                        .padding(horizontal = 16.dp),
+                        // v0.8.11: smaller top margins — 12dp horizontal (was
+                        // 16) + a 2dp top pad so the field sits close under
+                        // the top bar; the filter bar below stays flush.
+                        .padding(horizontal = 12.dp, vertical = 2.dp),
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Text,
                         imeAction = ImeAction.Search,
@@ -1242,10 +1219,8 @@ private fun FilterBar(
         modifier = Modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState())
-            // v0.7.1: vertical padding removed so the filter bar sits flush
-            // against the search bar above — the user asked for the gap to
-            // be 0dp.
-            .padding(horizontal = 12.dp),
+            // v0.8.11: 8dp horizontal (was 12) — smaller top-area margins.
+            .padding(horizontal = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1405,9 +1380,12 @@ private fun WallpaperGrid(
         LazyVerticalGrid(
             columns = GridCells.Fixed(columnCount),
             state = gridState,
-            contentPadding = PaddingValues(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            // v0.8.11: 4dp gaps + 4dp content padding — the SAME margins as
+            // the Wallpapers tab's grid (was 8dp; the user asked for the
+            // workshop preview margins to match the wallpapers tab).
+            contentPadding = PaddingValues(4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             items(items, key = { it.id }) { item ->
                 val resolvedName = creatorNames[item.creator]

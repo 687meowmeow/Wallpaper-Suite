@@ -3893,3 +3893,122 @@ Reminders added:
   104. TEXI imgW/imgH are the IMAGE dims; texW/texH (+ mip header)
       are the STORAGE dims (padded for ETC2). Never write texW into
       imgW/imgH again — that was the ishtar layout bug.
+
+## v0.8.11-alpha (build 129) — Discover + multi-playlists + folders-in-library round
+
+User feedback on 0.8.10 (device-tested): the Anime screen "just shows a
+random image" and is missing Nyanpasu's buttons; a border is still
+visible around it; clear cache does nothing; folders should live on the
+main wallpaper page; playlists should be multiple, saved and schedulable;
+the bundled WE sample wallpapers and their restore setting should go; the
+workshop top bar / grid margins should match the other screens.
+
+Discover screen (full Nyanpasu 1.0 control parity, rebuilt):
+- Renamed Anime → Discover everywhere user-visible (tab label,
+  notification channel "discover_auto_wallpaper", titles).
+- The v1.0.0 TOOLS ROW is in: Undo (pops the newest history entry and
+  re-applies it), Home tri-state, Lock tri-state, Save (gallery).
+  Tri-state = 1.0's WallpaperTargetMode: each button cycles
+  Off → Pink(#FF80AB) → Blue(#64B5F6); same color on both = one image,
+  different colors = two independent images. NyanpasuPrefs migrated the
+  old homeOn/lockOn/lockSame booleans once on first read.
+- Update button = 1.0's btnUpdate semantics: one tap fetches AND applies
+  (center-crop; the preview's pinch/drag is cosmetic like 1.0's
+  PhotoView). Dual mode fetches a separate lock image; entering dual
+  with a home image present fetches the lock complement (1.0's
+  reconcile logic).
+- Tagging exactly like 1.0's TagChipController: one input + FlowRow of
+  chips; TAP a chip flips strict (filled) ↔ soft (outline); X removes.
+- All v0.8.10 dressing removed per user demand: NO Cards (every section
+  is borderless — the "border around it" was the Card containers), NO
+  kaomoji, NO mascot quips/easter egg, NO confetti, NO welcome dialog.
+  Status lines are plain English. Style slider labels: Petite /
+  Balanced / Full.
+- On open: shows the LAST applied image (1.0's preview.loadPreview);
+  only a first-ever launch with no history auto-fetches.
+
+Multi-playlists (the big new feature):
+- New SuitePlaylistStore (filesDir/suite_playlists.json, Gson): many
+  playlists, each { name, orderMode random|ordered, intervalMinutes,
+  entries (any mix of Scene/Video/static), timeRules[] }. A time rule =
+  {startMinute, endMinute, entryFilePaths} — windows may wrap midnight;
+  a single-entry rule pins one wallpaper, a multi-entry rule rotates
+  within the group; outside all windows the whole playlist rotates.
+- PlaylistsScreen (route "playlists"): list, create, rename, delete,
+  set-active radio. PlaylistEditorScreen (route "playlist/{id}"):
+  name (debounced save), Random/In-order segmented, interval slider,
+  entry list with reorder/remove + multi-select add from the library,
+  time rules with a From/To-switched Material3 TimePicker editor.
+- WEWallpaperService.Playlist grew a suite branch: syncSettings loads
+  the ACTIVE suite playlist when present (official single playlist
+  remains the fallback), shouldUpdate/getNewWallpaper implement
+  window-switching + random/ordered rotation inside the current set on
+  the existing 1-second tick. requestPlaylistSettingsChanged fires on
+  every store write.
+- Entry points: library long-press "Add to playlist" and the preview
+  screen's playlist button both open the shared PlaylistPickerDialog
+  (with New playlist… + Manage). Deleting a wallpaper removes it from
+  every playlist and rule.
+
+Folders integrated into the Wallpapers page:
+- The Folders tab is GONE. ImageFolderScreen.kt deleted; its machinery
+  moved to ImageFolderAssets.kt (multi-folder registry with the
+  v0.8.9 single-folder pref migrated, SAF enumeration, subsampled
+  decode, idempotent pack+import).
+- The library chips row is now: All | one chip per TAG | one chip per
+  FOLDER | ＋Tag | ＋Folder. Selecting a folder grids its images
+  (Newest/A–Z toggle); tapping an image opens the fullscreen preview
+  with Set as wallpaper / System wallpaper. Long-press a folder chip to
+  remove it.
+- "Groups" renamed to "tags" in every user-visible string (same storage
+  keys, no migration): ＋New group → ＋Tag, Add to group → Add tag,
+  Group: → Tag:, Rename/Delete group → tag. This is the "sort by
+  tagging" ask — tap a tag to filter the grid.
+
+Bundled WE wallpapers removed (user: "remove the default wallpaper
+engine wallpapers and the setting to get them back"):
+- EngineLibrary.sceneLib purges filesDir/wallpapers/ right after every
+  engine init (the engine re-extracts on APK asset-time change; the
+  next init purges again) and enumerateWallpapers filters isOfficial as
+  a belt-and-braces guard.
+- The Settings "Restore official wallpapers" button + EngineLibrary
+  .restoreOfficialWallpapers are deleted.
+
+Clear cache FIXED ("doesn't work anymore"):
+- Root cause: the v0.7.21 guard skipped cache files by NAME PATTERN
+  (*_send.pkg, *_debug.pkg, *_send.mpkg, *_debug.mpkg, *_trimmed.mp4,
+  workshop_downloads/) — completed downloads leave exactly those names,
+  so the button deleted almost nothing.
+- WorkshopDownloadJob.activeDownloadItemIds() now reports the ids of
+  downloads in flight (or pending a trim decision); CacheCard deletes
+  EVERYTHING except those items' artifacts, sweeps empty dirs, and
+  reports "Freed X (N files)".
+
+Workshop UI parity:
+- Top bar: replaced the custom TopAppBar with the same SlimTopBar every
+  other screen uses (56dp + status bar, surface bg, default 24dp icons
+  tinted onSurface — was 22dp onSurfaceVariant). Pairing moved next to
+  Refresh/Downloads/Favorites/Settings in actions.
+- Grid margins: 8dp gaps + 8dp content padding → 4dp/4dp (identical to
+  the Wallpapers tab). Top-area margins reduced: search bar 12dp
+  horizontal + 2dp vertical, filter bar 8dp horizontal.
+
+Navigation: three bottom tabs — Wallpapers / Workshop / Discover.
+
+Version: 0.8.11-alpha, versionCode 129 (still 0.8.x per mandate).
+
+Reminders added:
+  105. Compose BOM 2024.10.01 (M3 1.3.0): FilterChip's onClick is
+      non-nullable — long-press via a separate pointerInput
+      detectTapGestures(onLongPress=…) modifier (taps stay with the
+      chip). TimePicker + rememberTimePickerState are
+      @ExperimentalMaterial3Api — ONE picker with a From/To segmented
+      switch fits an AlertDialog; two stacked do not.
+  106. Gson bypasses constructors: parse into a nullable-fields "Raw"
+      twin class, then normalize into the non-null model — a data class
+      with non-null defaults still yields null fields from partial JSON.
+  107. rememberCoroutineScope inside a launched coroutine: scope.launch
+      parents to the SCOPE, not the calling coroutine — the nested
+      prefetch launch in DiscoverScreen deliberately outlives the outer
+      apply coroutine but dies with the screen. Keep that pattern for
+      fire-and-forget prefetches.

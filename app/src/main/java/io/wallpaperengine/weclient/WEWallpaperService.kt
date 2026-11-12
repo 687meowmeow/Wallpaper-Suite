@@ -248,6 +248,16 @@ class WEWallpaperService : WallpaperService() {
             private var playlistActive: Boolean = false
             private var playlistData = PlaylistData()
 
+            // ── v0.8.11: WallpaperSuite multi-playlist ──
+            // When a suite playlist is ACTIVE it drives the rotation
+            // INSTEAD of the official single playlist: random/ordered
+            // order, an interval, and time rules that pin a wallpaper
+            // (or a group) to a window of the day.
+            private var suiteMode: Boolean = false
+            private var suiteEntries: List<String> = emptyList()
+            private var suiteOrderRandom: Boolean = true
+            private var suitePlaylist: com.wepwawet.playlist.SuitePlaylistStore.Playlist? = null
+
             private fun reloadRandomPool() {
                 randomPool.clear()
                 for (wallpaper in playlistData.wallpapers) {
@@ -270,6 +280,14 @@ class WEWallpaperService : WallpaperService() {
             }
 
             fun syncSettings() {
+                val suiteActive =
+                    com.wepwawet.playlist.SuitePlaylistStore.activePlaylist(this@WEWallpaperService)
+                if (suiteActive != null && suiteActive.entries.isNotEmpty()) {
+                    syncSuiteSettings(suiteActive)
+                    return
+                }
+                suiteMode = false
+                suitePlaylist = null
                 playlistData = WeEnginePrefs.readPlaylist(this@WEWallpaperService)
                 // v0.8.3: the mode lives INSIDE the playlist JSON (official
                 // model); the legacy pref is the fallback for old installs.
@@ -318,6 +336,60 @@ class WEWallpaperService : WallpaperService() {
                             timePlaylist.add(entry)
                         }
                         if (sortedPosition < 0) sortedPosition = 1
+                    }
+                }
+            }
+
+            /**
+             * v0.8.11: load the ACTIVE suite playlist into the runtime
+             * fields. The official single-playlist structures are cleared
+             * so no stale state leaks between modes.
+             */
+            private fun syncSuiteSettings(playlist: com.wepwawet.playlist.SuitePlaylistStore.Playlist) {
+                suiteMode = true
+                suitePlaylist = playlist
+                suiteEntries = playlist.entries.map { it.filepath }
+                suiteOrderRandom =
+                    playlist.orderMode == com.wepwawet.playlist.SuitePlaylistStore.ORDER_RANDOM
+                duration = playlist.intervalMinutes * 60000
+                isValid = suiteEntries.isNotEmpty()
+                randomPool.clear()
+                fullSortedList.clear()
+                timePlaylist.clear()
+                fullSortedList.addAll(suiteEntries)
+                sortedPosition = suiteEntries.indexOf(currentFile).let { if (it < 0) 0 else it }
+                WepWawetLogger.engine(
+                    "Service: suite playlist active",
+                    "name" to playlist.name,
+                    "entries" to suiteEntries.size,
+                    "order" to playlist.orderMode,
+                    "interval_min" to playlist.intervalMinutes,
+                    "time_rules" to playlist.timeRules.size)
+            }
+
+            /** The entries that own the current minute (time rule) — or the whole playlist. */
+            private fun suiteSetForNow(): List<String> {
+                val playlist = suitePlaylist ?: return emptyList()
+                val ruleSet = com.wepwawet.playlist.SuitePlaylistStore
+                    .entriesForMinute(playlist, com.wepwawet.playlist.SuitePlaylistStore.currentMinuteOfDay())
+                return ruleSet ?: suiteEntries
+            }
+
+            /** Pick the next wallpaper inside the current set per the order mode. */
+            private fun suitePickNew(): String {
+                val set = suiteSetForNow()
+                if (set.isEmpty()) return ""
+                if (set.size == 1) return set[0]
+                val currentIndex = set.indexOf(currentFile)
+                return when {
+                    suiteOrderRandom -> {
+                        val candidates = set.filter { it != currentFile }
+                        if (candidates.isEmpty()) set[0]
+                        else candidates[kotlin.random.Random.nextInt(candidates.size)]
+                    }
+                    else -> {
+                        val next = if (currentIndex >= 0) (currentIndex + 1) % set.size else 0
+                        set[next]
                     }
                 }
             }
@@ -403,6 +475,16 @@ class WEWallpaperService : WallpaperService() {
 
             fun shouldUpdateWallpaper(): Boolean {
                 if (!isActive() || isPreview) return false
+                if (suiteMode) {
+                    val set = suiteSetForNow()
+                    if (set.isEmpty()) return false
+                    // A window change (or playlist edit) that no longer
+                    // contains the current wallpaper switches immediately.
+                    if (currentFile != null && currentFile !in set) return true
+                    // A single-entry window pins its wallpaper.
+                    if (set.size <= 1) return false
+                    return (System.currentTimeMillis() - lastChangeTime) > duration
+                }
                 val currentTime = System.currentTimeMillis()
                 return when (mode) {
                     WallpaperProperties.PLAYLIST_MODE_RANDOM,
@@ -416,6 +498,7 @@ class WEWallpaperService : WallpaperService() {
             }
 
             fun getNewWallpaper(): String {
+                if (suiteMode) return suitePickNew()
                 when (mode) {
                     WallpaperProperties.PLAYLIST_MODE_RANDOM -> {
                         if (randomPool.isEmpty()) reloadRandomPool()

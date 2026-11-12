@@ -34,6 +34,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Label
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.PushPin
@@ -41,7 +42,9 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -52,6 +55,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
@@ -75,6 +79,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.wepwawet.engine.EngineLibrary
 import com.wepwawet.log.WepWawetLogger
 import com.wepwawet.ui.components.SlimTopBar
@@ -87,13 +93,21 @@ import java.util.Locale
 
 /**
  * The library grid — parity with the official client's browse screen plus
- * the pin feature the user asked for:
+ * our own additions:
  *
  *  - Search (the official SearchView: live title filter, cleared on close).
  *  - Sort menu: Newest / Oldest / Alphabetically Ascending / Descending
  *    (official SortMethod; NEWEST by lastModifiedDate desc is the default).
  *  - Pin: long-press a wallpaper → "Pin to top"; pinned wallpapers float
  *    above every sort, keeping the sort order within the pinned group.
+ *  - TAGS (v0.8.11, renamed from "groups" — the user asked for sorting by
+ *    tagging): the chip row filters the grid by tag; long-press a chip to
+ *    rename/delete the tag; long-press a wallpaper to tag it.
+ *  - FOLDERS (v0.8.11 — the Folders tab folded INTO this page): every
+ *    picked SAF folder gets its own chip; selecting it grids the folder's
+ *    images; tapping one packs + applies it like any other wallpaper.
+ *  - Playlist: long-press a wallpaper → "Add to playlist" (the saved,
+ *    editable WallpaperSuite playlists).
  *  - The card matches content_browse_item.xml: square thumbnail with the
  *    title overlaid at the bottom on a 60% black scrim, three lines max —
  *    no type label below the name (user request; the official grid has
@@ -106,6 +120,7 @@ fun LibraryScreen(
     onOpenWallpaper: (WallpaperInfoSparse) -> Unit,
     onOpenDownloads: () -> Unit,
     onOpenWorkshopItem: (itemId: String) -> Unit = {},
+    onOpenPlaylists: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -125,18 +140,29 @@ fun LibraryScreen(
     // Pins
     var pinned by remember { mutableStateOf<Set<String>>(emptySet()) }
     var contextMenuFor by remember { mutableStateOf<WallpaperInfoSparse?>(null) }
-    var playlistTarget by remember { mutableStateOf<WallpaperInfoSparse?>(null) }
+    var playlistPickerFor by remember { mutableStateOf<WallpaperInfoSparse?>(null) }
 
-    // ===== v0.9.0: Groups =====
+    // ===== v0.8.11: TAGS (renamed from groups) =====
     var groups by remember { mutableStateOf<List<String>>(emptyList()) }
     var groupOf by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var activeGroup by remember { mutableStateOf<String?>(null) }
-    // The wallpaper whose "Add to group" dialog is open.
+    // The wallpaper whose "Add tag" dialog is open.
     var groupTarget by remember { mutableStateOf<WallpaperInfoSparse?>(null) }
-    // New-group creation dialog (from the "＋" chip).
+    // New-tag creation dialog (from the "＋" chip).
     var showNewGroupDialog by remember { mutableStateOf(false) }
-    // Rename/delete dialog for a group (long-press a group chip).
+    // Rename/delete dialog for a tag (long-press a tag chip).
     var manageGroupName by remember { mutableStateOf<String?>(null) }
+
+    // ===== v0.8.11: FOLDERS (integrated into this page) =====
+    var folders by remember { mutableStateOf<List<ImageFolderAssets.SavedFolder>>(emptyList()) }
+    var activeFolder by remember { mutableStateOf<String?>(null) }
+    var folderImages by remember { mutableStateOf<List<ImageFolderAssets.ImageEntry>>(emptyList()) }
+    var folderLoading by remember { mutableStateOf(false) }
+    var folderSortNewest by remember { mutableStateOf(true) }
+    var removeFolderTarget by remember { mutableStateOf<ImageFolderAssets.SavedFolder?>(null) }
+    // The folder image whose fullscreen preview dialog is open.
+    var selectedImage by remember { mutableStateOf<ImageFolderAssets.ImageEntry?>(null) }
+    var workingImage by remember { mutableStateOf(false) }
 
     fun reload() {
         scope.launch {
@@ -147,7 +173,86 @@ fun LibraryScreen(
             pinned = LibraryPrefs.readPinned(context)
             groups = LibraryPrefs.readGroups(context)
             groupOf = LibraryPrefs.readGroupOf(context)
+            folders = ImageFolderAssets.readFolders(context)
             loading = false
+        }
+    }
+
+    // v0.8.11: the folder picker — adds a folder (persistable grant kept).
+    val folderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            ImageFolderAssets.addFolder(context, uri.toString())
+            folders = ImageFolderAssets.readFolders(context)
+            activeFolder = uri.toString()
+            WepWawetLogger.appInfo("LibraryScreen: folder picked",
+                "uri" to uri.toString().take(120))
+        }
+    }
+
+    // v0.8.11: enumerate the selected folder's images (sorted).
+    LaunchedEffect(activeFolder, folderSortNewest) {
+        val folder = activeFolder ?: return@LaunchedEffect
+        folderLoading = true
+        val list = withContext(Dispatchers.IO) {
+            ImageFolderAssets.enumerateFolderImages(context, folder)
+        }
+        folderImages = if (folderSortNewest) list.sortedByDescending { it.lastModified }
+        else list.sortedBy { it.displayName.lowercase() }
+        folderLoading = false
+        WepWawetLogger.appInfo("LibraryScreen: folder enumerated",
+            "count" to folderImages.size)
+    }
+
+    /** v0.8.11: pack (or reuse) + import + apply a folder image. */
+    fun setFolderImageAsWallpaper(entry: ImageFolderAssets.ImageEntry) {
+        if (workingImage) return
+        workingImage = true
+        scope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    ImageFolderAssets.packAndImportImage(context, entry)
+                }
+                if (result != null) {
+                    WeEnginePrefs.callApplyWallpaper(context, result, false)
+                    snackbar.showSnackbar("Wallpaper set — \"${result.title}\"")
+                    WepWawetLogger.appInfo("LibraryScreen: folder image set",
+                        "file" to result.filePath)
+                } else {
+                    snackbar.showSnackbar("Failed to pack the image (see logs)")
+                }
+            } finally {
+                workingImage = false
+                selectedImage = null
+            }
+        }
+    }
+
+    /** v0.8.11: set a folder image as the plain SYSTEM wallpaper. */
+    fun setFolderImageAsSystemWallpaper(entry: ImageFolderAssets.ImageEntry) {
+        if (workingImage) return
+        workingImage = true
+        scope.launch {
+            try {
+                val ok = withContext(Dispatchers.IO) {
+                    val bmp = ImageFolderAssets.decodeBitmapScaled(context, entry.uri, 4096)
+                        ?: return@withContext false
+                    val crop = com.wepwawet.nyanpasu.NyanpasuApplier.cropForScreen(context, bmp)
+                    val result = com.wepwawet.nyanpasu.NyanpasuApplier.apply(
+                        context, crop, homeOn = true, lockOn = true)
+                    result.ok
+                }
+                snackbar.showSnackbar(
+                    if (ok) "System wallpaper set" else "System wallpaper write failed")
+            } finally {
+                workingImage = false
+                selectedImage = null
+            }
         }
     }
 
@@ -369,9 +474,11 @@ fun LibraryScreen(
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            // ===== Group filter chips =====
-            // "All" + one chip per group + a "＋" chip to create a group.
-            // Tap a chip to filter; long-press a group chip to rename/delete.
+            // ===== Tag + folder filter chips =====
+            // "All" + one chip per TAG + one chip per picked FOLDER +
+            // "＋ Tag" / "＋ Folder" to create/add.
+            // Tap a chip to filter; long-press a tag chip to rename/delete;
+            // long-press a folder chip to remove the folder.
             androidx.compose.foundation.layout.Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -380,15 +487,21 @@ fun LibraryScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 FilterChip(
-                    selected = activeGroup == null,
-                    onClick = { activeGroup = null },
+                    selected = activeGroup == null && activeFolder == null,
+                    onClick = {
+                        activeGroup = null
+                        activeFolder = null
+                    },
                     label = { Text("All (${wallpapers.size})") },
                 )
                 for (group in groups) {
                     val count = groupOf.count { it.value == group }
                     FilterChip(
                         selected = activeGroup == group,
-                        onClick = { activeGroup = if (activeGroup == group) null else group },
+                        onClick = {
+                            activeFolder = null
+                            activeGroup = if (activeGroup == group) null else group
+                        },
                         // Long-press → rename/delete dialog. detectTapGestures
                         // with only onLongPress doesn't consume taps, so the
                         // chip's own onClick keeps handling those (M3 1.3's
@@ -396,20 +509,128 @@ fun LibraryScreen(
                         modifier = Modifier.pointerInput(group) {
                             detectTapGestures(onLongPress = { manageGroupName = group })
                         },
-                        label = { Text("$group ($count)") },
+                        label = { Text("${group} ($count)") },
                         leadingIcon = if (activeGroup == group) {
                             { Icon(Icons.Filled.Folder, contentDescription = null, modifier = Modifier.height(16.dp)) }
                         } else null,
                     )
                 }
+                // v0.8.11: folder chips — the Folders tab, folded in here.
+                for (folder in folders) {
+                    FilterChip(
+                        selected = activeFolder == folder.treeUri,
+                        onClick = {
+                            activeGroup = null
+                            activeFolder =
+                                if (activeFolder == folder.treeUri) null else folder.treeUri
+                        },
+                        modifier = Modifier.pointerInput(folder.treeUri) {
+                            detectTapGestures(onLongPress = { removeFolderTarget = folder })
+                        },
+                        label = { Text(folder.name) },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Filled.FolderOpen,
+                                contentDescription = null,
+                                modifier = Modifier.height(16.dp),
+                            )
+                        },
+                    )
+                }
                 FilterChip(
                     selected = false,
                     onClick = { showNewGroupDialog = true },
-                    label = { Text("＋ New group") },
+                    label = { Text("＋ Tag") },
+                )
+                FilterChip(
+                    selected = false,
+                    onClick = {
+                        try {
+                            folderPicker.launch(null)
+                        } catch (t: Throwable) {
+                            WepWawetLogger.appWarn("LibraryScreen: folder picker failed",
+                                "exception" to t.javaClass.name)
+                        }
+                    },
+                    label = { Text("＋ Folder") },
                 )
             }
 
             when {
+                // v0.8.11: a folder is selected — grid its images.
+                activeFolder != null -> {
+                    when {
+                        folderLoading -> {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator()
+                            }
+                        }
+                        folderImages.isEmpty() -> {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(32.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center,
+                            ) {
+                                Text("No images in this folder",
+                                    style = MaterialTheme.typography.titleMedium)
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    "Supported: JPG, PNG, WebP, GIF.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Spacer(Modifier.height(16.dp))
+                                OutlinedButton(onClick = {
+                                    try { folderPicker.launch(null) } catch (_: Throwable) {}
+                                }) {
+                                    Text("Add another folder")
+                                }
+                            }
+                        }
+                        else -> {
+                            // Folder header: name + count + sort toggle.
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        ImageFolderAssets.folderDisplayName(activeFolder!!),
+                                        style = MaterialTheme.typography.titleSmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        "${folderImages.size} images — tap one to set it",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                TextButton(onClick = {
+                                    folderSortNewest = !folderSortNewest
+                                }) {
+                                    Text(if (folderSortNewest) "Newest" else "A–Z")
+                                }
+                            }
+                            LazyVerticalGrid(
+                                columns = GridCells.Adaptive(minSize = 120.dp),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                                    start = 4.dp, end = 4.dp, top = 4.dp, bottom = 24.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.fillMaxSize(),
+                            ) {
+                                items(folderImages, key = { it.uri }) { entry ->
+                                    FolderImageCell(entry) { selectedImage = entry }
+                                }
+                            }
+                        }
+                    }
+                }
                 loading -> {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator()
@@ -431,8 +652,8 @@ fun LibraryScreen(
                         Spacer(Modifier.height(8.dp))
                         Text(
                             if (filterText.isBlank())
-                                "Browse the Workshop tab or import .mpkg / video / image files " +
-                                    "with the + button up top."
+                                "Browse the Workshop tab, import files with the + button, " +
+                                    "or add a folder of your own images with the ＋ Folder chip."
                             else "Try a different search or change the sort.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -490,7 +711,7 @@ fun LibraryScreen(
                     label = "Add to playlist",
                 ) {
                     contextMenuFor = null
-                    playlistTarget = target
+                    playlistPickerFor = target
                 }
                 ContextAction(
                     icon = {
@@ -514,7 +735,7 @@ fun LibraryScreen(
                             "pinned" to !isPinned)
                     }
                 }
-                // ===== v0.9.0: Add to group =====
+                // ===== v0.8.11: Add tag =====
                 val targetGroup = groupOf[target.filePath]
                 ContextAction(
                     icon = {
@@ -524,8 +745,8 @@ fun LibraryScreen(
                         )
                     },
                     label = if (targetGroup != null)
-                        "Group: $targetGroup (change)"
-                    else "Add to group",
+                        "Tag: $targetGroup (change)"
+                    else "Add tag",
                 ) {
                     contextMenuFor = null
                     groupTarget = target
@@ -558,35 +779,30 @@ fun LibraryScreen(
         }
     }
 
-    // ===== Playlist add =====
-    playlistTarget?.let { target ->
-        AlertDialog(
-            onDismissRequest = { playlistTarget = null },
-            title = { Text("Playlist") },
-            text = {
-                Text("Add \"${target.title.ifEmpty { "wallpaper" }}\" to the wallpaper playlist?")
+    // ===== Playlist add (v0.8.11: the saved suite playlists) =====
+    playlistPickerFor?.let { target ->
+        com.wepwawet.playlist.PlaylistPickerDialog(
+            wallpaperTitle = target.title.ifEmpty {
+                target.filePath.substringAfterLast('/')
             },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        scope.launch {
-                            withContext(Dispatchers.IO) {
-                                val playlist = WeEnginePrefs.readPlaylist(context)
-                                val entry = io.wallpaperengine.wedata.PlaylistDataWallpaper()
-                                entry.filepath = target.filePath
-                                entry.duration = 60
-                                playlist.wallpapers.removeAll { it.filepath == target.filePath }
-                                playlist.wallpapers.add(entry)
-                                WeEnginePrefs.storePlaylist(context, playlist)
-                            }
-                            playlistTarget = null
-                            snackbar.showSnackbar("Added to playlist")
-                        }
+            onDismiss = { playlistPickerFor = null },
+            onManagePlaylists = {
+                playlistPickerFor = null
+                onOpenPlaylists()
+            },
+            onPicked = { playlistId ->
+                val path = target.filePath
+                val title = target.title.ifEmpty { path.substringAfterLast('/') }
+                val type = target.type
+                scope.launch {
+                    withContext(Dispatchers.IO) {
+                        com.wepwawet.playlist.SuitePlaylistStore.addEntry(
+                            context, playlistId,
+                            com.wepwawet.playlist.SuitePlaylistStore.Entry(path, title, type))
                     }
-                ) { Text("Add") }
-            },
-            dismissButton = {
-                TextButton(onClick = { playlistTarget = null }) { Text("Cancel") }
+                    playlistPickerFor = null
+                    snackbar.showSnackbar("Added to playlist")
+                }
             },
         )
     }
@@ -608,10 +824,13 @@ fun LibraryScreen(
                                 WepWawetLogger.engineWarn(
                                     "Failed deleting cache for ${victim.filePath}")
                             }
-                            // a deleted wallpaper must not stay pinned
+                            // a deleted wallpaper must not stay pinned / tagged /
+                            // inside a suite playlist
                             withContext(Dispatchers.IO) {
                                 LibraryPrefs.setPinned(context, victim.filePath, false)
                                 LibraryPrefs.assignToGroup(context, victim.filePath, null)
+                                com.wepwawet.playlist.SuitePlaylistStore
+                                    .removeEntryEverywhere(context, victim.filePath)
                             }
                             pendingDelete = null
                             reload()
@@ -625,20 +844,20 @@ fun LibraryScreen(
         )
     }
 
-    // ===== v0.9.0: Group dialogs =====
+    // ===== v0.8.11: Tag dialogs =====
 
-    // New group creation (the "＋ New group" chip).
+    // New tag creation (the "＋ Tag" chip).
     if (showNewGroupDialog) {
         var newGroupName by remember { mutableStateOf("") }
         AlertDialog(
             onDismissRequest = { showNewGroupDialog = false },
-            title = { Text("New group") },
+            title = { Text("New tag") },
             text = {
                 OutlinedTextField(
                     value = newGroupName,
                     onValueChange = { newGroupName = it.take(30) },
                     singleLine = true,
-                    label = { Text("Group name") },
+                    label = { Text("Tag name") },
                 )
             },
             confirmButton = {
@@ -659,12 +878,12 @@ fun LibraryScreen(
         )
     }
 
-    // Assign a wallpaper to a group (context menu → "Add to group").
+    // Assign a wallpaper to a tag (context menu → "Add tag").
     groupTarget?.let { target ->
         val currentGroup = groupOf[target.filePath]
         AlertDialog(
             onDismissRequest = { groupTarget = null },
-            title = { Text("Add to group") },
+            title = { Text("Add tag") },
             text = {
                 Column {
                     Text(
@@ -674,7 +893,7 @@ fun LibraryScreen(
                     )
                     Spacer(Modifier.height(8.dp))
                     if (groups.isEmpty()) {
-                        Text("No groups yet — create one below.")
+                        Text("No tags yet — create one below.")
                     } else {
                         for (group in groups) {
                             Row(
@@ -684,9 +903,9 @@ fun LibraryScreen(
                                         LibraryPrefs.assignToGroup(context, target.filePath, group)
                                         groupOf = LibraryPrefs.readGroupOf(context)
                                         groupTarget = null
-                                        WepWawetLogger.engine("LibraryScreen: assigned to group",
+                                        WepWawetLogger.engine("LibraryScreen: assigned to tag",
                                             "file" to target.filePath,
-                                            "group" to group)
+                                            "tag" to group)
                                     }
                                     .padding(vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -707,7 +926,7 @@ fun LibraryScreen(
                             value = inlineNewGroup,
                             onValueChange = { inlineNewGroup = it.take(30) },
                             singleLine = true,
-                            label = { Text("New group") },
+                            label = { Text("New tag") },
                             modifier = Modifier.weight(1f),
                         )
                         Spacer(Modifier.width(8.dp))
@@ -734,7 +953,7 @@ fun LibraryScreen(
                                 groupOf = LibraryPrefs.readGroupOf(context)
                                 groupTarget = null
                             },
-                        ) { Text("Remove from group") }
+                        ) { Text("Remove tag") }
                     }
                     TextButton(onClick = { groupTarget = null }) { Text("Done") }
                 }
@@ -742,23 +961,23 @@ fun LibraryScreen(
         )
     }
 
-    // Rename / delete a group (long-press a group chip).
+    // Rename / delete a tag (long-press a tag chip).
     manageGroupName?.let { group ->
         var renameTo by remember(group) { mutableStateOf(group) }
         AlertDialog(
             onDismissRequest = { manageGroupName = null },
-            title = { Text("Group \"$group\"") },
+            title = { Text("Tag \"$group\"") },
             text = {
                 Column {
                     OutlinedTextField(
                         value = renameTo,
                         onValueChange = { renameTo = it.take(30) },
                         singleLine = true,
-                        label = { Text("Rename group") },
+                        label = { Text("Rename tag") },
                     )
                     Spacer(Modifier.height(12.dp))
                     Text(
-                        "Deleting the group keeps its wallpapers — they just return to \"All\".",
+                        "Deleting the tag keeps its wallpapers — they just return to \"All\".",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -784,13 +1003,112 @@ fun LibraryScreen(
                             groupOf = LibraryPrefs.readGroupOf(context)
                             manageGroupName = null
                         },
-                    ) { Text("Delete group") }
+                    ) { Text("Delete tag") }
                 }
             },
             dismissButton = {
                 TextButton(onClick = { manageGroupName = null }) { Text("Cancel") }
             },
         )
+    }
+
+    // ===== v0.8.11: Remove-folder dialog (long-press a folder chip) =====
+    removeFolderTarget?.let { folder ->
+        AlertDialog(
+            onDismissRequest = { removeFolderTarget = null },
+            title = { Text("Remove folder?") },
+            text = {
+                Text("\"${folder.name}\" disappears from this page. Its files stay on " +
+                    "your device; wallpapers already set from it keep working.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        ImageFolderAssets.removeFolder(context, folder.treeUri)
+                        if (activeFolder == folder.treeUri) activeFolder = null
+                        folders = ImageFolderAssets.readFolders(context)
+                        removeFolderTarget = null
+                    },
+                ) { Text("Remove") }
+            },
+            dismissButton = {
+                TextButton(onClick = { removeFolderTarget = null }) { Text("Cancel") }
+            },
+        )
+    }
+
+    // ===== v0.8.11: Folder image fullscreen preview + set =====
+    selectedImage?.let { entry ->
+        var fullBitmap by remember(entry.uri) { mutableStateOf<Bitmap?>(null) }
+        LaunchedEffect(entry.uri) {
+            fullBitmap = withContext(Dispatchers.IO) {
+                ImageFolderAssets.decodeBitmapScaled(context, entry.uri, 2048)
+            }
+        }
+        Dialog(
+            onDismissRequest = { if (!workingImage) selectedImage = null },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(vertical = 48.dp, horizontal = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    val bmp = fullBitmap
+                    if (bmp != null) {
+                        Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = entry.displayName,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    } else {
+                        CircularProgressIndicator()
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    entry.displayName,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { setFolderImageAsSystemWallpaper(entry) },
+                        enabled = !workingImage,
+                        modifier = Modifier.weight(1f),
+                    ) { Text("System wallpaper") }
+                    Button(
+                        onClick = { setFolderImageAsWallpaper(entry) },
+                        enabled = !workingImage && fullBitmap != null,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        if (workingImage) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                        } else {
+                            Icon(Icons.Filled.Wallpaper, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        Text("Set as wallpaper")
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                TextButton(onClick = { if (!workingImage) selectedImage = null }) { Text("Close") }
+            }
+        }
     }
 }
 
@@ -936,6 +1254,52 @@ private fun queryDisplayName(context: android.content.Context, uri: android.net.
         }
     } catch (t: Throwable) {
         null
+    }
+}
+
+/**
+ * One folder-image cell in the library grid (v0.8.11): square, 4dp-gap
+ * friendly, subsampled stream decode (~512 px) — same visual rhythm as
+ * the wallpaper cards.
+ */
+@Composable
+private fun FolderImageCell(
+    entry: ImageFolderAssets.ImageEntry,
+    onClick: () -> Unit,
+) {
+    val context = LocalContext.current
+    var bitmap by remember(entry.uri) { mutableStateOf<Bitmap?>(null) }
+    var loaded by remember(entry.uri) { mutableStateOf(false) }
+
+    LaunchedEffect(entry.uri) {
+        withContext(Dispatchers.IO) {
+            bitmap = ImageFolderAssets.decodeBitmapScaled(context, entry.uri, 512)
+            loaded = true
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clickable(onClick = onClick),
+    ) {
+        val bmp = bitmap
+        if (bmp != null) {
+            Image(
+                bitmap = bmp.asImageBitmap(),
+                contentDescription = entry.displayName,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else if (!loaded) {
+            CircularProgressIndicator(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(24.dp))
+        }
     }
 }
 

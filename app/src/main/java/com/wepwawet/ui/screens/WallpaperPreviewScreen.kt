@@ -130,6 +130,8 @@ fun WallpaperPreviewScreen(
     onBack: () -> Unit,
     onOpenWorkshop: (itemId: String) -> Unit = {},
     onOpenSettings: () -> Unit = {},
+    // v0.8.11: "Manage" in the playlist picker jumps to the playlist manager.
+    onOpenPlaylists: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -203,11 +205,18 @@ fun WallpaperPreviewScreen(
         applied = EngineLibrary.getSelectedWallpaper(context) == wallpaper.filePath
         scope.launch {
             withContext(Dispatchers.IO) {
-                val playlist = WeEnginePrefs.readPlaylist(context)
+                // v0.8.11: the active suite playlist drives the rotation;
+                // fall back to the official single playlist when none is
+                // active (legacy installs).
+                val suiteActive = com.wepwawet.playlist.SuitePlaylistStore
+                    .activePlaylist(context)
+                val official = WeEnginePrefs.readPlaylist(context)
+                val playlistLive = (suiteActive != null && suiteActive.entries.isNotEmpty()) ||
+                    official.wallpapers.isNotEmpty()
                 val service = WEWallpaperService.instance
                 val live = service?.isLiveWallpaperActive == true
-                playlistActive = playlist.wallpapers.isNotEmpty() && live
-                playlistActiveWithoutService = playlist.wallpapers.isNotEmpty() && !live
+                playlistActive = playlistLive && live
+                playlistActiveWithoutService = playlistLive && !live
             }
         }
     }
@@ -812,26 +821,29 @@ fun WallpaperPreviewScreen(
         }
 
         if (showPlaylistDialog) {
-            AlertDialog(
-                onDismissRequest = { showPlaylistDialog = false },
-                title = { Text("Playlist") },
-                text = {
-                    Text("Add \"${wallpaper.title.ifEmpty { "wallpaper" }}\" to the wallpaper playlist?")
+            // v0.8.11: the shared suite-playlist picker (saved + editable
+            // playlists) — replaces the old single-playlist confirm dialog.
+            com.wepwawet.playlist.PlaylistPickerDialog(
+                wallpaperTitle = wallpaper.title.ifEmpty {
+                    wallpaper.filePath.substringAfterLast('/')
                 },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            scope.launch {
-                                withContext(Dispatchers.IO) {
-                                    addWallpaperToPlaylist(context, wallpaper, true)
-                                }
-                                showPlaylistDialog = false
-                            }
+                onDismiss = { showPlaylistDialog = false },
+                onManagePlaylists = {
+                    showPlaylistDialog = false
+                    onOpenPlaylists()
+                },
+                onPicked = { playlistId ->
+                    val path = wallpaper.filePath
+                    val title = wallpaper.title.ifEmpty { path.substringAfterLast('/') }
+                    val type = wallpaper.type
+                    scope.launch {
+                        withContext(Dispatchers.IO) {
+                            com.wepwawet.playlist.SuitePlaylistStore.addEntry(
+                                context, playlistId,
+                                com.wepwawet.playlist.SuitePlaylistStore.Entry(path, title, type))
                         }
-                    ) { Text("Add") }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showPlaylistDialog = false }) { Text("Cancel") }
+                        showPlaylistDialog = false
+                    }
                 },
             )
         }

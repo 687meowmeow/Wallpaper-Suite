@@ -131,13 +131,14 @@ class NyanpasuApplyWorker(context: Context, params: WorkerParameters) :
     CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         val ctx = applicationContext
-        val homeOn = NyanpasuPrefs.readHomeOn(ctx)
-        val lockOn = NyanpasuPrefs.readLockOn(ctx)
-        val lockSame = NyanpasuPrefs.readLockSame(ctx)
-        if (!homeOn && !lockOn) {
+        val (homeState, lockState) = NyanpasuPrefs.readScreens(ctx)
+        if (homeState == NyanpasuPrefs.SCREEN_OFF && lockState == NyanpasuPrefs.SCREEN_OFF) {
             WepWawetLogger.appInfo("NyanpasuApplyWorker: both screens off — nothing to do")
             return Result.success()
         }
+        val homeOn = NyanpasuPrefs.homeRequired(homeState)
+        val lockOn = NyanpasuPrefs.lockRequired(lockState)
+        val dual = NyanpasuPrefs.isDualMode(homeState, lockState)
         try {
             // v0.8.10 (v1.0.0 prefetch): scheduled runs consume the
             // prefetched image when it's fresh, then queue the next one.
@@ -171,9 +172,9 @@ class NyanpasuApplyWorker(context: Context, params: WorkerParameters) :
                 ?: return Result.retry()
 
             var lockBitmap: Bitmap? = null
-            if (lockOn && !lockSame) {
+            if (dual) {
                 // Dual mode — a separate image for the lock screen
-                // (v1.0.0's 粉蓝异色双图).
+                // (v1.0.0's pink-blue independent pair).
                 val lockUrl = NyanpasuSearch.searchOne(
                     context = ctx,
                     strictTags = NyanpasuPrefs.readStrictTags(ctx),
@@ -189,7 +190,7 @@ class NyanpasuApplyWorker(context: Context, params: WorkerParameters) :
 
             val homeCrop = NyanpasuApplier.cropForScreen(ctx, bitmap)
             val lockCrop = lockBitmap?.let { NyanpasuApplier.cropForScreen(ctx, it) }
-            val result = NyanpasuApplier.apply(ctx, homeCrop, homeOn, lockOn, lockCrop)
+            val result = NyanpasuApplier.applyScreens(ctx, homeCrop, homeState, lockState, lockCrop)
             NyanpasuApplier.pushHistory(ctx, homeCrop)
             if (result.ok) {
                 notifyApplied(ctx)
@@ -241,8 +242,8 @@ class NyanpasuApplyWorker(context: Context, params: WorkerParameters) :
             val nm = ctx.getSystemService(NotificationManager::class.java)
             nm.createNotificationChannel(
                 NotificationChannel(
-                    "daily_auto_wallpaper",
-                    "Daily auto wallpaper",
+                    "discover_auto_wallpaper",
+                    "Discover auto wallpaper",
                     NotificationManager.IMPORTANCE_LOW,
                 ).apply { setShowBadge(false) })
         }
@@ -250,9 +251,9 @@ class NyanpasuApplyWorker(context: Context, params: WorkerParameters) :
 
     private fun notifyApplied(ctx: Context) = try {
         ensureChannel(ctx)
-        val notif = NotificationCompat.Builder(ctx, "daily_auto_wallpaper")
+        val notif = NotificationCompat.Builder(ctx, "discover_auto_wallpaper")
             .setSmallIcon(android.R.drawable.ic_menu_gallery)
-            .setContentTitle("Daily wallpaper updated")
+            .setContentTitle("Discover wallpaper updated")
             .setContentText("A fresh image was applied to your screens.")
             .setAutoCancel(true)
             .build()
@@ -264,9 +265,9 @@ class NyanpasuApplyWorker(context: Context, params: WorkerParameters) :
 
     private fun notifyFailed(ctx: Context) = try {
         ensureChannel(ctx)
-        val notif = NotificationCompat.Builder(ctx, "daily_auto_wallpaper")
+        val notif = NotificationCompat.Builder(ctx, "discover_auto_wallpaper")
             .setSmallIcon(android.R.drawable.ic_menu_gallery)
-            .setContentTitle("Daily wallpaper update failed")
+            .setContentTitle("Discover wallpaper update failed")
             .setContentText("Keeping the current wallpaper. Will retry on schedule.")
             .setAutoCancel(true)
             .build()

@@ -17,15 +17,16 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
- * Nyanpasu clone — image processing + system wallpaper application.
+ * Discover — image processing + system wallpaper application.
  *
  * Based on Nyanpasu Wallpaper v1.0.0 by FranklinNexus (MIT License):
- *   • centerCrop to the physical screen (WYSIWYG: the same math the
- *     preview uses, so what you see is what gets applied);
+ *   • centerCrop to the physical screen;
  *   • WallpaperManager write retry (OEMs occasionally drop the first
  *     setBitmap call — 3 attempts with a short delay);
  *   • software-bitmap normalization for WallpaperManager;
- *   • 5-deep apply history + save-to-gallery.
+ *   • 5-deep apply history + save-to-gallery;
+ *   • v1.0.0 tri-state target model (see [applyScreens]): same color on
+ *     home+lock = one bitmap for both, different colors = two bitmaps.
  */
 object NyanpasuApplier {
 
@@ -149,6 +150,26 @@ object NyanpasuApplier {
             "lock_ok" to lockOk,
             "separate_lock" to (lockBitmap != null))
         ApplyResult(homeOk, lockOk)
+    }
+
+    /**
+     * v1.0.0 WallpaperTargetMode apply: `homeState`/`lockState` are the
+     * tri-state values (0 off / 1 pink / 2 blue).
+     *   • both on, same color   → ONE bitmap on both screens (sync)
+     *   • both on, colors differ → [bitmap] on home, [lockBitmap] on lock
+     *   • one on                → that screen only
+     */
+    suspend fun applyScreens(
+        context: Context,
+        bitmap: Bitmap,
+        homeState: Int,
+        lockState: Int,
+        lockBitmap: Bitmap? = null,
+    ): ApplyResult {
+        val homeOn = NyanpasuPrefs.homeRequired(homeState)
+        val lockOn = NyanpasuPrefs.lockRequired(lockState)
+        val separate = NyanpasuPrefs.isDualMode(homeState, lockState)
+        return apply(context, bitmap, homeOn, lockOn, if (separate) lockBitmap else null)
     }
 
     private suspend fun setWallpaperWithRetry(context: Context, bitmap: Bitmap, which: Int): Boolean {

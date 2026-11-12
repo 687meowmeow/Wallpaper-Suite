@@ -3,16 +3,19 @@ package com.wepwawet.nyanpasu
 import android.content.Context
 
 /**
- * Nyanpasu clone — settings persistence.
+ * Discover (the booru auto-wallpaper screen) — settings persistence.
  *
  * Based on Nyanpasu Wallpaper v1.0.0 by FranklinNexus (MIT License),
  * adapted to WallpaperSuite's prefs style. The 1.0 semantics are kept:
- *   • Strict tags  🔒 — required intent (searched first, hard preference)
- *   • Soft tags    🎲 — hints, attached with a 38% chance per query
+ *   • Strict tags — required intent (searched first, hard preference)
+ *   • Soft tags   — hints, attached with a 38% chance per query
  *   • Style slider — body-type preference bands (see NyanpasuSearch)
- *   • Content      — Pure / Mix / NSFW (SearchR18Policy)
- *   • Screens      — home/lock enabled flags + same-vs-different lock image
- *   • Schedule     — off / daily 7:00 / every 6 / 12 / 24 h
+ *   • Content     — Pure / Mix / NSFW (SearchR18Policy)
+ *   • Screens     — v1.0.0's TRI-STATE model: home/lock each cycle
+ *     Off → Pink → Blue. Same color on both = ONE image (sync mode);
+ *     different colors = TWO independent images (dual mode). This is
+ *     WallpaperTargetMode's exact contract (v0.8.11 port).
+ *   • Schedule    — off / daily 7:00 / every 6 / 12 / 24 h
  */
 object NyanpasuPrefs {
     private const val PREFS = "wallpapersuite_nyanpasu"
@@ -21,21 +24,30 @@ object NyanpasuPrefs {
     private const val KEY_SOFT_TAGS = "soft_tags"
     private const val KEY_STYLE = "style_value"
     private const val KEY_R18 = "r18_mode"
-    private const val KEY_HOME_ON = "home_on"
-    private const val KEY_LOCK_ON = "lock_on"
-    private const val KEY_LOCK_SAME = "lock_same_image"
     private const val KEY_SCHEDULE = "schedule_mode"
     private const val KEY_RECENT_URLS = "recent_urls"
-    // v0.8.10 (v1.0.0 feature port): first-run welcome + prefetch bookkeeping.
-    private const val KEY_WELCOME_SHOWN = "welcome_shown_v1"
     private const val KEY_PREFETCH_URL = "prefetch_url"
     private const val KEY_PREFETCH_AT = "prefetch_at"
 
-    /** v1.0.0 default: neutral style, Pure content, both screens on, same image. */
+    // ── v1.0.0 tri-state screens ─────────────────────────────────────
+    private const val KEY_HOME_STATE = "home_state"
+    private const val KEY_LOCK_STATE = "lock_state"
+
+    // Legacy v0.8.10 booleans (migrated once on first read).
+    private const val KEY_HOME_ON = "home_on"
+    private const val KEY_LOCK_ON = "lock_on"
+    private const val KEY_LOCK_SAME = "lock_same_image"
+
+    /** v1.0.0 default: neutral style, Pure content. */
     const val DEFAULT_STYLE = 50
     const val R18_PURE = 0
     const val R18_NSFW = 1
     const val R18_MIX = 2
+
+    /** WallpaperTargetMode: 0 = off, 1 = pink, 2 = blue. */
+    const val SCREEN_OFF = 0
+    const val SCREEN_PINK = 1
+    const val SCREEN_BLUE = 2
 
     const val SCHEDULE_OFF = "off"
     const val SCHEDULE_DAILY_7 = "daily7"
@@ -76,23 +88,54 @@ object NyanpasuPrefs {
         prefs(context).edit().putInt(KEY_R18, mode).apply()
     }
 
-    fun readHomeOn(context: Context): Boolean =
-        prefs(context).getBoolean(KEY_HOME_ON, true)
+    // ── Tri-state screens (v1.0.0 WallpaperTargetMode) ───────────────
 
-    fun readLockOn(context: Context): Boolean =
-        prefs(context).getBoolean(KEY_LOCK_ON, true)
+    /**
+     * Reads the (home, lock) tri-state pair, migrating the v0.8.10
+     * boolean model (homeOn/lockOn/lockSame) on first access:
+     *   homeOn & lockOn & lockSame  → (PINK, PINK)   one image
+     *   homeOn & lockOn & !lockSame → (PINK, BLUE)   two images
+     *   homeOn only                 → (PINK, OFF)
+     *   lockOn only                 → (OFF, PINK)
+     */
+    fun readScreens(context: Context): Pair<Int, Int> {
+        val p = prefs(context)
+        if (!p.contains(KEY_HOME_STATE) && !p.contains(KEY_LOCK_STATE)) {
+            val homeOn = p.getBoolean(KEY_HOME_ON, true)
+            val lockOn = p.getBoolean(KEY_LOCK_ON, true)
+            val lockSame = p.getBoolean(KEY_LOCK_SAME, true)
+            val migrated = when {
+                homeOn && lockOn && lockSame -> SCREEN_PINK to SCREEN_PINK
+                homeOn && lockOn -> SCREEN_PINK to SCREEN_BLUE
+                homeOn -> SCREEN_PINK to SCREEN_OFF
+                lockOn -> SCREEN_OFF to SCREEN_PINK
+                else -> SCREEN_OFF to SCREEN_OFF
+            }
+            writeScreens(context, migrated.first, migrated.second)
+            return migrated
+        }
+        val home = prefs(context).getInt(KEY_HOME_STATE, SCREEN_PINK).coerceIn(0, 2)
+        val lock = prefs(context).getInt(KEY_LOCK_STATE, SCREEN_PINK).coerceIn(0, 2)
+        return home to lock
+    }
 
-    /** true = home & lock use the SAME image (sync mode); false = different (dual). */
-    fun readLockSame(context: Context): Boolean =
-        prefs(context).getBoolean(KEY_LOCK_SAME, true)
-
-    fun writeScreens(context: Context, homeOn: Boolean, lockOn: Boolean, lockSame: Boolean) {
+    fun writeScreens(context: Context, homeState: Int, lockState: Int) {
         prefs(context).edit()
-            .putBoolean(KEY_HOME_ON, homeOn)
-            .putBoolean(KEY_LOCK_ON, lockOn)
-            .putBoolean(KEY_LOCK_SAME, lockSame)
+            .putInt(KEY_HOME_STATE, homeState.coerceIn(0, 2))
+            .putInt(KEY_LOCK_STATE, lockState.coerceIn(0, 2))
             .apply()
     }
+
+    /** Both screens on and the SAME color → one image for both. */
+    fun isSyncMode(homeState: Int, lockState: Int): Boolean =
+        homeState > SCREEN_OFF && lockState > SCREEN_OFF && homeState == lockState
+
+    /** Both screens on with DIFFERENT colors → two independent images. */
+    fun isDualMode(homeState: Int, lockState: Int): Boolean =
+        homeState > SCREEN_OFF && lockState > SCREEN_OFF && homeState != lockState
+
+    fun homeRequired(homeState: Int): Boolean = homeState > SCREEN_OFF
+    fun lockRequired(lockState: Int): Boolean = lockState > SCREEN_OFF
 
     fun readSchedule(context: Context): String =
         prefs(context).getString(KEY_SCHEDULE, SCHEDULE_OFF) ?: SCHEDULE_OFF
@@ -119,20 +162,12 @@ object NyanpasuPrefs {
         prefs(context).edit().putStringSet(KEY_RECENT_URLS, current).apply()
     }
 
-    // ── v1.0.0 feature port (v0.8.10) ──────────────────────────────────
-
-    /** One-time quick-guide dialog (v1.0.0's Welcome). */
-    fun readWelcomeShown(context: Context): Boolean =
-        prefs(context).getBoolean(KEY_WELCOME_SHOWN, false)
-
-    fun writeWelcomeShown(context: Context) {
-        prefs(context).edit().putBoolean(KEY_WELCOME_SHOWN, true).apply()
-    }
+    // ── Prefetch (v1.0.0 PrefetchCoordinator, simplified) ────────────
 
     /**
-     * Prefetch (v1.0.0's PrefetchCoordinator, simplified): after an apply,
-     * the NEXT image is fetched into cacheDir/prefetch.img so a later
-     * Refresh is instant. Entries older than 12 h are considered stale.
+     * After an apply, the NEXT image is fetched into
+     * cacheDir/prefetch.img so a later Refresh is instant. Entries older
+     * than 12 h are considered stale.
      */
     fun prefetchFile(context: Context) =
         java.io.File(context.cacheDir, "nyanpasu_prefetch.img")
