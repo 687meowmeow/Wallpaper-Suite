@@ -34,6 +34,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -171,6 +174,18 @@ fun PlaylistsScreen(
     // ── New playlist dialog ──
     if (showNewDialog) {
         var name by remember { mutableStateOf("") }
+        // v0.8.13: Enter in the field creates the playlist too — the user's
+        // literal flow was "type in the name and enter".
+        fun createNow() {
+            val trimmed = name.trim()
+            if (trimmed.isNotEmpty()) {
+                val created = SuitePlaylistStore.create(context, trimmed)
+                showNewDialog = false
+                WepWawetLogger.appInfo("PlaylistsScreen: created",
+                    "name" to trimmed, "id" to created.id)
+                onOpenEditor(created.id)
+            }
+        }
         AlertDialog(
             onDismissRequest = { showNewDialog = false },
             title = { Text("New playlist") },
@@ -180,20 +195,12 @@ fun PlaylistsScreen(
                     onValueChange = { name = it.take(40) },
                     singleLine = true,
                     label = { Text("Playlist name") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { createNow() }),
                 )
             },
             confirmButton = {
-                TextButton(
-                    onClick = {
-                        val trimmed = name.trim()
-                        if (trimmed.isNotEmpty()) {
-                            val created = SuitePlaylistStore.create(context, trimmed)
-                            showNewDialog = false
-                            WepWawetLogger.appInfo("PlaylistsScreen: created", "name" to trimmed)
-                            onOpenEditor(created.id)
-                        }
-                    },
-                ) { Text("Create") }
+                TextButton(onClick = { createNow() }) { Text("Create") }
             },
             dismissButton = {
                 TextButton(onClick = { showNewDialog = false }) { Text("Cancel") }

@@ -81,13 +81,24 @@ fun PlaylistEditorScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
-    var playlist by remember { mutableStateOf<SuitePlaylistStore.Playlist?>(null) }
     var showAddPicker by remember { mutableStateOf(false) }
     var editingRuleIndex by remember { mutableStateOf<Int?>(null) } // -1 = new rule
     var libraryWallpapers by remember { mutableStateOf<List<WallpaperInfoSparse>>(emptyList()) }
 
-    LaunchedEffect(playlistId) {
-        playlist = SuitePlaylistStore.read(context, playlistId)
+    // v0.8.13 (creation bug): the playlist is loaded SYNCHRONOUSLY in the
+    // remember initializer, not in a LaunchedEffect. The old async gap
+    // rendered the "This playlist no longer exists." fallback for at least
+    // one frame — and if the effect lost the race (or the store read
+    // hiccupped) that fallback was all the user ever saw after creating a
+    // playlist. The store is a tiny synchronous file read (the create
+    // button itself already did the identical read on the main thread), so
+    // doing it here is both safe and race-free: by the time this composable
+    // runs, create() has fully written the store (same thread ordering).
+    var playlist by remember(playlistId) {
+        mutableStateOf(SuitePlaylistStore.read(context, playlistId))
+    }
+    if (playlist == null) {
+        WepWawetLogger.appWarn("PlaylistEditor: playlist not found", "id" to playlistId)
     }
 
     val current = playlist ?: run {

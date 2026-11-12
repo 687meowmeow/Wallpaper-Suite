@@ -231,6 +231,87 @@ object ImageFolderAssets {
     }
 
     /**
+     * v0.8.13: copy picked images (photo picker / SAF URIs) INTO one of the
+     * user's library folders — the Wallpapers page's "+" button while a
+     * folder chip is active ("i should be able to add an image to the
+     * folder using the plus at the top").
+     *
+     * Each image becomes a new document in the tree (the provider
+     * auto-resolves name collisions). Requires the persistable WRITE grant
+     * taken by [takePersistableGrants]. Returns (copied, failed) counts.
+     */
+    fun importImagesToFolder(
+        context: Context,
+        treeUriStr: String,
+        sources: List<Uri>,
+    ): Pair<Int, Int> {
+        var copied = 0
+        var failed = 0
+        val tree = Uri.parse(treeUriStr)
+        for (source in sources) {
+            try {
+                val docId = android.provider.DocumentsContract.getTreeDocumentId(tree)
+                val parentDoc =
+                    android.provider.DocumentsContract.buildDocumentUriUsingTree(tree, docId)
+                // Prefer the provider's display name; fall back to a timestamp.
+                val displayName = queryDisplayName(context, source)
+                    ?: "image_${System.currentTimeMillis()}.jpg"
+                val mime = context.contentResolver.getType(source) ?: "image/jpeg"
+                val target = android.provider.DocumentsContract.createDocument(
+                    context.contentResolver, parentDoc, mime, displayName)
+                if (target == null) {
+                    failed++
+                    WepWawetLogger.appWarn("ImageFolderAssets: createDocument returned null",
+                        "name" to displayName)
+                    continue
+                }
+                val ok = try {
+                    context.contentResolver.openInputStream(source)?.use { input ->
+                        context.contentResolver.openOutputStream(target)?.use { output ->
+                            input.copyTo(output)
+                            true
+                        } ?: false
+                    } ?: false
+                } catch (t: Throwable) {
+                    WepWawetLogger.appWarn("ImageFolderAssets: copy stream failed",
+                        "name" to displayName,
+                        "exception" to t.javaClass.simpleName)
+                    false
+                }
+                if (ok) copied++ else {
+                    failed++
+                    runCatching {
+                        context.contentResolver.delete(target, null)
+                    }
+                }
+            } catch (t: Throwable) {
+                failed++
+                WepWawetLogger.appWarn("ImageFolderAssets: import image failed",
+                    "exception" to t.javaClass.name,
+                    "message" to (t.message ?: ""))
+            }
+        }
+        WepWawetLogger.appInfo("ImageFolderAssets: images imported to folder",
+            "folder" to folderDisplayName(treeUriStr),
+            "copied" to copied,
+            "failed" to failed)
+        return copied to failed
+    }
+
+    private fun queryDisplayName(context: Context, uri: Uri): String? = try {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                var idx = cursor.getColumnIndex(
+                    android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                if (idx < 0) idx = 0
+                cursor.getString(idx)
+            } else null
+        }
+    } catch (t: Throwable) {
+        null
+    }
+
+    /**
      * v0.8.12: take BOTH the read and the write persistable grants for a
      * picked tree — read for enumeration, write so images can be saved
      * into the folder later (Discover's "Save to folder").

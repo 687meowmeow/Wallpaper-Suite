@@ -599,8 +599,18 @@ android {
         //     hardcoded "Android 13" user-agent; M-U7 favorites LazyColumn
         //     keys; M-U12 10Hz recomposition storm while paused; M-A10 dead
         //     ic_launcher_background color (now referenced by the new icon).
-        versionCode = 130
-        versionName = "0.8.12-alpha"
+        // v0.8.13-alpha: Discover preview cap + scroll passthrough; static
+        // images bypass the WE renderer (plain preview + system-wallpaper
+        // apply); playlist creation race fixed (var id + sync editor load +
+        // Enter-to-create); Playlists bottom tab; live wallpaper swaps in
+        // place when our component is already active (no new OnePlus Flux
+        // theme per apply); service label "Wallpaper Engine"; Wallpapers
+        // page tags moved into a filter sheet; built-in Animated group;
+        // last-open filter restored on start; deterministic tile-size
+        // columns; "+" adds images to the open folder; workshop filter-tag
+        // pruning; tighter search↔filter spacing.
+        versionCode = 131
+        versionName = "0.8.13-alpha"
         // Native ABI filter — only build for arm64-v8a (WE app targets Snapdragon 8 Gen 2+)
         ndk {
             abiFilters += "arm64-v8a"

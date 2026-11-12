@@ -9,6 +9,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.Arrangement
@@ -31,6 +33,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BrokenImage
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
@@ -40,7 +43,6 @@ import androidx.compose.material.icons.filled.Label
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sort
@@ -68,6 +70,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -84,7 +87,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -167,13 +169,27 @@ fun LibraryScreen(
     // Rename/delete dialog for a group (long-press a group chip).
     var manageGroupName by remember { mutableStateOf<String?>(null) }
 
-    // ===== WORKSHOP TAGS (v0.8.12 "sort by tag") =====
+    // ===== WORKSHOP TAGS (v0.8.12 "sort by tag"; v0.8.13 sheet) =====
     var workshopTags by remember { mutableStateOf<Map<String, List<String>>>(emptyMap()) }
-    var activeTag by remember { mutableStateOf<String?>(null) }
+    // v0.8.13: MULTI-select tags, chosen in a bottom-sheet filter menu
+    // instead of a long chip row that cluttered the top of the page (the
+    // user asked for "the tags in a filter menu on the wallpapers like on
+    // the workshop page").
+    var activeTags by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var showTagSheet by remember { mutableStateOf(false) }
+
+    // ===== v0.8.13: the built-in ANIMATED group =====
+    // "there should be an animated group for all the we ones" — every
+    // Wallpaper Engine wallpaper (the engine library's .mpkg entries;
+    // local SAF media is excluded).
+    var animatedActive by remember { mutableStateOf(false) }
 
     // ===== FOLDERS =====
     var folders by remember { mutableStateOf<List<ImageFolderAssets.SavedFolder>>(emptyList()) }
     var activeFolder by remember { mutableStateOf<String?>(null) }
+    // v0.8.13: restore-once guard — the saved group/folder/tag selection
+    // is re-applied the first time reload() has populated groups+folders.
+    var filterRestored by remember { mutableStateOf(false) }
     // EVERY folder's images — enumerated once per reload; the All view and
     // the per-folder views both filter this (user request: folder images
     // also show in All; one sort for everything).
@@ -224,6 +240,60 @@ fun LibraryScreen(
                 "uri" to uri.toString().take(120))
             reload()
         }
+    }
+
+    // v0.8.13: "+" while a folder chip is active → add images to THAT
+    // folder. The photo picker's URIs are transient-grant, but we copy the
+    // bytes straight into the folder's tree, so that is all we need.
+    val folderImagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            val target = activeFolder
+            if (target != null) {
+                scope.launch {
+                    val (copied, failed) = withContext(Dispatchers.IO) {
+                        ImageFolderAssets.importImagesToFolder(context, target, uris)
+                    }
+                    reload()
+                    snackbar.showSnackbar(
+                        if (failed == 0 && copied > 0)
+                            "Added $copied image${if (copied == 1) "" else "s"} to folder"
+                        else "Added $copied, $failed failed")
+                }
+            }
+        }
+    }
+
+    // v0.8.13: restore the last-open group / Animated / folder / tags
+    // once the library has been enumerated (keyed on `loading` so it runs
+    // AFTER the first reload populated groups+folders — keying on the
+    // lists themselves fires first with the empty initial values). A
+    // saved selection whose group or folder no longer exists falls back
+    // to All.
+    LaunchedEffect(loading) {
+        if (loading || filterRestored) return@LaunchedEffect
+        filterRestored = true
+        val saved = LibraryPrefs.readSavedLibraryFilter(context) ?: return@LaunchedEffect
+        if (saved.first != null && saved.first in groups) activeGroup = saved.first
+        animatedActive = saved.second
+        if (saved.third != null && folders.any { it.treeUri == saved.third }) {
+            activeFolder = saved.third
+        }
+        activeTags = saved.fourth
+        WepWawetLogger.engineDebug("LibraryScreen: restored last filter",
+            "group" to (saved.first ?: "none"),
+            "animated" to saved.second,
+            "folder" to (saved.third?.takeLast(40) ?: "none"),
+            "tags" to saved.fourth.size)
+    }
+
+    // v0.8.13: persist the open filter on every change so the app starts
+    // where the user left off ("remember what group you had open").
+    LaunchedEffect(activeGroup, animatedActive, activeFolder, activeTags, filterRestored) {
+        if (!filterRestored) return@LaunchedEffect
+        LibraryPrefs.saveLibraryFilter(
+            context, activeGroup, animatedActive, activeFolder, activeTags)
     }
 
     /** Pack (or reuse) + import + apply a folder image. */
@@ -388,14 +458,18 @@ fun LibraryScreen(
             .map { it.key to it.value }
     }
 
-    val filteredWallpapers = remember(wallpapers, filterText, activeGroup, activeTag, groupOf, workshopTags) {
+    val filteredWallpapers = remember(wallpapers, filterText, activeGroup, activeTags, animatedActive, groupOf, workshopTags) {
         wallpapers.filter { w ->
             val matchesQuery = query.isEmpty() ||
                 w.title.lowercase(Locale.ROOT).contains(query)
             val matchesGroup = activeGroup == null || groupOf[w.filePath] == activeGroup
-            val matchesTag = activeTag == null ||
-                workshopTags[workshopItemIdOf(w.filePath)]?.contains(activeTag) == true
-            matchesQuery && matchesGroup && matchesTag
+            // The built-in Animated group: every Wallpaper Engine (engine
+            // library) wallpaper — the .mpkg entries, not local SAF media.
+            val matchesAnimated = !animatedActive || !w.isLocal
+            val itemTags = workshopTags[workshopItemIdOf(w.filePath)]
+            val matchesTags = activeTags.isEmpty() ||
+                (itemTags?.any { it in activeTags } == true)
+            matchesQuery && matchesGroup && matchesAnimated && matchesTags
         }
     }
 
@@ -424,10 +498,10 @@ fun LibraryScreen(
     }
 
     // The merged grid: wallpapers (+ folder images in All, folder view: only
-    // the folder's images, group/tag view: wallpapers only).
-    val gridItems = remember(sortedWallpapers, visibleFolderImages, activeFolder, activeGroup, activeTag, pinned) {
+    // the folder's images, group/tag/animated view: wallpapers only).
+    val gridItems = remember(sortedWallpapers, visibleFolderImages, activeFolder, activeGroup, activeTags, animatedActive, pinned) {
         val showImages = activeFolder != null ||
-            (activeGroup == null && activeTag == null && activeFolder == null)
+            (activeGroup == null && activeTags.isEmpty() && !animatedActive)
         if (!showImages) {
             sortedWallpapers.map { LibraryItem.Wall(it) }
         } else {
@@ -488,21 +562,38 @@ fun LibraryScreen(
                     title = "Wallpapers",
                     onBack = null,
                     actions = {
-                        // Import lives here — the top bar carries every
-                        // entry point; the grid gets the whole screen.
+                        // v0.8.13: the "+" is context-sensitive — while a
+                        // folder chip is active it ADDS IMAGES TO THAT
+                        // FOLDER (photo picker → copy into the tree);
+                        // otherwise it imports wallpapers into the library
+                        // (mpkg / video / image) as before.
                         SlimTopBarIcon(
                             onClick = {
-                                try {
-                                    importLauncher.launch(
-                                        arrayOf(
-                                            "video/*", "image/jpg", "image/jpeg", "image/png",
-                                            "image/webp", "image/gif", "application/*",
+                                val folder = activeFolder
+                                if (folder != null) {
+                                    try {
+                                        folderImagePicker.launch(
+                                            ActivityResultContracts
+                                                .PickVisualMedia.ImageOnly)
+                                    } catch (t: Throwable) {
+                                        WepWawetLogger.appWarn(
+                                            "LibraryScreen: image picker failed",
+                                            "exception" to t.javaClass.name)
+                                    }
+                                } else {
+                                    try {
+                                        importLauncher.launch(
+                                            arrayOf(
+                                                "video/*", "image/jpg", "image/jpeg", "image/png",
+                                                "image/webp", "image/gif", "application/*",
+                                            )
                                         )
-                                    )
-                                } catch (t: Throwable) {
+                                    } catch (t: Throwable) {
+                                    }
                                 }
                             },
-                            contentDescription = "Import wallpapers",
+                            contentDescription = if (activeFolder != null)
+                                "Add images to folder" else "Import wallpapers",
                             icon = Icons.Filled.Add,
                         )
                         SlimTopBarIcon(
@@ -577,13 +668,8 @@ fun LibraryScreen(
                             contentDescription = "Downloads",
                             icon = Icons.Filled.Download,
                         )
-                        // v0.8.12: the playlist menu — the manager for the
-                        // saved playlists (create / edit / activate).
-                        SlimTopBarIcon(
-                            onClick = onOpenPlaylists,
-                            contentDescription = "Playlists",
-                            icon = Icons.Filled.QueueMusic,
-                        )
+                        // v0.8.13: the playlists button is GONE from here —
+                        // Playlists is a bottom-navigation tab now.
                         SlimTopBarIcon(
                             onClick = onOpenSettings,
                             contentDescription = "Settings",
@@ -600,11 +686,15 @@ fun LibraryScreen(
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            // ===== Filter chips: All + GROUPS + FOLDERS + WORKSHOP TAGS + ＋ Folder =====
+            // ===== Filter chips: All + ANIMATED + GROUPS + FOLDERS + ＋ Folder =====
             // Tap a chip to filter; long-press a GROUP chip to rename/delete;
             // long-press a FOLDER chip to remove the folder. There is no
             // "＋ group" chip — groups are created from a wallpaper's
             // long-press menu (removed per user request).
+            // v0.8.13: the workshop TAGS moved out of this row into the
+            // "Tags" filter chip's bottom sheet ("the tags should be in a
+            // filter menu on the wallpapers like on the workshop page to
+            // avoid clutter at the top").
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -613,14 +703,37 @@ fun LibraryScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 FilterChip(
-                    selected = activeGroup == null && activeFolder == null && activeTag == null,
+                    selected = activeGroup == null && activeFolder == null &&
+                        activeTags.isEmpty() && !animatedActive,
                     onClick = {
                         activeGroup = null
                         activeFolder = null
-                        activeTag = null
+                        activeTags = emptySet()
+                        animatedActive = false
                     },
                     label = {
                         Text("All (${wallpapers.size + allFolderImages.size})")
+                    },
+                )
+                // v0.8.13: the built-in ANIMATED group — every Wallpaper
+                // Engine wallpaper (engine-library .mpkg entries).
+                FilterChip(
+                    selected = animatedActive,
+                    onClick = {
+                        activeGroup = null
+                        activeFolder = null
+                        activeTags = emptySet()
+                        animatedActive = !animatedActive
+                        WepWawetLogger.engineDebug("LibraryScreen: animated group toggled",
+                            "enabled" to animatedActive)
+                    },
+                    label = { Text("Animated (${wallpapers.count { !it.isLocal }})") },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Filled.AutoAwesome,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
                     },
                 )
                 for (group in groups) {
@@ -629,7 +742,8 @@ fun LibraryScreen(
                         selected = activeGroup == group,
                         onClick = {
                             activeFolder = null
-                            activeTag = null
+                            activeTags = emptySet()
+                            animatedActive = false
                             activeGroup = if (activeGroup == group) null else group
                         },
                         // Long-press → rename/delete dialog. detectTapGestures
@@ -653,7 +767,8 @@ fun LibraryScreen(
                         selected = activeFolder == folder.treeUri,
                         onClick = {
                             activeGroup = null
-                            activeTag = null
+                            activeTags = emptySet()
+                            animatedActive = false
                             activeFolder =
                                 if (activeFolder == folder.treeUri) null else folder.treeUri
                         },
@@ -670,25 +785,23 @@ fun LibraryScreen(
                         },
                     )
                 }
-                // Workshop tag chips — "sort by tag" (the workshop's own tags).
-                for ((tag, count) in libraryTagCounts) {
-                    FilterChip(
-                        selected = activeTag == tag,
-                        onClick = {
-                            activeGroup = null
-                            activeFolder = null
-                            activeTag = if (activeTag == tag) null else tag
-                        },
-                        label = { Text("$tag ($count)") },
-                        leadingIcon = {
-                            Icon(
-                                Icons.Filled.Label,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                            )
-                        },
-                    )
-                }
+                // v0.8.13: workshop-tag filter — ONE chip opening the sheet
+                // (was: every tag rendered inline here, cluttering the top).
+                FilterChip(
+                    selected = activeTags.isNotEmpty(),
+                    onClick = { showTagSheet = true },
+                    label = {
+                        Text(if (activeTags.isEmpty()) "Tags"
+                        else "Tags (${activeTags.size})")
+                    },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Filled.Label,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    },
+                )
                 FilterChip(
                     selected = false,
                     onClick = {
@@ -765,11 +878,15 @@ fun LibraryScreen(
                     }
                 }
                 else -> {
+                    // v0.8.13: fixed columns per tile-size bucket — the
+                    // square cards make the column count the tile size, and
+                    // a Fixed count guarantees Small/Medium/Large/XLarge
+                    // are all visibly different (Adaptive collapsed Medium
+                    // and Large to the same 2 columns on phone widths).
+                    val isCompact =
+                        androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp < 600
                     LazyVerticalGrid(
-                        // v0.8.12: ONE tile size for the entire wallpaper
-                        // section (wallpapers + folder images), changeable
-                        // from the sort menu.
-                        columns = GridCells.Adaptive(minSize = tileSize.minSize),
+                        columns = GridCells.Fixed(tileSize.columnsFor(isCompact)),
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(
                             start = 4.dp,
                             end = 4.dp,
@@ -1091,6 +1208,26 @@ fun LibraryScreen(
         )
     }
 
+    // ===== v0.8.13: the workshop-tag filter sheet =====
+    if (showTagSheet) {
+        LibraryTagFilterSheet(
+            tagCounts = libraryTagCounts,
+            activeTags = activeTags,
+            onApply = { picked ->
+                activeTags = picked
+                if (picked.isNotEmpty()) {
+                    activeGroup = null
+                    activeFolder = null
+                    animatedActive = false
+                }
+                showTagSheet = false
+                WepWawetLogger.engineDebug("LibraryScreen: tag filter applied",
+                    "tags" to picked.size)
+            },
+            onDismiss = { showTagSheet = false },
+        )
+    }
+
     // ===== Remove-folder dialog (long-press a folder chip) =====
     removeFolderTarget?.let { folder ->
         AlertDialog(
@@ -1192,6 +1329,111 @@ fun LibraryScreen(
 }
 
 // ════════════════════════════════════════════════════════════════════
+// v0.8.13: the workshop-tag filter sheet (the Wallpapers page's "Tags"
+// chip) — same pattern as the Workshop page's filter sheet: a modal
+// bottom sheet with a search field and multi-select chips, applied with
+// one tap. Replaces the long inline tag-chip row that cluttered the top.
+// ════════════════════════════════════════════════════════════════════
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
+private fun LibraryTagFilterSheet(
+    tagCounts: List<Pair<String, Int>>,
+    activeTags: Set<String>,
+    onApply: (Set<String>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    // Local working copy — nothing commits until "Apply".
+    var working by remember { mutableStateOf(activeTags.toSet()) }
+    var search by remember { mutableStateOf("") }
+    val query = search.trim().lowercase(Locale.ROOT)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 24.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text("Tags", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    if (working.isEmpty()) "showing all"
+                    else "${working.size} selected",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "The Steam Workshop tags of your downloaded wallpapers. " +
+                    "Pick any number — the grid shows wallpapers matching ANY.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = search,
+                onValueChange = { search = it },
+                placeholder = { Text("Search tags…") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(12.dp))
+            if (tagCounts.isEmpty()) {
+                Text(
+                    "No workshop tags yet — they fill in as you download " +
+                        "wallpapers from the Workshop.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    for ((tag, count) in tagCounts) {
+                        if (query.isNotEmpty() &&
+                            !tag.lowercase(Locale.ROOT).contains(query)
+                        ) continue
+                        FilterChip(
+                            selected = tag in working,
+                            onClick = {
+                                working = if (tag in working) working - tag else working + tag
+                            },
+                            label = { Text("$tag ($count)") },
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = { working = emptySet() },
+                    enabled = working.isNotEmpty(),
+                    modifier = Modifier.weight(1f),
+                ) { Text("Clear") }
+                Button(
+                    onClick = { onApply(working) },
+                    modifier = Modifier.weight(1f),
+                ) { Text("Apply") }
+            }
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
 // Grid item model — wallpapers AND folder images under ONE sort
 // ════════════════════════════════════════════════════════════════════
 
@@ -1240,15 +1482,37 @@ private enum class SortMethod(val label: String) {
  * v0.8.12: ONE tile size for the entire wallpaper section — the wallpaper
  * grid, the folder grids, the merged All view. Selected from the sort
  * menu; persisted via [LibraryPrefs].
+ *
+ * v0.8.13: DETERMINISTIC column counts (GridCells.Fixed), not
+ * GridCells.Adaptive — on a ~424dp-wide phone Adaptive(150dp) and
+ * Adaptive(200dp) both yielded 2 columns, so Medium and Large rendered
+ * IDENTICALLY ("medium and large tiles are currently the same"). The
+ * cards are square (fillMaxWidth + aspectRatio(1f)), so the column count
+ * IS the tile size — a fixed count per size guarantees every step is
+ * visibly different on every device.
  */
-enum class LibraryTileSize(val label: String, val minSize: Dp) {
-    SMALL("Small tiles", 110.dp),
-    MEDIUM("Medium tiles", 150.dp),
-    LARGE("Large tiles", 200.dp),
-    XLARGE("Extra large tiles", 260.dp),
+enum class LibraryTileSize(val label: String) {
+    SMALL("Small tiles"),
+    MEDIUM("Medium tiles"),
+    LARGE("Large tiles"),
+    XLARGE("Extra large tiles"),
+    ;
+
+    /**
+     * The grid column count for this size bucket.
+     *
+     * @param isCompact `true` on phone-width screens (< 600dp), `false` on
+     *   tablets/desktop-width windows.
+     */
+    fun columnsFor(isCompact: Boolean): Int = when (this) {
+        SMALL -> if (isCompact) 4 else 6
+        MEDIUM -> if (isCompact) 3 else 4
+        LARGE -> if (isCompact) 2 else 3
+        XLARGE -> if (isCompact) 1 else 2
+    }
 }
 
-/** Pinned-wallpaper + groups + tile-size persistence. */
+/** Pinned-wallpaper + groups + tile-size + filter persistence. */
 private object LibraryPrefs {
     private const val PREFS = "wallpapersuite_library"
     private const val KEY_PINNED = "pinned_wallpapers"
@@ -1260,6 +1524,14 @@ private object LibraryPrefs {
     private const val KEY_GROUPS = "wallpaper_groups"
     private const val KEY_GROUP_OF_PREFIX = "wallpaper_group_of:"
     private const val KEY_TILE_SIZE = "library_tile_size"
+
+    // ===== v0.8.13: the last-open library filter (group / built-in
+    // Animated / folder / tags) — "make it so when you close the app it
+    // remembers what group you had open and starts there".
+    private const val KEY_FILTER_GROUP = "last_filter_group"   // "" = none
+    private const val KEY_FILTER_ANIMATED = "last_filter_animated"
+    private const val KEY_FILTER_FOLDER = "last_filter_folder" // "" = none
+    private const val KEY_FILTER_TAGS = "last_filter_tags"     // csv
 
     fun readPinned(context: android.content.Context): Set<String> =
         context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
@@ -1350,6 +1622,48 @@ private object LibraryPrefs {
             .getString(KEY_TILE_SIZE, null)
         return runCatching { LibraryTileSize.valueOf(name ?: "") }.getOrDefault(LibraryTileSize.MEDIUM)
     }
+
+    // ── v0.8.13: last-open filter persistence ──────────────────────
+
+    fun saveLibraryFilter(
+        context: android.content.Context,
+        group: String?,
+        animated: Boolean,
+        folder: String?,
+        tags: Set<String>,
+    ) {
+        context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_FILTER_GROUP, group ?: "")
+            .putBoolean(KEY_FILTER_ANIMATED, animated)
+            .putString(KEY_FILTER_FOLDER, folder ?: "")
+            .putString(KEY_FILTER_TAGS, tags.joinToString(","))
+            .apply()
+    }
+
+    /** The saved filter, or null when nothing was ever saved. */
+    fun readSavedLibraryFilter(context: android.content.Context):
+            Tuple4<String?, Boolean, String?, Set<String>>? {
+        val prefs = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+        if (!prefs.contains(KEY_FILTER_GROUP) &&
+            !prefs.contains(KEY_FILTER_FOLDER) &&
+            !prefs.contains(KEY_FILTER_ANIMATED)
+        ) return null
+        val group = prefs.getString(KEY_FILTER_GROUP, "")!!.ifEmpty { null }
+        val animated = prefs.getBoolean(KEY_FILTER_ANIMATED, false)
+        val folder = prefs.getString(KEY_FILTER_FOLDER, "")!!.ifEmpty { null }
+        val tags = prefs.getString(KEY_FILTER_TAGS, "")!!
+            .split(",").filter { it.isNotBlank() }.toSet()
+        return Tuple4(group, animated, folder, tags)
+    }
+
+    /** Minimal tuple (avoids a new public type just for the filter). */
+    data class Tuple4<A, B, C, D>(
+        val first: A,
+        val second: B,
+        val third: C,
+        val fourth: D,
+    )
 
     fun writeTileSize(context: android.content.Context, size: LibraryTileSize) {
         context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)

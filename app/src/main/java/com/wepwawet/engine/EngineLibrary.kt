@@ -170,7 +170,13 @@ object EngineLibrary {
                     info.title = displayName.substringBeforeLast('.')
                     info.filePath = local.uri
                     info.lastModifiedDate = local.lastModifiedDate
-                    info.type = "Video"
+                    // v0.8.13: the REAL kind from the content resolver — this
+                    // was hardcoded "Video", so every imported local IMAGE
+                    // showed up as a Video and the preview threw it at the
+                    // video player ("tap a normal image, it doesn't load").
+                    // Image-typed wallpapers now take the plain-image preview
+                    // + system-wallpaper apply path instead of the engine.
+                    info.type = localMediaType(context, local.uri)
                     result.add(info)
                 } catch (t: Throwable) {
                     WepWawetLogger.engineWarn("Library: local wallpaper unavailable",
@@ -199,6 +205,20 @@ object EngineLibrary {
             }
         } catch (t: Throwable) {
             null
+        }
+    }
+
+    /**
+     * v0.8.13: the engine-library type for a SAF-registered local media
+     * file: "Image" for image/* URIs, "Video" for everything else (the
+     * VideoWallpaperView plays those). Animated GIFs count as Image.
+     */
+    private fun localMediaType(context: Context, uriString: String): String {
+        return try {
+            val mime = context.contentResolver.getType(Uri.parse(uriString)) ?: ""
+            if (mime.startsWith("image/")) "Image" else "Video"
+        } catch (t: Throwable) {
+            "Video"
         }
     }
 
@@ -284,7 +304,9 @@ object EngineLibrary {
                 info.title = displayName.substringBeforeLast('.')
                 info.filePath = uri.toString()
                 info.lastModifiedDate = entry.lastModifiedDate
-                info.type = "Video"
+                // v0.8.13: real media kind (was hardcoded "Video" — see
+                // enumerateWallpapers).
+                info.type = localMediaType(context, uri.toString())
                 ImportResult.Success(info)
             } catch (t: Throwable) {
                 WepWawetLogger.engineError("Library: importLocalMedia failed", exception = t)

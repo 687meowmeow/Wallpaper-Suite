@@ -8,6 +8,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -201,6 +202,16 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
 
     val metrics = context.resources.displayMetrics
     val screenAspect = metrics.widthPixels.toFloat() / metrics.heightPixels
+    // v0.8.13: the preview used aspectRatio(screenAspect) — on a portrait
+    // phone that is ~0.45, i.e. a preview nearly as TALL AS THE SCREEN.
+    // The tools/save rows ended up below the fold and (with transformable
+    // eating one-finger drags) effectively unreachable — "the discover tab
+    // just shows a wallpaper and that's it. no buttons." Cap the preview
+    // at 45% of the physical screen height; the image is Crop-scaled so it
+    // still fills the box at any height.
+    val maxPreviewHeightDp = with(androidx.compose.ui.platform.LocalDensity.current) {
+        (metrics.heightPixels * 0.45f).toDp()
+    }
 
     fun persistTags() = NyanpasuPrefs.writeTags(context, strictTags, softTags)
 
@@ -519,11 +530,20 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             // ===== Preview (borderless — no frame, no card) =====
+            // v0.8.13: height capped (see maxPreviewHeightDp) + `canPan` —
+            // at zoom 1 a one-finger drag is NOT consumed by the transform
+            // detector anymore, so it falls through to this Column's
+            // verticalScroll and the whole page scrolls normally. Pan is
+            // only claimed once the user is actually zoomed in.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .heightIn(max = maxPreviewHeightDp)
                     .aspectRatio(screenAspect.coerceIn(0.4f, 1f))
-                    .transformable(transformState),
+                    .transformable(
+                        state = transformState,
+                        canPan = { zoom > 1.001f },
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
                 val shown =

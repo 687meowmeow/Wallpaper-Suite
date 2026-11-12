@@ -618,14 +618,53 @@ object WeEnginePrefs {
     // =====================================================================
 
     /**
+     * v0.8.13: is the system's CURRENT live wallpaper OUR engine?
+     *
+     * Reads the system's own view of the active wallpaper
+     * ([WallpaperManager.getWallpaperInfo]) and compares its component with
+     * [WEWallpaperService]. This is authoritative even when the in-process
+     * [WEWallpaperService.instance] is null (fresh process, service not yet
+     * re-bound by the system).
+     *
+     * Note: third-party apps CANNOT call
+     * [WallpaperManager.setWallpaperComponent] — it has required the
+     * signature-level SET_WALLPAPER_COMPONENT permission since Android 11
+     * (verified against AOSP tags android-11 → master). So the ONLY
+     * picker-free path is: our component is already active → swap the
+     * content in place (store the selection + poke the running engine).
+     * That is exactly what [callApplyWallpaper] now does — this is what
+     * stops OEMs like OnePlus/OxygenOS from saving a NEW "Flux theme"
+     * entry on every apply.
+     */
+    fun isOurLiveWallpaperActive(context: Context): Boolean {
+        return try {
+            val info = WallpaperManager.getInstance(context).wallpaperInfo ?: return false
+            info.component.packageName == context.packageName &&
+                info.component.className == WEWallpaperService::class.java.name
+        } catch (t: Throwable) {
+            false
+        }
+    }
+
+    /**
      * Applies [wallpaper]: stores it as the selected wallpaper and either
      * reloads the running live wallpaper service or (when the app's
      * wallpaper is not active yet) launches the system live-wallpaper
      * picker pre-selected with our component.
      *
+     * v0.8.13 (OnePlus Flux-theme fix): if OUR service is already the
+     * system's active live wallpaper, NEVER open the picker — the OEM
+     * wallpaper flow saves a new theme entry each time it runs. Instead
+     * just store the selection and hot-reload the running engine. When the
+     * engine isn't running in this process yet (process restart), the
+     * stored selection is still picked up automatically: the system
+     * re-binds our service and the engine's onCreate(surface) →
+     * reloadActiveWallpaper() reads the NEW file. So we can safely return
+     * "applied" without any system UI.
+     *
      * @param forceOpenPicker always open the system picker (used by the
      *   official client after imports).
-     * @return true when the wallpaper was hot-reloaded without the picker.
+     * @return true when the wallpaper was applied without the picker.
      */
     fun callApplyWallpaper(
         context: Context,
@@ -636,6 +675,20 @@ object WeEnginePrefs {
         val service = WEWallpaperService.instance
         if (!forceOpenPicker && service != null && service.isLiveWallpaperActive) {
             service.requestWallpaperReload()
+            return true
+        }
+        if (!forceOpenPicker && isOurLiveWallpaperActive(context)) {
+            // Our engine is the active live wallpaper but the in-process
+            // instance isn't reachable right now (e.g. the process was just
+            // restarted and the system hasn't re-bound the service yet).
+            // The stored selection above IS the change — the engine loads
+            // it on its next onCreate/reload cycle. Try the in-process poke
+            // once anyway (harmless when the engine is null).
+            WepWawetLogger.engine(
+                "Apply: our live wallpaper already active — swapping content in place",
+                "file" to wallpaper.filePath,
+                "engine_running" to (service != null))
+            service?.requestWallpaperReload()
             return true
         }
         val intent = Intent("android.service.wallpaper.CHANGE_LIVE_WALLPAPER")

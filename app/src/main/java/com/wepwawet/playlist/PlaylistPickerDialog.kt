@@ -26,6 +26,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -103,26 +106,28 @@ fun PlaylistPickerDialog(
                 }
                 Spacer(Modifier.height(8.dp))
                 if (showNewField) {
+                    // v0.8.13: Enter creates too (the user's literal flow).
+                    fun createNow() {
+                        val trimmed = newName.trim()
+                        if (trimmed.isNotEmpty()) {
+                            val created = SuitePlaylistStore.create(context, trimmed)
+                            WepWawetLogger.appInfo("PlaylistPicker: playlist created",
+                                "name" to trimmed, "id" to created.id)
+                            onPicked(created.id)
+                        }
+                    }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         OutlinedTextField(
                             value = newName,
                             onValueChange = { newName = it.take(40) },
                             singleLine = true,
                             label = { Text("Playlist name") },
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(onDone = { createNow() }),
                             modifier = Modifier.weight(1f),
                         )
                         Spacer(Modifier.width(8.dp))
-                        TextButton(
-                            onClick = {
-                                val trimmed = newName.trim()
-                                if (trimmed.isNotEmpty()) {
-                                    val created = SuitePlaylistStore.create(context, trimmed)
-                                    WepWawetLogger.appInfo("PlaylistPicker: playlist created",
-                                        "name" to trimmed)
-                                    onPicked(created.id)
-                                }
-                            },
-                        ) { Text("Create") }
+                        TextButton(onClick = { createNow() }) { Text("Create") }
                     }
                 } else {
                     Row {

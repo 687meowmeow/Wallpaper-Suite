@@ -173,6 +173,68 @@ fun WallpaperPreviewScreen(
     var workshopId by remember { mutableStateOf<String?>(null) }
     var powerSavingActive by remember { mutableStateOf(false) }
 
+    // ----- v0.8.13: STATIC IMAGE support -----
+    // "normal images should not be handled by the wallpaper engine
+    // renderer": a local/imported image (type "Image") gets a plain
+    // bitmap preview and a system-wallpaper apply (WallpaperManager
+    // setBitmap underneath) — no SceneWallpaperView / VideoWallpaperView,
+    // no GL surface, no engine.
+    // `resolvedType` is computed off the main thread once (the native
+    // getWallpaperType is a JNI metadata read; the MIME fallback needs a
+    // resolver round-trip). While null we keep the (fast) synchronous
+    // hint from the library enumeration, wallpaper.type.
+    var resolvedType by remember(wallpaper.filePath) { mutableStateOf<String?>(null) }
+    val isImageWallpaper = wallpaper.type == "Image" || resolvedType == "Image"
+    var imageBitmap by remember(wallpaper.filePath) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(wallpaper.filePath) {
+        resolvedType = withContext(Dispatchers.IO) {
+            runCatching {
+                WeEnginePrefs.getWallpaperType(context, EngineLibrary.sceneLib(context), wallpaper)
+            }.getOrNull()
+        }
+        WepWawetLogger.engine("Preview: media kind resolved",
+            "type" to (resolvedType ?: "null"),
+            "library_type" to wallpaper.type,
+            "is_local" to wallpaper.isLocal)
+    }
+    LaunchedEffect(wallpaper.filePath, resolvedType) {
+        if (resolvedType != null && resolvedType != "Image") return@LaunchedEffect
+        if (wallpaper.type != "Image" && resolvedType != "Image") return@LaunchedEffect
+        // Decode the still image for the plain preview (skip when the sync
+        // hint already triggered a decode in a previous run of this effect).
+        if (imageBitmap == null) {
+            WepWawetLogger.engine("Preview: static image — plain renderer (no engine)")
+            imageBitmap = withContext(Dispatchers.IO) {
+                ImageFolderAssets.decodeBitmapScaled(context, wallpaper.filePath, 2048)
+            }
+            if (imageBitmap != null) {
+                loaded = true
+            } else {
+                WepWawetLogger.engineWarn("Preview: image decode failed",
+                    "file" to wallpaper.filePath.takeLast(80))
+            }
+        }
+        // Details for images (the engine-backed details loader below is
+        // keyed on `controls`, which stays null for images).
+        if (details == null) {
+            details = withContext(Dispatchers.IO) {
+                val lib = EngineLibrary.sceneLib(context)
+                val type = WeEnginePrefs.getWallpaperType(context, lib, wallpaper) ?: "Image"
+                val resolution = WeEnginePrefs.getWallpaperResolution(context, lib, wallpaper)
+                val sizeBytes = try {
+                    context.contentResolver.openAssetFileDescriptor(
+                        android.net.Uri.parse(wallpaper.filePath), "r")?.use { it.length } ?: 0L
+                } catch (t: Throwable) { 0L }
+                WallpaperDetails(
+                    type = type,
+                    resolution = resolution?.let { "${it.x} × ${it.y}" } ?: "—",
+                    fps = 0,
+                    fileSize = if (sizeBytes > 0) formatFileSize(sizeBytes) else "—",
+                )
+            }
+        }
+    }
+
     // The official drawer guideline: 0.98 = closed, 0.5 = open (tap),
     // clamped to [topInset/height .. 1 - bottomInset/height].
     val drawerAnim = remember { Animatable(0.98f) }
@@ -230,8 +292,29 @@ fun WallpaperPreviewScreen(
         lastApplyRequest = now
         WepWawetLogger.engine("Preview: apply requested",
             "file" to wallpaper.filePath,
-            "force_picker" to forcePicker)
+            "force_picker" to forcePicker,
+            "is_image" to isImageWallpaper)
         scope.launch {
+            // v0.8.13: static images are set as the plain SYSTEM wallpaper
+            // (decode → screen crop → setBitmap). They never go through
+            // the Wallpaper Engine live-wallpaper machinery.
+            if (isImageWallpaper) {
+                val ok = withContext(Dispatchers.IO) {
+                    val bmp = ImageFolderAssets.decodeBitmapScaled(context, wallpaper.filePath, 4096)
+                        ?: return@withContext false
+                    val crop = com.wepwawet.nyanpasu.NyanpasuApplier.cropForScreen(context, bmp)
+                    com.wepwawet.nyanpasu.NyanpasuApplier.apply(
+                        context, crop, homeOn = true, lockOn = true).ok
+                }
+                applied = ok
+                WepWawetLogger.engine("Preview: image applied as system wallpaper",
+                    "ok" to ok)
+                android.widget.Toast.makeText(
+                    context,
+                    if (ok) "Wallpaper set" else "Could not set the wallpaper",
+                    android.widget.Toast.LENGTH_SHORT).show()
+                return@launch
+            }
             if (!forcePicker && playlistActiveWithoutService) {
                 // official: applying while a playlist exists but the service
                 // is down silently converts the apply into an add
@@ -252,7 +335,13 @@ fun WallpaperPreviewScreen(
 
     fun performApplyWallpaper() {
         val service = WEWallpaperService.instance
-        if (service == null || !service.isLiveWallpaperActive) {
+        // v0.8.13: skip the first-apply lockscreen notice when our live
+        // wallpaper is ALREADY the system's active one (the system-level
+        // switch already happened — we are only swapping content) and for
+        // plain images (system wallpaper, no live wallpaper involved).
+        val alreadyAppliedLive = (service != null && service.isLiveWallpaperActive) ||
+            WeEnginePrefs.isOurLiveWallpaperActive(context)
+        if (!alreadyAppliedLive && !isImageWallpaper) {
             if (!WeEnginePrefs.getStoredBoolean(
                     context, WeEnginePrefs.PREF_KEY_HAS_SHOWN_LOCKSCREEN_WARNING, false)
             ) {
@@ -424,6 +513,41 @@ fun WallpaperPreviewScreen(
                 Modifier.fillMaxSize()
             }
             Box(modifier = rendererModifier) {
+                // v0.8.13: STATIC IMAGE — a plain Compose Image, NOT the
+                // engine. No SceneWallpaperView/VideoWallpaperView is
+                // created at all, so no GL surface, no engine context and
+                // no load-callback machinery runs for image wallpapers.
+                if (isImageWallpaper) {
+                    val bmp = imageBitmap
+                    if (bmp != null) {
+                        Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = wallpaper.title,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(MaterialTheme.colorScheme.surfaceVariant),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CircularProgressIndicator(
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(28.dp),
+                                )
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    "Loading image…",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                } else {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
                     factory = { ctx ->
@@ -502,6 +626,7 @@ fun WallpaperPreviewScreen(
                         color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.align(Alignment.Center),
                     )
+                }
                 }
             }
         }
@@ -602,6 +727,9 @@ fun WallpaperPreviewScreen(
         }
 
         // ===================== The swipe-up properties drawer =====================
+        // v0.8.13: hidden for static images — there are no engine
+        // properties to edit on a plain bitmap.
+        if (!isImageWallpaper) {
         val fraction = drawerAnim.value
         val drawerHeightDp = with(density) {
             ((1f - fraction).coerceIn(0f, 1f) * screenHpx).toDp()
@@ -724,6 +852,7 @@ fun WallpaperPreviewScreen(
                     )
                 }
             }
+        }
         }
 
         // ===================== Dialogs =====================

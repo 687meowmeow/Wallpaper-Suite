@@ -16,6 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Explore
+import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -55,11 +56,14 @@ import com.wepwawet.ui.screens.WallpaperPreviewScreen
 import com.wepwawet.ui.screens.WorkshopBrowserScreen
 
 /**
- * A bottom-navigation tab of the main Scaffold.
- *
  * v0.8.9: Material 3's own guidance prescribes a bottom navigation bar
  * for "three to five destinations of equal importance" — exactly our
  * case — which frees the entire top of every screen for content.
+ *
+ * v0.8.13: FOUR tabs — Wallpapers / Workshop / Playlists / Discover
+ * (user request: "add the playlists to the bottom bar"). The playlists
+ * manager used to be reachable only through a top-bar icon; as a tab it
+ * is one tap from anywhere and keeps its scroll state like the others.
  *
  * v0.8.11: THREE tabs — Wallpapers / Workshop / Discover. The Folders
  * tab is gone (folders are chips on the Wallpapers page now), and the
@@ -82,6 +86,7 @@ private data class BottomTab(
 private val BOTTOM_TABS = listOf(
     BottomTab("library", "Wallpapers", Icons.Filled.Wallpaper),
     BottomTab("workshop", "Workshop", Icons.Filled.Explore),
+    BottomTab("playlists", "Playlists", Icons.Filled.QueueMusic),
     BottomTab("discover", "Discover", Icons.Filled.AutoAwesome),
 )
 
@@ -305,9 +310,12 @@ fun WepWawetNavHost() {
         }
 
         // v0.8.11: the multi-playlist manager + per-playlist editor.
+        // v0.8.13: this is a BOTTOM-NAV TAB now (no back arrow — same as
+        // the other tabs); the per-playlist editor below it stays a
+        // drill-down with the bar hidden and a back arrow.
         composable("playlists") {
             PlaylistsScreen(
-                onBack = { nav.popBackStack() },
+                onBack = null,
                 onOpenEditor = { id -> nav.navigate("playlist/$id") },
             )
         }

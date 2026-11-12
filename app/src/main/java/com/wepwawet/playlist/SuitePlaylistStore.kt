@@ -55,7 +55,16 @@ object SuitePlaylistStore {
     )
 
     data class Playlist(
-        val id: String = UUID.randomUUID().toString(),
+        // v0.8.13: `var`, NOT `val` — Gson deserializes by writing fields
+        // via reflection, and a FINAL field is the one construct that can
+        // fail silently on some runtimes (and always fails for records).
+        // A final `id` that could not be re-written would keep the RANDOM
+        // UUID from the no-arg constructor Kotlin synthesizes when every
+        // parameter has a default — the stored JSON id and the object's id
+        // would diverge, and read(created.id) would return null: exactly
+        // the reported "this playlist no longer exists" right after
+        // creating one. `var` removes that entire failure class.
+        var id: String = UUID.randomUUID().toString(),
         var name: String = "Playlist",
         /** "random" | "ordered". */
         var orderMode: String = ORDER_RANDOM,

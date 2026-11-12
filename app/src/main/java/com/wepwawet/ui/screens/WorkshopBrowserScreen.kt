@@ -356,12 +356,39 @@ fun WorkshopBrowserScreen(
             val savedExcluded = savedExcludedStr
                 .split(",")
                 .filter { it.isNotBlank() }
-            if (savedExcluded.toSet() != excludedTags.toSet()) {
-                excludedTags = savedExcluded
+            // v0.8.13: PRUNE the persisted exclusions against the CURRENT
+            // tag catalog. The user's prefs still carried 18 tags from the
+            // removed v0.7.25 "Asset Type / Script Type" groups (Audio
+            // Visualizer, Background, Boolean, Vec2…) — dead weight that
+            // inflated the Filter button's count to (38) forever. Also:
+            // the pre-v0.5.3 default kept the Age Rating section OFF, so a
+            // legacy store with BOTH "Everyone" AND "Questionable"
+            // excluded (and nothing else beyond the current default)
+            // resets to the modern default — excluding every age rating
+            // hides essentially the whole workshop and cannot be a
+            // deliberate choice.
+            val catalog = com.wepwawet.ui.components.TAG_SECTIONS
+                .flatMap { it.tags }.toSet()
+            val pruned = savedExcluded.filter { it in catalog }.distinct()
+            val legacyAgeOff = pruned.containsAll(listOf("Everyone", "Questionable")) &&
+                (pruned.toSet() - defaultExcludedTags().toSet() -
+                    setOf("Everyone", "Questionable")).isEmpty()
+            val effective = if (legacyAgeOff) defaultExcludedTags() else pruned
+            if (effective.toSet() != savedExcluded.toSet()) {
+                WepWawetLogger.workshop(
+                    "filter_state_pruned",
+                    "before" to savedExcluded.size,
+                    "after" to effective.size,
+                    "legacy_age_reset" to legacyAgeOff)
+                filterPrefs.edit()
+                    .putString("excludedTags", effective.joinToString(",")).apply()
+            }
+            if (effective.toSet() != excludedTags.toSet()) {
+                excludedTags = effective
                 WepWawetLogger.workshop(
                     "filter_state_loaded",
                     "key" to "excludedTags",
-                    "count" to savedExcluded.size,
+                    "count" to effective.size,
                 )
             }
         }
@@ -798,7 +825,10 @@ fun WorkshopBrowserScreen(
                     },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                        // v0.8.13: 2dp vertical (was 4) — the user asked for
+                        // a smaller gap between the search bar and the
+                        // filter row below it.
+                        .padding(horizontal = 12.dp, vertical = 2.dp),
                 )
             }
 
@@ -1207,11 +1237,23 @@ private fun FilterBar(
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // v0.8.13: every TextButton on this row is 36dp with tight
+        // contentPadding — the default 40dp+8dp buttons put ~10dp of blank
+        // above and below each label, which read as a fat vertical gap
+        // between the search bar and this row (the user's screenshot
+        // report). Same targets, same ripple, visibly tighter.
+        val buttonModifier = Modifier.height(36.dp)
+        val buttonPadding = PaddingValues(horizontal = 10.dp)
+
         // === Filter button (leftmost control on the row) ===
         // Opens the TagPickerSheet bottom sheet, which hosts the
         // excluded-tags picker and the Mobile Compatible toggle.
         Box {
-            TextButton(onClick = onFilterClick) {
+            TextButton(
+                onClick = onFilterClick,
+                modifier = buttonModifier,
+                contentPadding = buttonPadding,
+            ) {
                 Icon(
                     Icons.Filled.FilterList,
                     contentDescription = "Filter",
@@ -1240,6 +1282,8 @@ private fun FilterBar(
                     onSortMenuOpenChange(true)
                 },
                 enabled = sortEnabled,
+                modifier = buttonModifier,
+                contentPadding = buttonPadding,
             ) {
                 Text(
                     "Sort: ${sort.displayName}",
@@ -1298,10 +1342,14 @@ private fun FilterBar(
 
         // === Tile size dropdown ===
         Box {
-            TextButton(onClick = {
-                WepWawetLogger.workshop("tile_size_menu open")
-                onTileMenuOpenChange(true)
-            }) {
+            TextButton(
+                onClick = {
+                    WepWawetLogger.workshop("tile_size_menu open")
+                    onTileMenuOpenChange(true)
+                },
+                modifier = buttonModifier,
+                contentPadding = buttonPadding,
+            ) {
                 Icon(
                     Icons.Filled.ViewModule,
                     contentDescription = null,

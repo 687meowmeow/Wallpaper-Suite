@@ -59,6 +59,13 @@
     <string name="err_mpkg_not_ready">Wallpaper is still being prepared. Try again in a moment.</string>
 
     <!-- v0.8.0: integrated Wallpaper Engine -->
+    <!-- v0.8.13: the live wallpaper service's label. Android resolves the
+         name shown in the system wallpaper picker from the SERVICE label,
+         which was the app name ("WallpaperSuite") — the workshop's own
+         client names its entry "Wallpaper Engine", so ours matches that.
+         Note: Android live wallpaper labels are STATIC resources — no app
+         can show the current wallpaper's workshop title there. -->
+    <string name="we_wallpaper_label">Wallpaper Engine</string>
     <string name="we_wallpaper_description">Wallpaper Engine wallpapers on your home screen — scenes, videos, images and GIFs.</string>
     <string name="library_title">Wallpapers</string>
     <string name="library_empty_title">No wallpapers yet</string>
