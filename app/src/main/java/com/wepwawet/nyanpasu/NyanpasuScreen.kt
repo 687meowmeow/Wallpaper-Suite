@@ -226,47 +226,6 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
     fun persistTags() = NyanpasuPrefs.writeTags(context, strictTags, softTags)
 
     /**
-     * v0.8.14: REFRESH — fetch a fresh image into the preview WITHOUT
-     * applying it (the browse flow the user asked for: "there is no refresh
-     * button"). Update/Set then commits the shown image.
-     */
-    fun refreshPreview() {
-        if (fetching || applying) return
-        fetching = true
-        statusLine = "Searching…"
-        WepWawetLogger.appInfo("DiscoverScreen: refresh start (preview only)",
-            "home_state" to homeState,
-            "lock_state" to lockState,
-            "dual" to NyanpasuPrefs.isDualMode(homeState, lockState))
-        scope.launch {
-            try {
-                fetchAndShow(
-                    homeState = homeState,
-                    lockState = lockState,
-                    strictTags = strictTags,
-                    softTags = softTags,
-                    styleValue = styleValue,
-                    r18Mode = r18Mode,
-                )
-                statusLine = "New image — press Set to apply"
-            } catch (e: NyanpasuSearch.NoImageException) {
-                statusLine = "No image found — try different tags"
-                WepWawetLogger.appWarn("DiscoverScreen: no image found",
-                    "message" to (e.message ?: ""))
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                statusLine = "Failed: ${e.message ?: e.javaClass.simpleName}"
-                WepWawetLogger.appWarn("DiscoverScreen: refresh failed",
-                    "exception" to e.javaClass.name,
-                    "message" to (e.message ?: ""))
-            } finally {
-                fetching = false
-            }
-        }
-    }
-
-    /**
      * Shared fetch: prefetch-aware image search → preview (plus the lock
      * complement in dual mode). Sets [previewIsFresh]; applies NOTHING.
      */
@@ -388,6 +347,47 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                     "message" to (e.message ?: ""))
             } finally {
                 applying = false
+            }
+        }
+    }
+
+    /**
+     * v0.8.14: REFRESH — fetch a fresh image into the preview WITHOUT
+     * applying it (the browse flow the user asked for: "there is no refresh
+     * button"). Update/Set then commits the shown image.
+     */
+    fun refreshPreview() {
+        if (fetching || applying) return
+        fetching = true
+        statusLine = "Searching…"
+        WepWawetLogger.appInfo("DiscoverScreen: refresh start (preview only)",
+            "home_state" to homeState,
+            "lock_state" to lockState,
+            "dual" to NyanpasuPrefs.isDualMode(homeState, lockState))
+        scope.launch {
+            try {
+                fetchAndShow(
+                    homeState = homeState,
+                    lockState = lockState,
+                    strictTags = strictTags,
+                    softTags = softTags,
+                    styleValue = styleValue,
+                    r18Mode = r18Mode,
+                )
+                statusLine = "New image — press Set to apply"
+            } catch (e: NyanpasuSearch.NoImageException) {
+                statusLine = "No image found — try different tags"
+                WepWawetLogger.appWarn("DiscoverScreen: no image found",
+                    "message" to (e.message ?: ""))
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                statusLine = "Failed: ${e.message ?: e.javaClass.simpleName}"
+                WepWawetLogger.appWarn("DiscoverScreen: refresh failed",
+                    "exception" to e.javaClass.name,
+                    "message" to (e.message ?: ""))
+            } finally {
+                fetching = false
             }
         }
     }

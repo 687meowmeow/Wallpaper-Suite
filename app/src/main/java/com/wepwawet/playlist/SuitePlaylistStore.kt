@@ -104,13 +104,16 @@ object SuitePlaylistStore {
             if (!f.isFile) return StoreFile()
             val text = f.readText()
             val raw = gson.fromJson<StoreFileRaw>(text, storeRawType)
-            if (raw?.playlists != null) {
+            // Local val: `playlists` is a var on StoreFileRaw, so a null
+            // check on the property itself can't smart-cast.
+            val rawLists = raw?.playlists
+            if (rawLists != null) {
                 // Named-field JSON (every build with the v0.8.14 keep rule).
                 // Sanitize entry-by-entry: a hand-edited or half-corrupt file
                 // can leave Gson nulls inside a non-null Kotlin type, and a
                 // null name/id would crash the UI further up.
-                val clean = raw.playlists.mapNotNull { it.sanitized() }.toMutableList()
-                StoreFile(playlists = clean, activePlaylistId = raw.activePlaylistId ?: "")
+                val clean = rawLists.mapNotNull { it.sanitized() }.toMutableList()
+                StoreFile(playlists = clean, activePlaylistId = raw?.activePlaylistId ?: "")
             } else {
                 // v0.8.11–v0.8.13 release builds: R8 renamed every field of
                 // every Gson-serialized class here (no keep rule covered this
