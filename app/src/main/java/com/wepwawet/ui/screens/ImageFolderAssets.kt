@@ -84,7 +84,7 @@ object ImageFolderAssets {
         val legacy = prefs.getString(KEY_LEGACY_FOLDER, null)
         val set = prefs.getStringSet(KEY_FOLDERS, null) ?: mutableSetOf()
         // One-time migration of the v0.8.9 single folder.
-        if (legacy != null && legacy !in set) {
+        val uris = if (legacy != null && legacy !in set) {
             set.toMutableSet().apply { add(legacy) }.let {
                 prefs.edit().putStringSet(KEY_FOLDERS, it).apply()
             }
@@ -93,12 +93,11 @@ object ImageFolderAssets {
             set.plus(legacy)
         } else {
             set
-        }.let { uris ->
-            // v0.8.17: the built-in Suite folder is ALWAYS in the list —
-            // it is where "Save to suite" puts images (app-internal, like
-            // the downloads for animated wallpapers).
-            (uris + SUITE_URI).map { SavedFolder(it, folderDisplayName(it)) }
         }
+        // v0.8.17: the built-in Suite folder is ALWAYS in the list — it is
+        // where "Save to suite" puts images (app-internal, like the
+        // downloads for animated wallpapers).
+        return (uris + SUITE_URI).map { SavedFolder(it, folderDisplayName(it)) }
     }
 
     fun addFolder(context: Context, treeUri: String) {
