@@ -77,6 +77,20 @@ fun PlaylistsScreen(
 
     LaunchedEffect(Unit) { reload() }
 
+    // v0.8.16: reload on every resume too — the manager must never show a
+    // stale list ("the buttons in the playlist menu dont update live"):
+    // playlists get created/renamed/added-to from the library picker, the
+    // Discover tab and the editor, and the screen can return from any of
+    // them with the store changed underneath.
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) reload()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     Scaffold(
         topBar = { SlimTopBar(title = "Playlists", onBack = onBack) },
     ) { padding ->

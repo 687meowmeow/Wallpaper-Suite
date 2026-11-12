@@ -854,8 +854,17 @@ fun VideoTrimScreen(
                                         // own scope; we surface its progress via
                                         // the per-item state flow on the detail
                                         // screen after popping back.
+                                        // v0.8.16: pass the item WITH the title so
+                                        // the library entry is named after the
+                                        // workshop item (not "<id> - wallpaper").
                                         com.wepwawet.pairing.WorkshopDownloadJob
-                                            .importVideoToLibrary(context, itemId, packedFile)
+                                            .importVideoToLibrary(
+                                                context, itemId, packedFile,
+                                                overrideItem = com.wepwawet.data.model.WorkshopItemTyped(
+                                                    item = com.wepwawet.data.model.WorkshopItem(
+                                                        publishedfileid = itemId, title = itemTitle),
+                                                    type = com.wepwawet.data.model.WallpaperType.VIDEO,
+                                                ))
                                         if (trimSuccess) runCatching { trimmedFile.delete() }
                                         runCatching { videoFile.delete() }
                                         com.wepwawet.pairing.WorkshopDownloadJob
@@ -951,8 +960,16 @@ fun VideoTrimScreen(
                                 try {
                                     if (isLibraryMode) {
                                         // === v0.9.0 LIBRARY mode: full video → library. ===
+                                        // v0.8.16: item WITH the title (library
+                                        // naming — see the clip path above).
                                         com.wepwawet.pairing.WorkshopDownloadJob
-                                            .importVideoToLibrary(context, itemId, videoFile)
+                                            .importVideoToLibrary(
+                                                context, itemId, videoFile,
+                                                overrideItem = com.wepwawet.data.model.WorkshopItemTyped(
+                                                    item = com.wepwawet.data.model.WorkshopItem(
+                                                        publishedfileid = itemId, title = itemTitle),
+                                                    type = com.wepwawet.data.model.WallpaperType.VIDEO,
+                                                ))
                                         com.wepwawet.pairing.WorkshopDownloadJob
                                             .onVideoConsumedByTrimScreen(itemId)
                                         success = true

@@ -6,9 +6,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.foundation.gestures.transformable
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -36,6 +33,7 @@ import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SaveAlt
+import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material3.AlertDialog
@@ -63,7 +61,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -74,7 +71,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -119,7 +115,12 @@ import kotlin.random.Random
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
+fun NyanpasuScreen(
+    onBack: (() -> Unit)? = null,
+    // v0.8.16: the Auto refresh card deep-links into the playlist manager
+    // (auto refresh is handled by the playlist system now).
+    onOpenPlaylists: () -> Unit = {},
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
@@ -129,7 +130,6 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
     var softTags by remember { mutableStateOf(NyanpasuPrefs.readSoftTags(context)) }
     var styleValue by remember { mutableStateOf(NyanpasuPrefs.readStyle(context)) }
     var r18Mode by remember { mutableStateOf(NyanpasuPrefs.readR18(context)) }
-    var scheduleMode by remember { mutableStateOf(NyanpasuPrefs.readSchedule(context)) }
     var screens by remember { mutableStateOf(NyanpasuPrefs.readScreens(context)) }
     val homeState = screens.first
     val lockState = screens.second
@@ -139,17 +139,17 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
     var previewLockBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var previewingLock by remember { mutableStateOf(false) }
     // v0.8.14: true when the preview shows a freshly refreshed image that
-    // has NOT been applied yet — Update then commits it as-is.
+    // has NOT been applied yet — Set then commits it as-is.
     var previewIsFresh by remember { mutableStateOf(false) }
-    var zoom by remember { mutableFloatStateOf(1f) }
-    var panX by remember { mutableFloatStateOf(0f) }
-    var panY by remember { mutableFloatStateOf(0f) }
 
     // ---- work state ----
     var fetching by remember { mutableStateOf(false) }
     var applying by remember { mutableStateOf(false) }
     var statusLine by remember { mutableStateOf<String?>(null) }
     var history by remember { mutableStateOf(NyanpasuApplier.readHistory(context)) }
+    // v0.8.16: the built-in Discover playlist (name to entry count) shown
+    // in the Auto refresh card.
+    var discoverPlaylistInfo by remember { mutableStateOf<Pair<String, Int>?>(null) }
 
     // ---- v0.8.12: save-to-folder state ----
     var showSaveToFolder by remember { mutableStateOf(false) }
@@ -207,25 +207,58 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
         }
     }
 
-    val metrics = context.resources.displayMetrics
-    val screenAspect = metrics.widthPixels.toFloat() / metrics.heightPixels
-    // v0.8.13: the preview used aspectRatio(screenAspect) — on a portrait
-    // phone that is ~0.45, i.e. a preview nearly as TALL AS THE SCREEN.
-    // v0.8.14: 45% → 32% + clipToBounds (zoomed images used to paint
-    // across the controls).
-    // v0.8.15: still "too big" on the device — the height cap binds and
-    // the box renders nearly square, which reads as a giant card. The cap
-    // drops to 22% of screen height (~200dp on a phone): a compact
-    // preview strip with the whole tool column comfortably on screen.
-    // Crop-fill keeps the image edge to edge.
-    val maxPreviewHeightDp = with(androidx.compose.ui.platform.LocalDensity.current) {
-        (metrics.heightPixels * 0.22f).toDp()
-    }
+    // v0.8.16: the preview is a FIXED compact strip (no aspect math, no
+    // zoom) and it sits BELOW the action rows — "the discover tab still
+    // has the image too big and its under the buttons". 45% → 32% → 22%
+    // caps all still read as a giant card; 160dp with the buttons first
+    // is unambiguous.
+    val previewHeight = 160.dp
 
     fun persistTags() = NyanpasuPrefs.writeTags(context, strictTags, softTags)
 
     /**
-     * Shared fetch: prefetch-aware image search → preview (plus the lock
+     * v0.8.16: background refill of the preload queue — keeps 3 images
+     * downloaded at all times so Refresh swaps INSTANTLY. Single-flight
+     * (a refill already running is never doubled up).
+     */
+    var refilling = false
+    fun refillQueue() {
+        if (refilling) return
+        refilling = true
+        scope.launch {
+            try {
+                while (NyanpasuPrefs.queueDepth(context) < 3) {
+                    val nextUrl = withContext(Dispatchers.IO) {
+                        runCatching {
+                            NyanpasuSearch.searchOne(
+                                context = context,
+                                strictTags = strictTags,
+                                softTags = softTags,
+                                styleValue = styleValue,
+                                r18Mode = r18Mode,
+                                recentUrls = NyanpasuPrefs.readRecentUrls(context),
+                            )
+                        }.getOrNull()
+                    } ?: break
+                    val nextBytes = withContext(Dispatchers.IO) {
+                        runCatching { NyanpasuSearch.downloadImage(nextUrl) }.getOrNull()
+                    }
+                    if (nextBytes == null || nextBytes.size <= 1024) break
+                    withContext(Dispatchers.IO) {
+                        NyanpasuPrefs.appendQueuedImage(context, nextUrl, nextBytes)
+                    }
+                    WepWawetLogger.appInfo("DiscoverScreen: preloaded image queued",
+                        "bytes" to nextBytes.size,
+                        "depth" to NyanpasuPrefs.queueDepth(context))
+                }
+            } finally {
+                refilling = false
+            }
+        }
+    }
+
+    /**
+     * Shared fetch: queue-aware image search → preview (plus the lock
      * complement in dual mode). Sets [previewIsFresh]; applies NOTHING.
      */
     suspend fun fetchAndShow(
@@ -239,17 +272,15 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
         val maxDim = NyanpasuApplier.maxDecodeDimension(context)
         var url: String? = null
         var bytes: ByteArray? = null
-        if (NyanpasuPrefs.isPrefetchFresh(context)) {
-            val meta = NyanpasuPrefs.readPrefetchMeta(context)
-            val cached = NyanpasuPrefs.prefetchFile(context).readBytes()
-            if (meta != null && cached.size > 1024) {
-                url = meta.first
-                bytes = cached
-                NyanpasuPrefs.clearPrefetch(context)
-                WepWawetLogger.appInfo("DiscoverScreen: using prefetched image",
-                    "bytes" to cached.size,
-                    "age_ms" to (System.currentTimeMillis() - meta.second))
-            }
+        // v0.8.16: PRELOADED QUEUE — Refresh pops an already-downloaded
+        // image (instant swap, no "Downloading…" stage) and the refill
+        // below restocks in the background ("it should have them preloaded
+        // to ensure it can change it instantly").
+        NyanpasuPrefs.consumeQueuedImage(context)?.let { (cached, cachedUrl) ->
+            url = cachedUrl
+            bytes = cached
+            WepWawetLogger.appInfo("DiscoverScreen: using preloaded image",
+                "bytes" to cached.size)
         }
         if (bytes == null) {
             val fetched = withContext(Dispatchers.IO) {
@@ -277,8 +308,9 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
         }
         previewBitmap = bmp
         previewIsFresh = true
-        zoom = 1f; panX = 0f; panY = 0f
         previewingLock = false
+        // Keep the queue full for the NEXT Refresh.
+        refillQueue()
 
         // Dual mode (pink/blue): a separate image for the lock screen.
         if (NyanpasuPrefs.isDualMode(homeState, lockState)) {
@@ -340,36 +372,48 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                         "home_state" to homeState,
                         "lock_state" to lockState,
                         "separate_lock" to (lockCrop != null))
+
+                    // v0.8.16: AUTO REFRESH = THE PLAYLIST SYSTEM. Every
+                    // Set adds the image to the built-in "Discover"
+                    // playlist (FIFO, 20 entries); rotating them is the
+                    // playlist engine's job, on the interval picked in the
+                    // playlist editor — ONE rotation system for the whole
+                    // app, no separate background worker.
+                    withContext(Dispatchers.IO) {
+                        runCatching {
+                            val dir = java.io.File(context.filesDir, "discover").apply { mkdirs() }
+                            val img = java.io.File(dir, "discover_${System.currentTimeMillis()}.jpg")
+                            java.io.FileOutputStream(img).use { out ->
+                                bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, out)
+                            }
+                            val playlist =
+                                com.wepwawet.playlist.SuitePlaylistStore.discoverPlaylist(context)
+                            playlist.entries.add(
+                                com.wepwawet.playlist.SuitePlaylistStore.Entry(
+                                    filepath = img.absolutePath,
+                                    title = "Discover ${playlist.entries.size + 1}",
+                                    type = "Image"))
+                            // FIFO trim: keep the newest 20, delete dropped files.
+                            while (playlist.entries.size > 20) {
+                                val dropped = playlist.entries.removeAt(0)
+                                runCatching { java.io.File(dropped.filepath).delete() }
+                            }
+                            com.wepwawet.playlist.SuitePlaylistStore.upsert(context, playlist)
+                            WepWawetLogger.appInfo("DiscoverScreen: added to Discover playlist",
+                                "entries" to playlist.entries.size,
+                                "file" to img.name)
+                        }
+                    }
+                    discoverPlaylistInfo = withContext(Dispatchers.IO) {
+                        val pl = com.wepwawet.playlist.SuitePlaylistStore.discoverPlaylist(context)
+                        pl.name to pl.entries.size
+                    }
                 } else {
                     statusLine = "Wallpaper write failed (home=${result.homeOk}, lock=${result.lockOk})"
                 }
 
-                // Prefetch the NEXT image in the background (v1.0.0) — the
-                // next Refresh shows it instantly.
-                scope.launch {
-                    try {
-                        val nextUrl = withContext(Dispatchers.IO) {
-                            NyanpasuSearch.searchOne(
-                                context = context,
-                                strictTags = strictTags,
-                                softTags = softTags,
-                                styleValue = styleValue,
-                                r18Mode = r18Mode,
-                                recentUrls = NyanpasuPrefs.readRecentUrls(context),
-                            )
-                        }
-                        val nextBytes = withContext(Dispatchers.IO) { NyanpasuSearch.downloadImage(nextUrl) }
-                        if (nextBytes.size > 1024) {
-                            NyanpasuPrefs.prefetchFile(context).writeBytes(nextBytes)
-                            NyanpasuPrefs.writePrefetchMeta(context, nextUrl)
-                            WepWawetLogger.appInfo("DiscoverScreen: prefetched next image",
-                                "bytes" to nextBytes.size)
-                        }
-                    } catch (e: Exception) {
-                        WepWawetLogger.appInfo("DiscoverScreen: prefetch failed (non-fatal)",
-                            "exception" to e.javaClass.simpleName)
-                    }
-                }
+                // Keep the preload queue full for the next Refresh (v0.8.16).
+                refillQueue()
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -538,11 +582,10 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
         }
     }
 
-    // Schedule changes re-arm the worker immediately.
-    LaunchedEffect(scheduleMode) {
-        NyanpasuPrefs.writeSchedule(context, scheduleMode)
-        NyanpasuScheduler.reschedule(context)
-    }
+    // v0.8.16: the schedule pref/worker are RETIRED — auto refresh is the
+    // playlist system's job now (see the Auto refresh card). The legacy
+    // unique work is cancelled on open so upgrading devices stop the old
+    // background rotation.
 
     // On open: show the LAST applied image (1.0's preview.loadPreview).
     // First ever launch with no history → fetch + apply one automatically.
@@ -564,13 +607,21 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                 refreshPreview()
             }
         }
-    }
-
-    val transformState = rememberTransformableState { zoomChange, panChange, _ ->
-        zoom = (zoom * zoomChange).coerceIn(1f, 5f)
-        panX = (panX + panChange.x).coerceIn(-3000f, 3000f)
-        panY = (panY + panChange.y).coerceIn(-3000f, 3000f)
-        if (zoom <= 1.001f) { panX = 0f; panY = 0f }
+        // v0.8.16: keep the preload queue topped up + surface the Discover
+        // playlist state, and retire the legacy background worker for
+        // anyone upgrading ("auto refresh is handled by the playlist
+        // system" now).
+        refillQueue()
+        discoverPlaylistInfo = withContext(Dispatchers.IO) {
+            val pl = com.wepwawet.playlist.SuitePlaylistStore.discoverPlaylist(context)
+            pl.name to pl.entries.size
+        }
+        runCatching {
+            val wm = androidx.work.WorkManager.getInstance(context)
+            wm.cancelUniqueWork("nyanpasu_periodic_ticker")
+            wm.cancelUniqueWork("nyanpasu_apply_once")
+            wm.cancelUniqueWork("nyanpasu_daily_chain")
+        }
     }
 
     Scaffold(
@@ -590,81 +641,12 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            // ===== Preview (borderless — no frame, no card) =====
-            // v0.8.13: height capped (see maxPreviewHeightDp) + `canPan` —
-            // at zoom 1 a one-finger drag is NOT consumed by the transform
-            // detector anymore, so it falls through to this Column's
-            // verticalScroll and the whole page scrolls normally. Pan is
-            // only claimed once the user is actually zoomed in.
-            // v0.8.14: clipToBounds — a zoomed/panned image used to paint
-            // right across the controls below ("clips through the buttons");
-            // now the box clips its own bounds.
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = maxPreviewHeightDp)
-                    .aspectRatio(screenAspect.coerceIn(0.4f, 1f))
-                    .clipToBounds()
-                    .transformable(
-                        state = transformState,
-                        canPan = { zoom > 1.001f },
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                val shown =
-                    if (previewingLock && previewLockBitmap != null) previewLockBitmap else previewBitmap
-                if (shown != null) {
-                    Image(
-                        bitmap = shown.asImageBitmap(),
-                        contentDescription = "Wallpaper preview",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .graphicsLayerZoom(zoom, panX, panY),
-                    )
-                    // v0.8.15: the Refresh control MOVED to a labeled
-                    // button in the action row below the preview — the
-                    // v0.8.14 icon overlay sat on the image and was
-                    // effectively invisible ("there is still no refresh
-                    // button").
-                    // Dual-mode preview switch (tap the label).
-                    if (NyanpasuPrefs.isDualMode(homeState, lockState) &&
-                        previewLockBitmap != null
-                    ) {
-                        Text(
-                            if (previewingLock) "Lock preview — tap to switch"
-                            else "Home preview — tap to switch",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color.White,
-                            modifier = Modifier
-                                .align(Alignment.TopCenter)
-                                .padding(top = 8.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(Color.Black.copy(alpha = 0.55f))
-                                .clickable { previewingLock = !previewingLock }
-                                .padding(horizontal = 10.dp, vertical = 4.dp),
-                        )
-                    }
-                } else if (fetching) {
-                    CircularProgressIndicator(modifier = Modifier.size(36.dp))
-                    Spacer(Modifier.height(10.dp))
-                    Text(
-                        statusLine ?: "Searching…",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                    )
-                } else {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            statusLine ?: "Tap Refresh to find a wallpaper",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center,
-                        )
-                    }
-                }
-            }
+            // ===== v0.8.16 LAYOUT: actions FIRST, compact preview BELOW =====
+            // "the discover tab still has the image too big and its under
+            // the buttons" — the buttons lead, the preview supports. It is
+            // a fixed 160dp strip (Crop-filled, no zoom/pan: the
+            // transformable was three rounds of clipping/scroll pain for a
+            // preview this size).
 
             // ===== Tools row (v1.0.0: Undo / Home / Lock — all LABELED) =====
             Row(
@@ -752,6 +734,55 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
             }
             if (fetching || applying) {
                 LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+
+            // ===== Preview (compact, below the buttons) =====
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(previewHeight)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center,
+            ) {
+                val shown =
+                    if (previewingLock && previewLockBitmap != null) previewLockBitmap else previewBitmap
+                if (shown != null) {
+                    Image(
+                        bitmap = shown.asImageBitmap(),
+                        contentDescription = "Wallpaper preview",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    // Dual-mode preview switch (tap the label).
+                    if (NyanpasuPrefs.isDualMode(homeState, lockState) &&
+                        previewLockBitmap != null
+                    ) {
+                        Text(
+                            if (previewingLock) "Lock preview — tap to switch"
+                            else "Home preview — tap to switch",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White,
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(top = 8.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color.Black.copy(alpha = 0.55f))
+                                .clickable { previewingLock = !previewingLock }
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                        )
+                    }
+                } else if (fetching) {
+                    CircularProgressIndicator(modifier = Modifier.size(36.dp))
+                } else {
+                    Text(
+                        statusLine ?: "Tap Refresh to find a wallpaper",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                    )
+                }
             }
 
             // ===== Save row (v0.8.12: gallery + folder — visible buttons) =====
@@ -875,38 +906,34 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                 ) { Text("NSFW") }
             }
 
-            // ===== Auto refresh =====
+            // ===== Auto refresh (v0.8.16: THE PLAYLIST SYSTEM) =====
+            // "the auto refresh should be handled by the playlist system" —
+            // the old WorkManager scheduler is gone. Every Set builds the
+            // built-in "Discover" playlist; activating it (and picking its
+            // interval) happens in Playlists, exactly like every other
+            // playlist.
             Text("Auto refresh", style = MaterialTheme.typography.titleMedium)
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                listOf(
-                    "Off" to NyanpasuPrefs.SCHEDULE_OFF,
-                    "Daily 7:00" to NyanpasuPrefs.SCHEDULE_DAILY_7,
-                    "6 h" to NyanpasuPrefs.SCHEDULE_H6,
-                    "12 h" to NyanpasuPrefs.SCHEDULE_H12,
-                    "24 h" to NyanpasuPrefs.SCHEDULE_H24,
-                ).forEach { (label, mode) ->
-                    FilterChip(
-                        selected = scheduleMode == mode,
-                        onClick = {
-                            scheduleMode = mode
-                            WepWawetLogger.appInfo("DiscoverScreen: schedule changed",
-                                "mode" to mode)
-                        },
-                        label = { Text(label) },
-                    )
-                }
-            }
+            val plInfo = discoverPlaylistInfo
+            Text(
+                if (plInfo != null && plInfo.second > 0)
+                    "Every image you Set is added to the \"${plInfo.first}\" " +
+                        "playlist (${plInfo.second} image${if (plInfo.second == 1) "" else "s"}). " +
+                        "Activate it in Playlists to rotate them — its interval " +
+                        "lives there, next to your other playlists."
+                else
+                    "Every image you Set is added to the built-in \"Discover\" " +
+                        "playlist. Activate it in Playlists to rotate them — " +
+                        "its interval lives there, next to your other playlists.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             OutlinedButton(
-                onClick = {
-                    WepWawetLogger.appInfo("DiscoverScreen: run-once requested")
-                    NyanpasuScheduler.applyNow(context)
-                },
+                onClick = { onOpenPlaylists() },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Run once now (background)")
+                Icon(Icons.Filled.QueueMusic, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Open Playlists")
             }
 
             // ===== History =====
@@ -1050,17 +1077,6 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
         )
     }
 }
-
-/** Apply the pinch/drag transform to the preview image. */
-private fun Modifier.graphicsLayerZoom(zoom: Float, panX: Float, panY: Float): Modifier =
-    this.then(
-        Modifier.graphicsLayer {
-            scaleX = zoom
-            scaleY = zoom
-            translationX = panX
-            translationY = panY
-        }
-    )
 
 /** Nyanpasu 1.0's brand colors for the tri-state buttons. */
 private val PinkState = Color(0xFFFF80AB)

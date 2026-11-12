@@ -26,8 +26,6 @@ object NyanpasuPrefs {
     private const val KEY_R18 = "r18_mode"
     private const val KEY_SCHEDULE = "schedule_mode"
     private const val KEY_RECENT_URLS = "recent_urls"
-    private const val KEY_PREFETCH_URL = "prefetch_url"
-    private const val KEY_PREFETCH_AT = "prefetch_at"
 
     // ── v1.0.0 tri-state screens ─────────────────────────────────────
     private const val KEY_HOME_STATE = "home_state"
@@ -162,44 +160,88 @@ object NyanpasuPrefs {
         prefs(context).edit().putStringSet(KEY_RECENT_URLS, current).apply()
     }
 
-    // ── Prefetch (v1.0.0 PrefetchCoordinator, simplified) ────────────
+    // ── Preload queue (v0.8.16 — replaces the single v1.0.0 prefetch) ──
+    // "refresh takes too long on the downloading stage. it should have
+    // them preloaded to ensure it can change it instantly." — Refresh now
+    // pops an ALREADY-DOWNLOADED image (instant swap) and a background
+    // refill keeps three images ready at all times. The old single-slot
+    // prefetch only restocked after a Set, so consecutive Refreshes each
+    // hit the network.
+
+    private const val QUEUE_SIZE = 3
+
+    fun queueFile(context: Context, slot: Int) =
+        java.io.File(context.cacheDir, "nyanpasu_queue_$slot.img")
+
+    /** How many downloaded images are sitting in the queue right now. */
+    fun queueDepth(context: Context): Int {
+        val p = prefs(context)
+        var n = 0
+        for (s in 0 until QUEUE_SIZE) {
+            if (!p.getString("nyanpasu_q_url_$s", "").isNullOrBlank() &&
+                queueFile(context, s).isFile
+            ) n++
+        }
+        return n
+    }
 
     /**
-     * After an apply, the NEXT image is fetched into
-     * cacheDir/prefetch.img so a later Refresh is instant. Entries older
-     * than 12 h are considered stale.
+     * Pop the OLDEST queued image (slot order). Returns (bytes, url) or
+     * null when the queue is empty. Stale slots (meta without a file) are
+     * dropped on sight.
      */
-    fun prefetchFile(context: Context) =
-        java.io.File(context.cacheDir, "nyanpasu_prefetch.img")
-
-    fun readPrefetchMeta(context: Context): Pair<String, Long>? {
+    fun consumeQueuedImage(context: Context): Pair<ByteArray, String>? {
         val p = prefs(context)
-        val url = p.getString(KEY_PREFETCH_URL, null) ?: return null
-        val at = p.getLong(KEY_PREFETCH_AT, 0L)
-        if (url.isBlank() || at <= 0L) return null
-        return url to at
+        for (s in 0 until QUEUE_SIZE) {
+            val url = p.getString("nyanpasu_q_url_$s", null)
+            val at = p.getLong("nyanpasu_q_at_$s", 0L)
+            if (url.isNullOrBlank() || at <= 0L) continue
+            val f = queueFile(context, s)
+            if (!f.isFile) {
+                p.edit().remove("nyanpasu_q_url_$s").remove("nyanpasu_q_at_$s").apply()
+                continue
+            }
+            return try {
+                val bytes = f.readBytes()
+                p.edit().remove("nyanpasu_q_url_$s").remove("nyanpasu_q_at_$s").apply()
+                f.delete()
+                bytes to url
+            } catch (e: Exception) {
+                p.edit().remove("nyanpasu_q_url_$s").remove("nyanpasu_q_at_$s").apply()
+                f.delete()
+                null
+            }
+        }
+        return null
     }
 
-    fun writePrefetchMeta(context: Context, url: String) {
-        prefs(context).edit()
-            .putString(KEY_PREFETCH_URL, url)
-            .putLong(KEY_PREFETCH_AT, System.currentTimeMillis())
-            .apply()
-    }
-
-    fun clearPrefetch(context: Context) {
-        prefs(context).edit()
-            .remove(KEY_PREFETCH_URL)
-            .remove(KEY_PREFETCH_AT)
-            .apply()
-        prefetchFile(context).delete()
-    }
-
-    fun isPrefetchFresh(context: Context): Boolean {
-        val meta = readPrefetchMeta(context) ?: return false
-        val (_, at) = meta
-        val fresh = System.currentTimeMillis() - at < 12L * 60 * 60 * 1000
-        if (!fresh) return false
-        return prefetchFile(context).let { it.isFile && it.length() > 1024 }
+    /** Add a downloaded image to the first free slot (oldest slot when full). */
+    fun appendQueuedImage(context: Context, url: String, bytes: ByteArray) {
+        if (bytes.size <= 1024) return
+        val p = prefs(context)
+        var slot = -1
+        for (s in 0 until QUEUE_SIZE) {
+            if (p.getString("nyanpasu_q_url_$s", "").isNullOrBlank()) { slot = s; break }
+        }
+        if (slot < 0) {
+            var oldest = 0
+            var oldestAt = Long.MAX_VALUE
+            for (s in 0 until QUEUE_SIZE) {
+                val at = p.getLong("nyanpasu_q_at_$s", Long.MAX_VALUE)
+                if (at < oldestAt) { oldestAt = at; oldest = s }
+            }
+            queueFile(context, oldest).delete()
+            slot = oldest
+        }
+        try {
+            queueFile(context, slot).writeBytes(bytes)
+            p.edit()
+                .putString("nyanpasu_q_url_$slot", url)
+                .putLong("nyanpasu_q_at_$slot", System.currentTimeMillis())
+                .apply()
+        } catch (e: Exception) {
+            queueFile(context, slot).delete()
+            p.edit().remove("nyanpasu_q_url_$slot").remove("nyanpasu_q_at_$slot").apply()
+        }
     }
 }

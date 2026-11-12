@@ -79,6 +79,9 @@ object SuitePlaylistStore {
     const val ORDER_RANDOM = "random"
     const val ORDER_ORDERED = "ordered"
 
+    /** v0.8.16: fixed id of the built-in Discover playlist (auto refresh). */
+    const val DISCOVER_PLAYLIST_ID = "discover"
+
     private data class StoreFile(
         var playlists: MutableList<Playlist> = ArrayList(),
         var activePlaylistId: String = "",
@@ -278,6 +281,28 @@ object SuitePlaylistStore {
         return playlist
     }
 
+    /**
+     * v0.8.16: the BUILT-IN Discover playlist — auto refresh's home in the
+     * playlist system ("the auto refresh should be handled by the playlist
+     * system"). Fixed id so it can be found (and re-found) across runs;
+     * every Discover Set appends an entry. Shows up in the Playlists
+     * manager like any other playlist.
+     */
+    fun discoverPlaylist(context: Context): Playlist {
+        readStore(context).playlists.firstOrNull { it.id == DISCOVER_PLAYLIST_ID }
+            ?.let { return it }
+        val playlist = Playlist(
+            id = DISCOVER_PLAYLIST_ID,
+            name = "Discover",
+            intervalMinutes = 60)
+        val store = readStore(context)
+        store.playlists.add(playlist)
+        writeStore(context, store)
+        WepWawetLogger.appInfo("SuitePlaylistStore: Discover playlist created",
+            "id" to playlist.id)
+        return playlist
+    }
+
     // ── Active playlist ──────────────────────────────────────────────
 
     fun activePlaylist(context: Context): Playlist? {
@@ -300,6 +325,32 @@ object SuitePlaylistStore {
         WepWawetLogger.appInfo("SuitePlaylistStore: active changed",
             "id" to (id ?: "none"))
         notifyService(context)
+        // v0.8.16: ACTIVATION MEANS THE LIVE WALLPAPER TAKES OVER. When
+        // the WE engine is not running (a static/system wallpaper is set),
+        // activating a playlist used to do NOTHING visible — the notify
+        // above is a no-op without a running service, and nothing changed
+        // when the user went home either ("the buttons in the playlist
+        // menu dont update live"). Switch the wallpaper component to our
+        // engine: it boots, syncs the active playlist and rotates into it.
+        if (id != null &&
+            io.wallpaperengine.weclient.WEWallpaperService.instance == null
+        ) {
+            runCatching {
+                val wm = android.app.WallpaperManager.getInstance(context)
+                wm.setWallpaperComponent(
+                    android.content.ComponentName(
+                        context,
+                        io.wallpaperengine.weclient.WEWallpaperService::class.java))
+                WepWawetLogger.appInfo(
+                    "SuitePlaylistStore: activation switched the wallpaper " +
+                        "component to the engine")
+            }.onFailure {
+                WepWawetLogger.appWarn(
+                    "SuitePlaylistStore: could not switch the wallpaper component",
+                    "exception" to it.javaClass.simpleName,
+                    "message" to (it.message ?: ""))
+            }
+        }
     }
 
     // ── Entry helpers ────────────────────────────────────────────────
@@ -332,6 +383,41 @@ object SuitePlaylistStore {
             writeStore(context, store)
             WepWawetLogger.appInfo("SuitePlaylistStore: entry removed everywhere",
                 "file" to filepath)
+            notifyService(context)
+        }
+    }
+
+    /**
+     * v0.8.16: swap one entry path for another across every playlist
+     * (entries + time rules). Used when a folder image's crop is saved or
+     * removed — the playlist keeps pointing at the image the user SEES
+     * (the cropped file), and re-editing keeps it current.
+     */
+    fun renameFilepathEverywhere(context: Context, fromPath: String, toPath: String) {
+        if (fromPath == toPath) return
+        val store = readStore(context)
+        var changed = false
+        for (playlist in store.playlists) {
+            for (entry in playlist.entries) {
+                if (entry.filepath == fromPath) {
+                    entry.filepath = toPath
+                    changed = true
+                }
+            }
+            for (rule in playlist.timeRules) {
+                for (i in rule.entryFilePaths.indices) {
+                    if (rule.entryFilePaths[i] == fromPath) {
+                        rule.entryFilePaths[i] = toPath
+                        changed = true
+                    }
+                }
+            }
+        }
+        if (changed) {
+            writeStore(context, store)
+            WepWawetLogger.appInfo("SuitePlaylistStore: entry path renamed",
+                "from" to fromPath.takeLast(48),
+                "to" to toPath.takeLast(48))
             notifyService(context)
         }
     }

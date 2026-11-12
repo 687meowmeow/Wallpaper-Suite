@@ -283,7 +283,11 @@ object WorkshopDownloadJob {
     private fun autoImportToLibrary(context: Context, mpkgFile: File, itemId: String, title: String): Boolean {
         return runCatching {
             val engine = com.wepwawet.engine.EngineLibrary.sceneLib(context)
-            val sanitized = title.replace(Regex("[^\\w \\-()]", RegexOption.IGNORE_CASE), "")
+            // v0.8.16: UNICODE-PRESERVING — the old [^\w \-()] stripped every
+            // non-ASCII character, so a Japanese-titled wallpaper imported as
+            // "shaggy SU" instead of its real name. Only characters that are
+            // actually unsafe in filenames are removed now.
+            val sanitized = title.replace(Regex("[\\\\/:*?\"<>|\\x00-\\x1f]"), "")
                 .trim().take(60).ifEmpty { "wallpaper" }
             val name = "${itemId} - $sanitized.mpkg"
             val target = File(context.filesDir, "downloads/$name")
@@ -836,7 +840,8 @@ object WorkshopDownloadJob {
             // (v0.8.0 called this after a public-Downloads write; the public
             // copy is gone now: the button downloads straight into the
             // Wallpaper Engine running inside this app, exactly as asked.)
-            val sanitized = item.title.replace(Regex("[^\\w \\-()]", RegexOption.IGNORE_CASE), "")
+            // v0.8.16: unicode-preserving sanitizer (see autoImportToLibrary).
+            val sanitized = item.title.replace(Regex("[\\\\/:*?\"<>|\\x00-\\x1f]"), "")
                 .trim().take(60).ifEmpty { "wallpaper" }
             val libraryName = "${item.id} - $sanitized.mpkg"
             val importOk = autoImportToLibrary(appContext, cacheMpkg, item.id, item.title)
@@ -1544,7 +1549,12 @@ object WorkshopDownloadJob {
             isRunning = true,
             status = "Packing video → .mpkg…",
         ) }
-        importVideoToLibrary(context, itemId, videoFile, deleteSource = true)
+        // v0.8.16: hand the item (with the workshop TITLE) over explicitly —
+        // the state was just cleared above, so importVideoToLibrary's
+        // pendingVideoItem read would come back null and the wallpaper
+        // would import as "<id> - wallpaper.mpkg" instead of the item's
+        // real name.
+        importVideoToLibrary(context, itemId, videoFile, deleteSource = true, overrideItem = pendingItem)
     }
 
     /**
@@ -1556,10 +1566,39 @@ object WorkshopDownloadJob {
      * @param deleteSource delete the source video + install dir afterwards
      *   (the trim screen passes deleteSource=false for a FAILED trim where
      *   the original may still be wanted, and runs its own cleanup).
+     * @param overrideItem v0.8.16: the caller's workshop item (with the
+     *   real TITLE). continueVideoToLibrary used to CLEAR pendingVideoItem
+     *   before calling this, so the fallback below ran titleless and the
+     *   wallpaper landed in the library as "<id> - wallpaper.mpkg" —
+     *   nothing like the workshop item's name (log 20261112-151734: item
+     *   3828707511 packed with title=EMPTY). The chain now recovers the
+     *   title from the pending item, the state's workshopTitle, or the
+     *   DownloadManager record before giving up.
      */
-    fun importVideoToLibrary(context: Context, itemId: String, videoFile: File, deleteSource: Boolean = true) {
+    fun importVideoToLibrary(
+        context: Context,
+        itemId: String,
+        videoFile: File,
+        deleteSource: Boolean = true,
+        overrideItem: WorkshopItemTyped? = null,
+    ) {
         val appContext = context.applicationContext
-        val pendingItem = _states.value[itemId]?.pendingVideoItem
+        val pendingItem = overrideItem
+            ?: _states.value[itemId]?.pendingVideoItem
+            ?: _states.value[itemId]?.workshopTitle?.takeIf { it.isNotBlank() }?.let { t ->
+                WorkshopItemTyped(
+                    item = com.wepwawet.data.model.WorkshopItem(publishedfileid = itemId, title = t),
+                    type = com.wepwawet.data.model.WallpaperType.VIDEO,
+                )
+            }
+            ?: com.wepwawet.data.DownloadManager.completedDownloads.value
+                .firstOrNull { it.itemId == itemId }?.title
+                ?.takeIf { it.isNotBlank() }?.let { t ->
+                    WorkshopItemTyped(
+                        item = com.wepwawet.data.model.WorkshopItem(publishedfileid = itemId, title = t),
+                        type = com.wepwawet.data.model.WallpaperType.VIDEO,
+                    )
+                }
             // Fallback for a direct call after the pending state was cleared:
             ?: WorkshopItemTyped(
                 item = com.wepwawet.data.model.WorkshopItem(publishedfileid = itemId),

@@ -5,6 +5,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,6 +33,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -375,6 +378,13 @@ fun PlaylistEditorScreen(
         var folderImages by remember {
             mutableStateOf<List<ImageFolderAssets.ImageEntry>>(emptyList())
         }
+        // v0.8.16: search + group filter ("in the playlists menu the add
+        // should have a search and you should also be able to select a
+        // group. this should look good").
+        var pickerSearch by remember { mutableStateOf("") }
+        var pickerGroup by remember { mutableStateOf<String?>(null) }
+        val groups = remember { LibraryPrefs.readGroups(context) }
+        val groupOf = remember { LibraryPrefs.readGroupOf(context) }
         LaunchedEffect(Unit) {
             libraryWallpapers = withContext(Dispatchers.IO) {
                 EngineLibrary.enumerateWallpapers(context)
@@ -386,6 +396,10 @@ fun PlaylistEditorScreen(
             }
         }
         val pickItems = remember(libraryWallpapers, folderImages) {
+            // v0.8.16: folder images resolve to their CROPPED copies when
+            // the user has edited them — the playlist must rotate what the
+            // user sees.
+            val cropMap = ImageCropStore.read(context)
             val walls = libraryWallpapers.map { w ->
                 PickItem(
                     filepath = w.filePath,
@@ -395,14 +409,22 @@ fun PlaylistEditorScreen(
                 )
             }
             val images = folderImages.map { e ->
+                val resolved = cropMap[e.uri]?.cropFilePath ?: e.uri
                 PickItem(
-                    filepath = e.uri,
+                    filepath = resolved,
                     title = e.displayName.substringBeforeLast('.'),
                     type = "Image",
-                    isContentUri = true,
+                    isContentUri = !resolved.startsWith("/"),
                 )
             }
             (walls + images).distinctBy { it.filepath }
+        }
+        val visibleItems = remember(pickItems, pickerSearch, pickerGroup) {
+            val q = pickerSearch.trim().lowercase()
+            pickItems.filter { item ->
+                (pickerGroup == null || groupOf[item.filepath] == pickerGroup) &&
+                    (q.isEmpty() || item.title.lowercase().contains(q))
+            }
         }
         val alreadyIn = current.entries.map { it.filepath }.toSet()
         val selected = remember(pickItems) {
@@ -416,21 +438,74 @@ fun PlaylistEditorScreen(
                     if (pickItems.isEmpty()) {
                         Text("Loading library…")
                     } else {
-                        Text(
-                            "${pickItems.size} wallpapers — scenes, videos, images",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        OutlinedTextField(
+                            value = pickerSearch,
+                            onValueChange = { pickerSearch = it },
+                            singleLine = true,
+                            label = { Text("Search") },
+                            leadingIcon = {
+                                Icon(Icons.Filled.Search, contentDescription = null)
+                            },
+                            modifier = Modifier.fillMaxWidth(),
                         )
+                        if (groups.isNotEmpty()) {
+                            Spacer(Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                FilterChip(
+                                    selected = pickerGroup == null,
+                                    onClick = { pickerGroup = null },
+                                    label = { Text("All") },
+                                )
+                                groups.forEach { group ->
+                                    FilterChip(
+                                        selected = pickerGroup == group,
+                                        onClick = {
+                                            pickerGroup = if (pickerGroup == group) null else group
+                                        },
+                                        label = { Text(group) },
+                                    )
+                                }
+                            }
+                        }
                         Spacer(Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "${selected.value.size} selected · " +
+                                    "${visibleItems.size} shown",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                            // One tap selects every VISIBLE item — with a
+                            // group chip active, that's the whole group.
+                            TextButton(
+                                onClick = {
+                                    selected.value = selected.value
+                                        .toMutableSet()
+                                        .apply { addAll(visibleItems.map { it.filepath }) }
+                                },
+                            ) { Text(if (pickerGroup == null) "Select all" else "Select group") }
+                            TextButton(
+                                onClick = { selected.value = alreadyIn.toMutableSet() },
+                            ) { Text("Reset") }
+                        }
                         LazyVerticalGrid(
                             columns = GridCells.Fixed(3),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(420.dp),
+                                .height(400.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            gridItems(pickItems, key = { it.filepath }) { item ->
+                            gridItems(visibleItems, key = { it.filepath }) { item ->
                                 val checked = item.filepath in selected.value
                                 Column(
                                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -683,10 +758,15 @@ private fun PlaylistPickThumb(
 ) {
     val context = LocalContext.current
     val shape = RoundedCornerShape(8.dp)
-    if (isContentUri) {
-        SubcomposeAsyncImage(
+    when {
+        // v0.8.16: cropped folder images are plain files; local imports are
+        // content uris — both load straight through COIL.
+        isContentUri || filepath.startsWith("/") -> SubcomposeAsyncImage(
             model = ImageRequest.Builder(context)
-                .data(android.net.Uri.parse(filepath))
+                .data(
+                    if (filepath.startsWith("/")) java.io.File(filepath)
+                    else android.net.Uri.parse(filepath)
+                )
                 .crossfade(true)
                 .build(),
             contentDescription = null,
@@ -696,34 +776,36 @@ private fun PlaylistPickThumb(
                 .aspectRatio(1f)
                 .clip(shape),
         )
-    } else {
-        var preview by remember(filepath) { mutableStateOf<Bitmap?>(null) }
-        LaunchedEffect(filepath) {
-            preview = withContext(Dispatchers.IO) {
-                runCatching {
-                    val info = WallpaperInfoSparse()
-                    info.filePath = filepath
-                    WeEnginePrefs.getWallpaperPreviewBitmap(
-                        context, EngineLibrary.sceneLib(context), info)
-                }.getOrNull()
+        // Engine .mpkg wallpapers — the library-card preview decoder.
+        else -> {
+            var preview by remember(filepath) { mutableStateOf<Bitmap?>(null) }
+            LaunchedEffect(filepath) {
+                preview = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val info = WallpaperInfoSparse()
+                        info.filePath = filepath
+                        WeEnginePrefs.getWallpaperPreviewBitmap(
+                            context, EngineLibrary.sceneLib(context), info)
+                    }.getOrNull()
+                }
             }
-        }
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(1f)
-                .clip(shape)
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center,
-        ) {
-            val bmp = preview
-            if (bmp != null) {
-                Image(
-                    bitmap = bmp.asImageBitmap(),
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
-                )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1f)
+                    .clip(shape)
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center,
+            ) {
+                val bmp = preview
+                if (bmp != null) {
+                    Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
             }
         }
     }

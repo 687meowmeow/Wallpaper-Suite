@@ -139,6 +139,9 @@ fun LibraryScreen(
     onOpenDownloads: () -> Unit,
     onOpenWorkshopItem: (itemId: String) -> Unit = {},
     onOpenPlaylists: () -> Unit = {},
+    // v0.8.16: opens the image editor (crop + aspect presets). Nullable so
+    // previews without a nav host still compile.
+    onEditImage: ((ImageFolderAssets.ImageEntry) -> Unit)? = null,
     steamApi: SteamApiService? = null,
 ) {
     val context = LocalContext.current
@@ -167,6 +170,9 @@ fun LibraryScreen(
     // v0.8.15: long-press menu for folder images (pin / group / playlist /
     // rename) — mirrors the wallpaper context menu.
     var imageMenuFor by remember { mutableStateOf<ImageFolderAssets.ImageEntry?>(null) }
+    // v0.8.16: crop overrides (original uri → cropped file path) — what the
+    // grid/preview/Set/playlists actually load for an edited image.
+    var cropOverrides by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
 
     // ===== GROUPS (the user's manual groups — restored v0.8.12) =====
     var groups by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -234,6 +240,8 @@ fun LibraryScreen(
             pinned = LibraryPrefs.readPinned(context)
             groups = LibraryPrefs.readGroups(context)
             groupOf = LibraryPrefs.readGroupOf(context)
+            // v0.8.16: edited images resolve to their cropped copies.
+            cropOverrides = ImageCropStore.read(context).mapValues { it.value.cropFilePath }
             // True download-completion times (itemId → epoch millis) — the
             // "added to the app" date for workshop wallpapers.
             addedDatesDownloads = com.wepwawet.data.DownloadManager
@@ -344,8 +352,13 @@ fun LibraryScreen(
         scope.launch {
             try {
                 val ok = withContext(Dispatchers.IO) {
+                    // v0.8.16: an edited image SETS its crop (the original
+                    // file is never modified — the crop is a derived copy).
+                    val resolved = ImageCropStore.resolve(context, entry.uri)
+                    val data: Any = if (resolved.startsWith("/"))
+                        java.io.File(resolved) else android.net.Uri.parse(resolved)
                     val request = ImageRequest.Builder(context)
-                        .data(android.net.Uri.parse(entry.uri))
+                        .data(data)
                         .allowHardware(false) // the crop needs pixel access
                         .size(2048)
                         .build()
@@ -1006,6 +1019,8 @@ fun LibraryScreen(
                                     // inside the All view.
                                     showFolderBadge = activeFolder == null,
                                     isPinned = item.entry.uri in pinned,
+                                    // v0.8.16: render the crop when saved.
+                                    displayUri = cropOverrides[item.entry.uri],
                                     onClick = { selectedImage = item.folder to item.entry },
                                     onLongClick = { imageMenuFor = item.entry },
                                 )
@@ -1144,10 +1159,29 @@ fun LibraryScreen(
                     label = "Add to playlist",
                 ) {
                     imageMenuFor = null
+                    // v0.8.16: the playlist gets the CROPPED copy when one
+                    // exists (what the user sees); re-editing re-points it.
+                    val resolved = ImageCropStore.resolve(context, entry.uri)
                     playlistPickerFor = Triple(
-                        entry.uri,
+                        resolved,
                         entry.displayName.substringBeforeLast('.'),
                         "Image")
+                }
+                // v0.8.16: the EDITOR (crop + aspect presets) — also on the
+                // preview dialog where Set lives.
+                if (onEditImage != null) {
+                    ContextAction(
+                        icon = {
+                            Icon(
+                                Icons.Filled.Edit, contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        },
+                        label = "Edit image",
+                    ) {
+                        imageMenuFor = null
+                        onEditImage(entry)
+                    }
                 }
                 ContextAction(
                     icon = {
@@ -1427,8 +1461,13 @@ fun LibraryScreen(
         var loadFailed by remember(entry.uri) { mutableStateOf(false) }
         LaunchedEffect(entry.uri) {
             fullBitmap = withContext(Dispatchers.IO) {
+                // v0.8.16: show the CROP when one exists (the original
+                // file is never modified — see ImageCropStore).
+                val resolved = ImageCropStore.resolve(context, entry.uri)
+                val data: Any = if (resolved.startsWith("/"))
+                    java.io.File(resolved) else android.net.Uri.parse(resolved)
                 val request = ImageRequest.Builder(context)
-                    .data(android.net.Uri.parse(entry.uri))
+                    .data(data)
                     .allowHardware(false)
                     .size(2048)
                     .build()
@@ -1503,14 +1542,26 @@ fun LibraryScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    OutlinedButton(
-                        onClick = { renameImageTarget = entry },
-                        enabled = !workingImage,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Icon(Icons.Filled.Edit, contentDescription = null)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Rename", maxLines = 1)
+                    // v0.8.16: the apply dialog's action is EDIT now ("replace
+                    // the rename on the image menu where you apply and change
+                    // it to an edit") — cropping with aspect presets; the
+                    // original file is untouched. Rename stays on the
+                    // long-press menu.
+                    if (onEditImage != null) {
+                        OutlinedButton(
+                            onClick = {
+                                if (!workingImage) {
+                                    selectedImage = null
+                                    onEditImage(entry)
+                                }
+                            },
+                            enabled = !workingImage,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Icon(Icons.Filled.Edit, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Edit", maxLines = 1)
+                        }
                     }
                     OutlinedButton(
                         onClick = { if (!workingImage) selectedImage = null },
@@ -1960,6 +2011,9 @@ private fun FolderImageTile(
     entry: ImageFolderAssets.ImageEntry,
     showFolderBadge: Boolean,
     isPinned: Boolean = false,
+    // v0.8.16: what to actually RENDER — the crop copy when one exists
+    // (cropOverrides[uri]), else the original uri.
+    displayUri: String? = null,
     onClick: () -> Unit,
     onLongClick: (() -> Unit)? = null,
 ) {
@@ -1981,7 +2035,7 @@ private fun FolderImageTile(
     ) {
         SubcomposeAsyncImage(
             model = ImageRequest.Builder(context)
-                .data(android.net.Uri.parse(entry.uri))
+                .data(displayUri ?: entry.uri)
                 .crossfade(true)
                 .build(),
             contentDescription = entry.displayName,

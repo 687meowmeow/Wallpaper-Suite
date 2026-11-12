@@ -43,6 +43,7 @@ import com.wepwawet.data.SteamApiService
 import com.wepwawet.data.WorkshopRepository
 import com.wepwawet.log.WepWawetLogger
 import com.wepwawet.ui.screens.DownloadManagerScreen
+import com.wepwawet.ui.screens.ImageEditorScreen
 import com.wepwawet.ui.screens.LibraryScreen
 import com.wepwawet.ui.screens.FavoritesScreen
 import com.wepwawet.ui.screens.LogsScreen
@@ -280,6 +281,13 @@ fun WepWawetNavHost() {
                     nav.navigate("preview")
                 },
                 onOpenPlaylists = { nav.navigate("playlists") },
+                // v0.8.16: the image editor (crop + aspect presets).
+                onEditImage = { entry ->
+                    nav.navigate(
+                        "imageEditor/" +
+                            android.net.Uri.encode(entry.uri) + "/" +
+                            android.net.Uri.encode(entry.displayName))
+                },
                 steamApi = steamApi,
             )
         }
@@ -289,7 +297,12 @@ fun WepWawetNavHost() {
         // implementation package keeps its historical name but NO
         // user-visible string carries it.
         composable("discover") {
-            com.wepwawet.nyanpasu.NyanpasuScreen(onBack = null)
+            com.wepwawet.nyanpasu.NyanpasuScreen(
+                onBack = null,
+                // v0.8.16: the Auto refresh card deep-links into the
+                // playlist manager (auto refresh = playlists now).
+                onOpenPlaylists = { nav.navigate("playlists") },
+            )
         }
 
         // v0.8.0: live-rendering preview + apply + properties + playlist.
@@ -317,6 +330,22 @@ fun WepWawetNavHost() {
             PlaylistsScreen(
                 onBack = null,
                 onOpenEditor = { id -> nav.navigate("playlist/$id") },
+            )
+        }
+
+        // v0.8.16: the image editor (crop + aspect presets) — the uri and
+        // display name are Uri-encoded into the path segments.
+        composable(
+            route = "imageEditor/{uri}/{name}",
+            arguments = listOf(
+                navArgument("uri") { type = NavType.StringType },
+                navArgument("name") { type = NavType.StringType },
+            ),
+        ) { entry ->
+            ImageEditorScreen(
+                imageUri = android.net.Uri.decode(entry.arguments?.getString("uri").orEmpty()),
+                displayName = android.net.Uri.decode(entry.arguments?.getString("name").orEmpty()),
+                onBack = { nav.popBackStack() },
             )
         }
 
