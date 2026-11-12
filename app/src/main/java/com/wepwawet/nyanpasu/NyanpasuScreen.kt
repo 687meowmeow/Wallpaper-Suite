@@ -824,6 +824,7 @@ private fun TriStateButton(
  * v1.0.0's tag chips: a wrapping FlowRow. Tap = flip strict (filled) ↔
  * soft (outline); the X trailing icon removes the tag.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TagEditor(
     strictTags: List<String>,
