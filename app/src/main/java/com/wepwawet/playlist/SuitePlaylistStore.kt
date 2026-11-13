@@ -84,13 +84,20 @@ object SuitePlaylistStore {
         // booru search Discover uses — with THIS playlist's OWN tag
         // settings (strict/soft tags, style, content tier, sources), so
         // two playlists can pull from completely different feeds.
-        // Defaults: null = inherit Discover's current settings.
-        var randomPullEnabled: Boolean = false,
+        // v0.8.20: MULTIPLE slots ("you should be able to add more than
+        // one random") — randomSlotCount is how many random slots the
+        // rotation has (0 = off). Each slot pulls its own fresh image
+        // (a slot in flight is marked used so two slots never repeat the
+        // same URL in one rotation). Defaults: null = inherit Discover's
+        // current settings.
+        var randomSlotCount: Int = 0,
         var randomStrictTags: List<String>? = null,
         var randomSoftTags: List<String>? = null,
         var randomStyleValue: Int? = null,
         var randomR18Mode: Int? = null,
         var randomSources: List<String>? = null,
+        /** v0.8.19 legacy field (v0.8.20: migrated into randomSlotCount). */
+        var randomPullEnabled: Boolean = false,
     )
 
     const val ORDER_RANDOM = "random"
@@ -153,6 +160,13 @@ object SuitePlaylistStore {
     /** Drops playlists with a null/blank id or name; fills safe defaults. */
     private fun Playlist.sanitized(): Playlist? {
         if (id.isNullOrBlank() || name == null) return null
+        // v0.8.20 migration: the v0.8.19 boolean randomPullEnabled folds
+        // into randomSlotCount (0/1); an explicit count wins when present.
+        val slotCount = when {
+            randomSlotCount > 0 -> randomSlotCount
+            randomPullEnabled -> 1
+            else -> 0
+        }
         return Playlist(
             id = id,
             name = name,
@@ -160,12 +174,13 @@ object SuitePlaylistStore {
             intervalMinutes = intervalMinutes,
             entries = (entries ?: emptyList()).toMutableList(),
             timeRules = (timeRules ?: emptyList()).toMutableList(),
-            randomPullEnabled = randomPullEnabled ?: false,
+            randomSlotCount = slotCount,
             randomStrictTags = randomStrictTags,
             randomSoftTags = randomSoftTags,
             randomStyleValue = randomStyleValue,
             randomR18Mode = randomR18Mode,
             randomSources = randomSources,
+            randomPullEnabled = randomPullEnabled ?: false,
         )
     }
 

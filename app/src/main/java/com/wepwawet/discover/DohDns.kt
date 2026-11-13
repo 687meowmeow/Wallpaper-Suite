@@ -1,4 +1,4 @@
-package com.wepwawet.nyanpasu
+package com.wepwawet.discover
 
 import com.wepwawet.log.WepWawetLogger
 import okhttp3.Dns

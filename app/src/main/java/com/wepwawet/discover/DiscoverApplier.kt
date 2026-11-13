@@ -1,4 +1,4 @@
-package com.wepwawet.nyanpasu
+package com.wepwawet.discover
 
 import android.app.WallpaperManager
 import android.content.ContentValues
@@ -29,9 +29,9 @@ import kotlin.math.roundToInt
  *   • v1.0.0 tri-state target model (see [applyScreens]): same color on
  *     home+lock = one bitmap for both, different colors = two bitmaps.
  */
-object NyanpasuApplier {
+object DiscoverApplier {
 
-    private const val TAG = "NyanpasuApplier"
+    private const val TAG = "DiscoverApplier"
     private const val HISTORY_LIMIT = 5
 
     // ════════════════════════════════════════════════════════════════
@@ -264,9 +264,9 @@ object NyanpasuApplier {
         lockState: Int,
         lockBitmap: Bitmap? = null,
     ): ApplyResult {
-        val homeOn = NyanpasuPrefs.homeRequired(homeState)
-        val lockOn = NyanpasuPrefs.lockRequired(lockState)
-        val separate = NyanpasuPrefs.isDualMode(homeState, lockState)
+        val homeOn = DiscoverPrefs.homeRequired(homeState)
+        val lockOn = DiscoverPrefs.lockRequired(lockState)
+        val separate = DiscoverPrefs.isDualMode(homeState, lockState)
         return apply(context, bitmap, homeOn, lockOn, if (separate) lockBitmap else null)
     }
 

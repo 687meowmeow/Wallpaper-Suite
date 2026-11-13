@@ -1,4 +1,5 @@
 package com.wepwawet.ui.screens
+import kotlin.math.abs
 
 import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
@@ -8,8 +9,11 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import androidx.compose.ui.input.pointer.positionChangedIgnoreConsumed
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -107,6 +111,7 @@ import com.wepwawet.ui.components.SlimTopBarIcon
 import io.wallpaperengine.weclient.WeEnginePrefs
 import io.wallpaperengine.weutil.WallpaperInfoSparse
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -229,6 +234,10 @@ fun LibraryScreen(
     // make one") and the shared create-folder flow.
     var showPlusMenu by remember { mutableStateOf(false) }
     var plusMenuForImport by remember { mutableStateOf(false) }
+    // v0.8.20: the "＋" dropdown's Make-a-group flow — a name dialog, then
+    // the group is created (empty groups ARE valid: wallpapers are assigned
+    // to a group from each wallpaper's own menu).
+    var showMakeGroup by remember { mutableStateOf(false) }
     var showCreateFolder by remember { mutableStateOf(false) }
     // The folder image whose fullscreen preview dialog is open.
     var selectedImage by remember {
@@ -439,22 +448,22 @@ fun LibraryScreen(
                                 drawable.draw(canvas)
                             }
                         }
-                    val crop = com.wepwawet.nyanpasu.NyanpasuApplier.cropForScreen(context, bmp)
+                    val crop = com.wepwawet.discover.DiscoverApplier.cropForScreen(context, bmp)
                     // v0.8.18 (review B6): the Discover tab's Home/Lock
                     // tri-state is the app-wide model of which screens the
                     // user wants this app to manage. The old unconditional
                     // home+lock apply silently overwrote a lock screen the
                     // user had excluded in Discover. Default to both only
                     // when the user has never expressed a preference (both
-                    // off), matching NyanpasuPrefs' own legacy defaults.
-                    val screens = com.wepwawet.nyanpasu.NyanpasuPrefs.readScreens(context)
-                    val noPreference = screens.first == com.wepwawet.nyanpasu.NyanpasuPrefs.SCREEN_OFF &&
-                        screens.second == com.wepwawet.nyanpasu.NyanpasuPrefs.SCREEN_OFF
+                    // off), matching DiscoverPrefs' own legacy defaults.
+                    val screens = com.wepwawet.discover.DiscoverPrefs.readScreens(context)
+                    val noPreference = screens.first == com.wepwawet.discover.DiscoverPrefs.SCREEN_OFF &&
+                        screens.second == com.wepwawet.discover.DiscoverPrefs.SCREEN_OFF
                     val homeOn = noPreference ||
-                        com.wepwawet.nyanpasu.NyanpasuPrefs.homeRequired(screens.first)
+                        com.wepwawet.discover.DiscoverPrefs.homeRequired(screens.first)
                     val lockOn = noPreference ||
-                        com.wepwawet.nyanpasu.NyanpasuPrefs.lockRequired(screens.second)
-                    com.wepwawet.nyanpasu.NyanpasuApplier.apply(
+                        com.wepwawet.discover.DiscoverPrefs.lockRequired(screens.second)
+                    com.wepwawet.discover.DiscoverApplier.apply(
                         context, crop, homeOn = homeOn, lockOn = lockOn).ok
                 }
                 snackbar.showSnackbar(
@@ -929,59 +938,97 @@ fun LibraryScreen(
                             animatedActive = false
                             activeGroup = if (activeGroup == group) null else group
                         },
-                        // Long-press → rename/delete dialog. detectTapGestures
-                        // with only onLongPress doesn't consume taps, so the
-                        // chip's own onClick keeps handling those.
-                        // v0.8.19: the long-press ALSO arms the drag —
-                        // "hold to drag them to move their position at the
-                        // top": keep holding and slide sideways to reorder.
+                        // v0.8.20 (unified hold): ONE hold gesture, two
+                        // outcomes — "you should be able to hold and a group
+                        // chip and drag it and be able to hold and have the
+                        // option to delete it". A raw awaitEachGesture
+                        // watches the pointer after the long-press timeout:
+                        // dragging beyond the touch slop reorders the chip;
+                        // releasing WITHOUT dragging opens the rename/delete
+                        // menu. The old two-detector stack made hold-still
+                        // (menu) fight hold-drag (reorder).
                         modifier = Modifier
-                            .pointerInput(group, groupIndex, groups.size) {
-                                detectDragGesturesAfterLongPress(
-                                    onDragStart = {
-                                        dragGroupName = group
-                                        dragGroupIndex = groupIndex
-                                    },
-                                    onDrag = { change, _ ->
-                                        change.consume()
-                                        // Which slot is the finger over?
-                                        // The chips row spans the visible
-                                        // width; slot = x / (width / count).
-                                        val w = size.width.toFloat()
-                                        if (w > 0f && groups.isNotEmpty()) {
-                                            val slot = (change.position.x / w * groups.size)
-                                                .toInt().coerceIn(0, groups.size - 1)
-                                            if (slot != dragGroupIndex) {
-                                                // Reorder live: remove + insert
-                                                // so the row shifts as you go.
-                                                val moved = groups.toMutableList()
-                                                val from = moved.indexOf(group)
-                                                if (from >= 0) {
-                                                    moved.removeAt(from)
-                                                    moved.add(slot, group)
-                                                    groups = moved
-                                                    dragGroupIndex = slot
+                            .pointerInput(group, groups.size) {
+                                awaitEachGesture {
+                                    val down = awaitFirstDown(requireUnconsumed = false)
+                                    var dragged = false
+                                    var released = false
+                                    // Wait past the long-press timeout...
+                                    val longPressTimeout = viewConfiguration.longPressTimeoutMillis
+                                    val slop = viewConfiguration.touchSlop
+                                    while (true) {
+                                        val remaining = (down.uptimeMillis + longPressTimeout) -
+                                            System.currentTimeMillis()
+                                        val event = withTimeoutOrNull(remaining.coerceAtLeast(0L)) {
+                                            awaitPointerEvent()
+                                        } ?: break // timeout elapsed — it's a HOLD
+                                        val change = event.changes.firstOrNull() ?: continue
+                                        if (change.changedToUpIgnoreConsumed()) {
+                                            released = true
+                                            break
+                                        }
+                                        // Moved before the timeout: a plain
+                                        // tap or a scroll — not ours. The
+                                        // chip's own onClick handles taps.
+                                        if (change.positionChangedIgnoreConsumed()) {
+                                            val dx = change.position.x - change.previousPosition.x
+                                            val dy = change.position.y - change.previousPosition.y
+                                            if (kotlin.math.hypot(dx, dy) > slop) {
+                                                return@awaitEachGesture
+                                            }
+                                        }
+                                    }
+                                    if (released) return@awaitEachGesture
+                                    // ── It's a HOLD. Drag = reorder,
+                                    // release-without-drag = the menu. ──
+                                    dragGroupName = group
+                                    dragGroupIndex = groups.indexOf(group)
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull() ?: continue
+                                        if (change.changedToUpIgnoreConsumed()) {
+                                            break
+                                        }
+                                        if (change.positionChangedIgnoreConsumed()) {
+                                            change.consume()
+                                            dragged = true
+                                            // Step across chips: one chip width
+                                            // per crossing (per-event delta).
+                                            val w = size.width.toFloat()
+                                            if (w > 0f && groups.size > 1) {
+                                                val dx = change.position.x -
+                                                    change.previousPosition.x
+                                                val cur = groups.indexOf(group)
+                                                val steps = (dx / w).toInt()
+                                                if (steps != 0 && cur >= 0) {
+                                                    val target =
+                                                        (cur + steps).coerceIn(0, groups.size - 1)
+                                                    if (target != cur) {
+                                                        val moved = groups.toMutableList()
+                                                        moved.removeAt(cur)
+                                                        moved.add(target, group)
+                                                        groups = moved
+                                                        dragGroupIndex = target
+                                                    }
                                                 }
                                             }
                                         }
-                                    },
-                                    onDragEnd = {
-                                        // Persist the full new order.
-                                        dragGroupName = null
-                                        dragGroupIndex = -1
+                                    }
+                                    // The hold ended.
+                                    dragGroupName = null
+                                    dragGroupIndex = -1
+                                    if (dragged) {
+                                        // Persist the new order.
                                         LibraryPrefs.writeGroupsOrderPublic(context, groups)
                                         WepWawetLogger.engineDebug(
                                             "LibraryScreen: group order saved",
                                             "groups" to groups.size)
-                                    },
-                                    onDragCancel = {
-                                        dragGroupName = null
-                                        dragGroupIndex = -1
-                                    },
-                                )
-                            }
-                            .pointerInput(group) {
-                                detectTapGestures(onLongPress = { manageGroupName = group })
+                                    } else {
+                                        // Hold WITHOUT dragging: the menu
+                                        // (rename / delete).
+                                        manageGroupName = group
+                                    }
+                                }
                             },
                         label = { Text("$group ($count)") },
                         leadingIcon = {
@@ -1033,15 +1080,18 @@ fun LibraryScreen(
                         )
                     },
                 )
+                // v0.8.20: ONE "＋" chip that drops down BOTH creation
+                // options ("create a single + button that drops down with a
+                // make group or add image folder") — it replaced the old
+                // "＋ Folder" chip; the dropdown offers making a GROUP or
+                // adding an image FOLDER.
                 FilterChip(
                     selected = false,
                     onClick = {
-                        // v0.8.18: the menu first ("use an already existing
-                        // or make one"), not the raw tree picker.
                         plusMenuForImport = false
                         showPlusMenu = true
                     },
-                    label = { Text("＋ Folder") },
+                    label = { Text("＋") },
                     leadingIcon = {
                         Icon(
                             Icons.Filled.Add,
@@ -1556,6 +1606,52 @@ fun LibraryScreen(
         )
     }
 
+    // v0.8.20: the "＋" dropdown's Make-a-group flow — a name dialog; the
+    // created group appears as a chip (assign wallpapers from each
+    // wallpaper's own "Add to group" menu).
+    if (showMakeGroup) {
+        var newGroupName by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showMakeGroup = false },
+            title = { Text("Make a group") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = newGroupName,
+                        onValueChange = { newGroupName = it.take(30) },
+                        singleLine = true,
+                        label = { Text("Group name") },
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Assign wallpapers to the group from each wallpaper's menu.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val name = newGroupName.trim().take(30)
+                        if (name.isNotEmpty() &&
+                            LibraryPrefs.createGroup(context, name)
+                        ) {
+                            groups = LibraryPrefs.readGroups(context)
+                            WepWawetLogger.engine("LibraryScreen: group created (+ menu)",
+                                "group" to name)
+                            showMakeGroup = false
+                        }
+                    },
+                    enabled = newGroupName.isNotBlank(),
+                ) { Text("Create") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showMakeGroup = false }) { Text("Cancel") }
+            },
+        )
+    }
+
     // Rename / delete a group (long-press a group chip).
     manageGroupName?.let { group ->
         var renameTo by remember(group) { mutableStateOf(group) }
@@ -1662,6 +1758,10 @@ fun LibraryScreen(
     if (showPlusMenu) {
         FolderAddMenuDialog(
             onDismiss = { showPlusMenu = false },
+            onMakeGroup = {
+                showPlusMenu = false
+                showMakeGroup = true
+            },
             onChooseExisting = {
                 showPlusMenu = false
                 try {

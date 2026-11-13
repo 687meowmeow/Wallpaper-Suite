@@ -28,6 +28,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -83,7 +84,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.filled.Casino
-import com.wepwawet.nyanpasu.NyanpasuPrefs
+import com.wepwawet.discover.DiscoverPrefs
 
 /**
  * The playlist editor — one saved playlist.
@@ -247,12 +248,15 @@ fun PlaylistEditorScreen(
                 }
             }
 
-            // ── v0.8.19: the DYNAMIC RANDOM SLOT ──
+            // ── v0.8.19/20: the DYNAMIC RANDOM SLOTS ──
             // "i want the current random system in the playlists to be
             // replaced by instead of getting a random wallpaper once and
             // adding it. it adds a random wallpaper that is randomy every
             // time it is ran. it should also have its own individual tag
-            // settings and stuff just like the discover page."
+            // settings and stuff just like the discover page." (v0.8.19)
+            // v0.8.20: "you should be able to add more than one random" —
+            // a stepper sets HOW MANY random slots the rotation has; each
+            // slot pulls its own fresh image when the rotation lands on it.
             item {
                 Column {
                     Row(
@@ -261,20 +265,42 @@ fun PlaylistEditorScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(Modifier.weight(1f)) {
-                            Text("Random slot", style = MaterialTheme.typography.titleMedium)
+                            Text("Random slots", style = MaterialTheme.typography.titleMedium)
                             Text(
-                                "When enabled, the rotation pulls a FRESH image every " +
-                                    "time it lands on the slot — never the same one twice.",
+                                "Each slot pulls a FRESH image every time the rotation " +
+                                    "lands on it — never the same one twice.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        Switch(
-                            checked = current.randomPullEnabled,
-                            onCheckedChange = { on -> save { randomPullEnabled = on } },
-                        )
+                        // The slot-count stepper: − / count / ＋.
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(
+                                onClick = {
+                                    save {
+                                        randomSlotCount =
+                                            (randomSlotCount - 1).coerceAtLeast(0)
+                                    }
+                                },
+                                enabled = current.randomSlotCount > 0,
+                            ) { Icon(Icons.Filled.Remove, contentDescription = "Fewer random slots") }
+                            Text(
+                                "${current.randomSlotCount}",
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.padding(horizontal = 10.dp),
+                            )
+                            IconButton(
+                                onClick = {
+                                    save {
+                                        randomSlotCount =
+                                            (randomSlotCount + 1).coerceAtMost(9)
+                                    }
+                                },
+                                enabled = current.randomSlotCount < 9,
+                            ) { Icon(Icons.Filled.Add, contentDescription = "More random slots") }
+                        }
                     }
-                    if (current.randomPullEnabled) {
+                    if (current.randomSlotCount > 0) {
                         Spacer(Modifier.height(8.dp))
                         TextButton(onClick = { randomSettingsOpen = !randomSettingsOpen }) {
                             Icon(Icons.Filled.Tune, contentDescription = null)
@@ -284,7 +310,7 @@ fun PlaylistEditorScreen(
                     }
                 }
             }
-            if (current.randomPullEnabled && randomSettingsOpen) {
+            if (current.randomSlotCount > 0 && randomSettingsOpen) {
                 // The slot's OWN tag settings — the same knobs as the
                 // Discover page. Blank/null = inherit Discover's value.
                 item {
@@ -336,18 +362,18 @@ fun PlaylistEditorScreen(
                                 shape = SegmentedButtonDefaults.itemShape(0, 4),
                             ) { Text("Auto") }
                             SegmentedButton(
-                                selected = current.randomR18Mode == NyanpasuPrefs.R18_PURE,
-                                onClick = { save { randomR18Mode = NyanpasuPrefs.R18_PURE } },
+                                selected = current.randomR18Mode == DiscoverPrefs.R18_PURE,
+                                onClick = { save { randomR18Mode = DiscoverPrefs.R18_PURE } },
                                 shape = SegmentedButtonDefaults.itemShape(1, 4),
                             ) { Text("Pure") }
                             SegmentedButton(
-                                selected = current.randomR18Mode == NyanpasuPrefs.R18_MIX,
-                                onClick = { save { randomR18Mode = NyanpasuPrefs.R18_MIX } },
+                                selected = current.randomR18Mode == DiscoverPrefs.R18_MIX,
+                                onClick = { save { randomR18Mode = DiscoverPrefs.R18_MIX } },
                                 shape = SegmentedButtonDefaults.itemShape(2, 4),
                             ) { Text("Mix") }
                             SegmentedButton(
-                                selected = current.randomR18Mode == NyanpasuPrefs.R18_NSFW,
-                                onClick = { save { randomR18Mode = NyanpasuPrefs.R18_NSFW } },
+                                selected = current.randomR18Mode == DiscoverPrefs.R18_NSFW,
+                                onClick = { save { randomR18Mode = DiscoverPrefs.R18_NSFW } },
                                 shape = SegmentedButtonDefaults.itemShape(3, 4),
                             ) { Text("NSFW") }
                         }
@@ -356,7 +382,7 @@ fun PlaylistEditorScreen(
                             style = MaterialTheme.typography.labelMedium)
                         var styleSlider by remember(current.id) {
                             mutableStateOf((current.randomStyleValue
-                                ?: NyanpasuPrefs.readStyle(context)).toFloat())
+                                ?: DiscoverPrefs.readStyle(context)).toFloat())
                         }
                         Slider(
                             value = styleSlider,
@@ -373,7 +399,7 @@ fun PlaylistEditorScreen(
                         // "inherit" ON = Discover's set. The first tick
                         // switches to explicit.
                         val slotSources = current.randomSources?.toSet()
-                        NyanpasuPrefs.ALL_SOURCES.forEach { src ->
+                        DiscoverPrefs.ALL_SOURCES.forEach { src ->
                             val checked = slotSources?.contains(src) ?: false
                             FilterChip(
                                 selected = checked,
@@ -383,13 +409,13 @@ fun PlaylistEditorScreen(
                                             // First explicit pick: start from
                                             // Discover's current selection so
                                             // one tap doesn't empty everything.
-                                            NyanpasuPrefs.readSources(context)
+                                            DiscoverPrefs.readSources(context)
                                                 .toMutableSet()
                                         }
                                     if (checked) base.remove(src) else base.add(src)
                                     save { randomSources = base.sorted() }
                                 },
-                                label = { Text(NyanpasuPrefs.sourceLabel(src)) },
+                                label = { Text(DiscoverPrefs.sourceLabel(src)) },
                                 modifier = Modifier.padding(end = 4.dp),
                             )
                             Spacer(Modifier.height(4.dp))

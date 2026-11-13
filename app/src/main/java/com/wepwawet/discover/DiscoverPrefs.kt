@@ -1,4 +1,4 @@
-package com.wepwawet.nyanpasu
+package com.wepwawet.discover
 
 import android.content.Context
 import android.content.SharedPreferences
@@ -11,7 +11,7 @@ import com.wepwawet.log.WepWawetLogger
  * adapted to WallpaperSuite's prefs style. The 1.0 semantics are kept:
  *   • Strict tags — required intent (searched first, hard preference)
  *   • Soft tags   — hints, attached with a 38% chance per query
- *   • Style slider — body-type preference bands (see NyanpasuSearch)
+ *   • Style slider — body-type preference bands (see DiscoverSearch)
  *   • Content     — Pure / Mix / NSFW (SearchR18Policy)
  *   • Screens     — v1.0.0's TRI-STATE model: home/lock each cycle
  *     Off → Pink → Blue. Same color on both = ONE image (sync mode);
@@ -19,7 +19,7 @@ import com.wepwawet.log.WepWawetLogger
  *     WallpaperTargetMode's exact contract (v0.8.11 port).
  *   • Schedule    — off / daily 7:00 / every 6 / 12 / 24 h
  */
-object NyanpasuPrefs {
+object DiscoverPrefs {
     // v0.8.19 (rename): the prefs file is "wallpapersuite_discover" now
     // ("rename the nyanpasu file in the app"). The legacy
     // "wallpapersuite_nyanpasu" prefs migrate wholesale on first read —
@@ -90,7 +90,7 @@ object NyanpasuPrefs {
             }
         }
         edit.putBoolean("migrated_from_legacy", true).apply()
-        WepWawetLogger.appInfo("NyanpasuPrefs: migrated legacy prefs",
+        WepWawetLogger.appInfo("DiscoverPrefs: migrated legacy prefs",
             "keys" to legacy.all.size)
         return fresh
     }
@@ -126,7 +126,7 @@ object NyanpasuPrefs {
     }
 
     // ── v0.8.18: booru sources ────────────────────────────────────────
-    // Every source NyanpasuSearch can query. Defaults: everything except
+    // Every source DiscoverSearch can query. Defaults: everything except
     // Gelbooru (its anonymous JSON API now answers 401 — it requires an
     // API key) and Behoimi (connection-dead). Both stay selectable.
 
@@ -338,8 +338,8 @@ object NyanpasuPrefs {
         val p = prefs(context)
         var n = 0
         for (s in 0 until QUEUE_SIZE) {
-            if (p.getString("nyanpasu_q_sig_$s", "") == signature &&
-                !p.getString("nyanpasu_q_url_$s", "").isNullOrBlank() &&
+            if (p.getString("discover_q_sig_$s", "") == signature &&
+                !p.getString("discover_q_url_$s", "").isNullOrBlank() &&
                 queueFile(context, s).isFile
             ) n++
         }
@@ -351,7 +351,7 @@ object NyanpasuPrefs {
         val p = prefs(context)
         var n = 0
         for (s in 0 until QUEUE_SIZE) {
-            if (!p.getString("nyanpasu_q_url_$s", "").isNullOrBlank() &&
+            if (!p.getString("discover_q_url_$s", "").isNullOrBlank() &&
                 queueFile(context, s).isFile
             ) n++
         }
@@ -365,32 +365,32 @@ object NyanpasuPrefs {
     fun consumeQueuedImage(context: Context, signature: String): Pair<ByteArray, String>? {
         val p = prefs(context)
         for (s in 0 until QUEUE_SIZE) {
-            val url = p.getString("nyanpasu_q_url_$s", null)
-            val at = p.getLong("nyanpasu_q_at_$s", 0L)
-            val sig = p.getString("nyanpasu_q_sig_$s", null)
+            val url = p.getString("discover_q_url_$s", null)
+            val at = p.getLong("discover_q_at_$s", 0L)
+            val sig = p.getString("discover_q_sig_$s", null)
             if (url.isNullOrBlank() || at <= 0L) continue
             if (sig != signature) {
                 // Fetched under different search parameters — stale, drop.
                 queueFile(context, s).delete()
-                p.edit().remove("nyanpasu_q_url_$s").remove("nyanpasu_q_at_$s")
-                    .remove("nyanpasu_q_sig_$s").apply()
+                p.edit().remove("discover_q_url_$s").remove("discover_q_at_$s")
+                    .remove("discover_q_sig_$s").apply()
                 continue
             }
             val f = queueFile(context, s)
             if (!f.isFile) {
-                p.edit().remove("nyanpasu_q_url_$s").remove("nyanpasu_q_at_$s")
-                    .remove("nyanpasu_q_sig_$s").apply()
+                p.edit().remove("discover_q_url_$s").remove("discover_q_at_$s")
+                    .remove("discover_q_sig_$s").apply()
                 continue
             }
             return try {
                 val bytes = f.readBytes()
-                p.edit().remove("nyanpasu_q_url_$s").remove("nyanpasu_q_at_$s")
-                    .remove("nyanpasu_q_sig_$s").apply()
+                p.edit().remove("discover_q_url_$s").remove("discover_q_at_$s")
+                    .remove("discover_q_sig_$s").apply()
                 f.delete()
                 bytes to url
             } catch (e: Exception) {
-                p.edit().remove("nyanpasu_q_url_$s").remove("nyanpasu_q_at_$s")
-                    .remove("nyanpasu_q_sig_$s").apply()
+                p.edit().remove("discover_q_url_$s").remove("discover_q_at_$s")
+                    .remove("discover_q_sig_$s").apply()
                 f.delete()
                 null
             }
@@ -404,13 +404,13 @@ object NyanpasuPrefs {
         val p = prefs(context)
         var slot = -1
         for (s in 0 until QUEUE_SIZE) {
-            if (p.getString("nyanpasu_q_url_$s", "").isNullOrBlank()) { slot = s; break }
+            if (p.getString("discover_q_url_$s", "").isNullOrBlank()) { slot = s; break }
         }
         if (slot < 0) {
             var oldest = 0
             var oldestAt = Long.MAX_VALUE
             for (s in 0 until QUEUE_SIZE) {
-                val at = p.getLong("nyanpasu_q_at_$s", Long.MAX_VALUE)
+                val at = p.getLong("discover_q_at_$s", Long.MAX_VALUE)
                 if (at < oldestAt) { oldestAt = at; oldest = s }
             }
             queueFile(context, oldest).delete()
@@ -419,14 +419,14 @@ object NyanpasuPrefs {
         try {
             queueFile(context, slot).writeBytes(bytes)
             p.edit()
-                .putString("nyanpasu_q_url_$slot", url)
-                .putLong("nyanpasu_q_at_$slot", System.currentTimeMillis())
-                .putString("nyanpasu_q_sig_$slot", signature)
+                .putString("discover_q_url_$slot", url)
+                .putLong("discover_q_at_$slot", System.currentTimeMillis())
+                .putString("discover_q_sig_$slot", signature)
                 .apply()
         } catch (e: Exception) {
             queueFile(context, slot).delete()
-            p.edit().remove("nyanpasu_q_url_$slot").remove("nyanpasu_q_at_$slot")
-                .remove("nyanpasu_q_sig_$slot").apply()
+            p.edit().remove("discover_q_url_$slot").remove("discover_q_at_$slot")
+                .remove("discover_q_sig_$slot").apply()
         }
     }
 }

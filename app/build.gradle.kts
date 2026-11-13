@@ -732,8 +732,42 @@ android {
         //     build (rolling "latest-build" draft for branch pushes,
         //     per-version for tags) — Actions artifacts are never used,
         //     so the artifact-storage quota is never touched.
-        versionCode = 137
-        versionName = "0.8.19-alpha"
+        // v0.8.20-alpha (layout + liveness round):
+        //   FIXED PREVIEW WINDOW: the Discover preview's height is FIXED
+        //     at 42% of the screen (phone aspect, centered) — "the image
+        //     in discover is too big. it covers up the buttons. it should
+        //     be in fixed window above the buttons"; every action row is
+        //     always on screen.
+        //   MULTIPLE RANDOM SLOTS: "you should be able to add more than
+        //     one random" — a stepper sets how many random slots the
+        //     playlist rotation has (0-9); each slot pulls its own fresh
+        //     image when the rotation lands on it. The v0.8.19 boolean
+        //     toggle migrates into the count.
+        //   ALL BUTTONS LIVE: "the random button in the playlist menu is
+        //     not live. all buttons must be live" — two root causes fixed:
+        //     a slot-only playlist never activated the suite rotation
+        //     (the entries gate), and in-place edits only applied on an
+        //     ACTIVE-ID change; now a playlist FINGERPRINT (order, interval,
+        //     entries, time rules, slot count + all slot settings) detects
+        //     ANY edit and applies the next wallpaper immediately.
+        //   GROUP HOLD: "you should be able to hold and a group chip and
+        //     drag it and be able to hold and have the option to delete
+        //     it" — ONE hold gesture with two outcomes: hold and DRAG
+        //     reorders the chip; hold STILL opens the rename/delete menu.
+        //     The old two-detector stack made the two fight.
+        //   SINGLE "＋" BUTTON: "create a single + button that drops down
+        //     with a make group or add image folder" — the "＋ Folder"
+        //     chip is now a plain "＋" whose dropdown offers Make a group
+        //     or Add an image folder (existing/new), plus the general
+        //     import on the top-bar "+".
+        //   GITHUB-SIDE RENAME: "i wanted the nyanpasu removed on the
+        //     filename side not user visible but on the github" — the
+        //     package is com.wepwawet.discover, the files/classes are
+        //     DiscoverScreen/DiscoverSearch/DiscoverPrefs/DiscoverApplier
+        //     (Nyanpasu* names are gone from the repo); the legacy
+        //     on-disk migrations keep old data readable.
+        versionCode = 138
+        versionName = "0.8.20-alpha"
         // Native ABI filter — only build for arm64-v8a (WE app targets Snapdragon 8 Gen 2+)
         ndk {
             abiFilters += "arm64-v8a"

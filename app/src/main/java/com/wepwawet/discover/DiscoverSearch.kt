@@ -1,4 +1,4 @@
-package com.wepwawet.nyanpasu
+package com.wepwawet.discover
 
 import android.content.Context
 import com.wepwawet.log.WepWawetLogger
@@ -59,9 +59,9 @@ import kotlin.random.Random
  *     hosts, like 1.0's AppHttpClient + ImageUrlFallback.
  * ══════════════════════════════════════════════════════════════════════
  */
-object NyanpasuSearch {
+object DiscoverSearch {
 
-    private const val TAG = "NyanpasuSearch"
+    private const val TAG = "DiscoverSearch"
     // v0.8.18 (review B21): the OS version comes from the DEVICE now — the
     // old hardcoded "Android 14" UA went stale the moment the app ran on
     // any other release and made the client trivially fingerprintable as
@@ -113,7 +113,7 @@ object NyanpasuSearch {
      * no booru source is selected.
      *
      * v0.8.18: `sources` ("add the ability to choose the booru sources for
-     * the discover page") — the ids from [NyanpasuPrefs.ALL_SOURCES]; only
+     * the discover page") — the ids from [DiscoverPrefs.ALL_SOURCES]; only
      * the selected ones are queried at every tier.
      */
     suspend fun searchOne(
@@ -123,7 +123,7 @@ object NyanpasuSearch {
         styleValue: Int,
         r18Mode: Int,
         recentUrls: Set<String>,
-        sources: Set<String> = NyanpasuPrefs.ALL_SOURCES.toSet(),
+        sources: Set<String> = DiscoverPrefs.ALL_SOURCES.toSet(),
     ): String = withContext(Dispatchers.IO) {
         if (sources.isEmpty()) {
             throw NoImageException("No booru source selected")
@@ -176,12 +176,12 @@ object NyanpasuSearch {
         deadline: Long,
     ): String? {
         // ── Tier 1: Lolicon with tags (the flagship source) ──
-        if (NyanpasuPrefs.SOURCE_LOLICON in sources) {
+        if (DiscoverPrefs.SOURCE_LOLICON in sources) {
             lolicon(strict, soft, styleValue, r18Mode, attachSoft = true, tried)?.let { return it }
         }
 
         // ── Tier 1b: Danbooru with tags ──
-        if (NyanpasuPrefs.SOURCE_DANBOORU in sources &&
+        if (DiscoverPrefs.SOURCE_DANBOORU in sources &&
             System.currentTimeMillis() < deadline
         ) {
             danbooru(strict, soft, styleValue, r18Mode, tried)?.let { return it }
@@ -195,7 +195,7 @@ object NyanpasuSearch {
         // ── R18 escalations (v1.0.0 tierEscalations) ──
         for (escalated in r18Escalations(r18Mode)) {
             if (System.currentTimeMillis() >= deadline) break
-            if (NyanpasuPrefs.SOURCE_LOLICON in sources) {
+            if (DiscoverPrefs.SOURCE_LOLICON in sources) {
                 lolicon(strict, soft, styleValue, escalated, attachSoft = false, tried)?.let { return it }
             }
             booruPool(strict, escalated, sources, tried)?.let { return it }
@@ -204,7 +204,7 @@ object NyanpasuSearch {
         // ── Tier 3: slider-only (style band alone) ──
         if (System.currentTimeMillis() < deadline) {
             sliderTagGroup(styleValue)?.let { band ->
-                if (NyanpasuPrefs.SOURCE_LOLICON in sources) {
+                if (DiscoverPrefs.SOURCE_LOLICON in sources) {
                     lolicon(listOf(band), emptyList(), styleValue, r18Mode, attachSoft = false, tried)?.let { return it }
                 }
                 booruPool(listOf(band), r18Mode, sources, tried)?.let { return it }
@@ -214,10 +214,10 @@ object NyanpasuSearch {
         // ── Tier 4: untagged fallback — ALWAYS something when the network is up ──
         // (v1.0.0's contract: this tier exists exactly so a no-match never
         // strands the user; only a truly dead network reaches the exception.)
-        if (NyanpasuPrefs.SOURCE_LOLICON in sources) {
+        if (DiscoverPrefs.SOURCE_LOLICON in sources) {
             lolicon(emptyList(), emptyList(), styleValue, r18Mode, attachSoft = false, tried)?.let { return it }
         }
-        if (NyanpasuPrefs.SOURCE_DANBOORU in sources) {
+        if (DiscoverPrefs.SOURCE_DANBOORU in sources) {
             danbooru(emptyList(), emptyList(), styleValue, r18Mode, tried)?.let { return it }
         }
         booruPool(emptyList(), r18Mode, sources, tried)?.let { return it }
@@ -404,8 +404,8 @@ object NyanpasuSearch {
                 if (post.optBoolean("is_deleted")) continue
                 val rating = post.optString("rating", "")
                 val ratingOk = when (r18Mode) {
-                    NyanpasuPrefs.R18_PURE -> rating == "g"
-                    NyanpasuPrefs.R18_NSFW -> true
+                    DiscoverPrefs.R18_PURE -> rating == "g"
+                    DiscoverPrefs.R18_NSFW -> true
                     else -> rating != "e" // MIX: exclude explicit (1.0 parity)
                 }
                 if (!ratingOk) continue
@@ -419,8 +419,8 @@ object NyanpasuSearch {
 
     /** 1.0 parity (DanbooruSearchClient.ratingClause). */
     private fun danbooruRatingClause(r18Mode: Int): String? = when (r18Mode) {
-        NyanpasuPrefs.R18_PURE -> "rating:general"
-        NyanpasuPrefs.R18_NSFW -> "-rating:general"
+        DiscoverPrefs.R18_PURE -> "rating:general"
+        DiscoverPrefs.R18_NSFW -> "-rating:general"
         else -> "-rating:explicit"
     }
 
@@ -457,42 +457,42 @@ object NyanpasuSearch {
 
         // 1.0 parity: MOE_PURE / MOE_NSFW / MOE_MIX site lists.
         val moeByMode = when (r18Mode) {
-            NyanpasuPrefs.R18_PURE -> listOf(
-                MoeSite(NyanpasuPrefs.SOURCE_KONACHAN, "https://konachan.net/post.json", 0),
-                MoeSite(NyanpasuPrefs.SOURCE_BEHOIMI, "https://behoimi.org/post.json", 0),
+            DiscoverPrefs.R18_PURE -> listOf(
+                MoeSite(DiscoverPrefs.SOURCE_KONACHAN, "https://konachan.net/post.json", 0),
+                MoeSite(DiscoverPrefs.SOURCE_BEHOIMI, "https://behoimi.org/post.json", 0),
             )
-            NyanpasuPrefs.R18_NSFW -> listOf(
+            DiscoverPrefs.R18_NSFW -> listOf(
                 MoeSite("konachan_com", "https://konachan.com/post.json", 1),
-                MoeSite(NyanpasuPrefs.SOURCE_YANDE, "https://yande.re/post.json", 2),
+                MoeSite(DiscoverPrefs.SOURCE_YANDE, "https://yande.re/post.json", 2),
             )
             else -> listOf( // MIX
-                MoeSite(NyanpasuPrefs.SOURCE_YANDE, "https://yande.re/post.json", 2),
+                MoeSite(DiscoverPrefs.SOURCE_YANDE, "https://yande.re/post.json", 2),
                 MoeSite("konachan_com", "https://konachan.com/post.json", 2),
-                MoeSite(NyanpasuPrefs.SOURCE_KONACHAN, "https://konachan.net/post.json", 2),
+                MoeSite(DiscoverPrefs.SOURCE_KONACHAN, "https://konachan.net/post.json", 2),
             )
         }
         // 1.0 parity: GEL_PURE / GEL_NSFW site lists (MIX = both).
         val gelByMode = when (r18Mode) {
-            NyanpasuPrefs.R18_PURE -> listOf(
-                NyanpasuPrefs.SOURCE_SAFEBOORU to
+            DiscoverPrefs.R18_PURE -> listOf(
+                DiscoverPrefs.SOURCE_SAFEBOORU to
                     "https://safebooru.org/index.php?page=dapi&s=post&q=index&json=1",
-                NyanpasuPrefs.SOURCE_TBIB to
+                DiscoverPrefs.SOURCE_TBIB to
                     "https://tbib.org/index.php?page=dapi&s=post&q=index&json=1",
             )
-            NyanpasuPrefs.R18_NSFW -> listOf(
-                NyanpasuPrefs.SOURCE_GELBOORU to
+            DiscoverPrefs.R18_NSFW -> listOf(
+                DiscoverPrefs.SOURCE_GELBOORU to
                     "https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1",
-                NyanpasuPrefs.SOURCE_XBOORU to
+                DiscoverPrefs.SOURCE_XBOORU to
                     "https://xbooru.com/index.php?page=dapi&s=post&q=index&json=1",
             )
             else -> listOf( // MIX = GEL_PURE + GEL_NSFW
-                NyanpasuPrefs.SOURCE_SAFEBOORU to
+                DiscoverPrefs.SOURCE_SAFEBOORU to
                     "https://safebooru.org/index.php?page=dapi&s=post&q=index&json=1",
-                NyanpasuPrefs.SOURCE_TBIB to
+                DiscoverPrefs.SOURCE_TBIB to
                     "https://tbib.org/index.php?page=dapi&s=post&q=index&json=1",
-                NyanpasuPrefs.SOURCE_GELBOORU to
+                DiscoverPrefs.SOURCE_GELBOORU to
                     "https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1",
-                NyanpasuPrefs.SOURCE_XBOORU to
+                DiscoverPrefs.SOURCE_XBOORU to
                     "https://xbooru.com/index.php?page=dapi&s=post&q=index&json=1",
             )
         }
@@ -502,8 +502,8 @@ object NyanpasuSearch {
         // the niche fallback singles, "1girl" last resort.
         val candidates = buildTagCandidates(tags)
         val ratingSuffix = when (r18Mode) {
-            NyanpasuPrefs.R18_PURE -> "rating:safe"
-            NyanpasuPrefs.R18_NSFW -> "rating:explicit"
+            DiscoverPrefs.R18_PURE -> "rating:safe"
+            DiscoverPrefs.R18_NSFW -> "rating:explicit"
             else -> "-rating:explicit"
         }
 
@@ -522,8 +522,8 @@ object NyanpasuSearch {
                         0 -> rt == "safe" || rt == "s"
                         1 -> rt == "explicit" || rt == "e"
                         else -> when (r18Mode) {
-                            NyanpasuPrefs.R18_PURE -> rt == "safe" || rt == "s"
-                            NyanpasuPrefs.R18_NSFW -> rt != "safe" && rt != "s"
+                            DiscoverPrefs.R18_PURE -> rt == "safe" || rt == "s"
+                            DiscoverPrefs.R18_NSFW -> rt != "safe" && rt != "s"
                             else -> rt != "explicit" && rt != "e"
                         }
                     }
@@ -547,8 +547,8 @@ object NyanpasuSearch {
                     val post = body.optJSONObject(i) ?: continue
                     val rating = post.optString("rating", "").lowercase()
                     val allowed = when (r18Mode) {
-                        NyanpasuPrefs.R18_PURE -> rating !in setOf("explicit", "e", "q")
-                        NyanpasuPrefs.R18_NSFW -> true
+                        DiscoverPrefs.R18_PURE -> rating !in setOf("explicit", "e", "q")
+                        DiscoverPrefs.R18_NSFW -> true
                         else -> rating !in setOf("explicit", "e")
                     }
                     if (!allowed) continue
@@ -740,9 +740,9 @@ object NyanpasuSearch {
 
     /** v1.0.0 SearchR18Policy.tierEscalations. */
     private fun r18Escalations(appMode: Int): List<Int> = when (appMode) {
-        NyanpasuPrefs.R18_PURE -> emptyList()
-        NyanpasuPrefs.R18_NSFW -> listOf(NyanpasuPrefs.R18_MIX)
-        else -> listOf(NyanpasuPrefs.R18_NSFW, NyanpasuPrefs.R18_PURE)
+        DiscoverPrefs.R18_PURE -> emptyList()
+        DiscoverPrefs.R18_NSFW -> listOf(DiscoverPrefs.R18_MIX)
+        else -> listOf(DiscoverPrefs.R18_NSFW, DiscoverPrefs.R18_PURE)
     }
 
     // ════════════════════════════════════════════════════════════════

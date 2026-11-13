@@ -1,4 +1,4 @@
-package com.wepwawet.nyanpasu
+package com.wepwawet.discover
 
 import android.graphics.Bitmap
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -97,7 +97,7 @@ import kotlin.random.Random
  * (MIT License — attribution kept here in source only; no user-visible
  * string carries the name), with the SAFE later-version reliability fixes
  * (DNS-over-HTTPS fallback, ticker/one-shot scheduling) and NONE of the
- * later image-choice regressions (see [NyanpasuSearch]).
+ * later image-choice regressions (see [DiscoverSearch]).
  *
  * v1.0.0 controls on this screen (all present):
  *  • the tools row — Undo, Home (tri-state), Lock (tri-state), Save
@@ -121,20 +121,20 @@ import kotlin.random.Random
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
+fun DiscoverScreen(onBack: (() -> Unit)? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
 
     // ---- settings state ----
-    var strictTags by remember { mutableStateOf(NyanpasuPrefs.readStrictTags(context)) }
-    var softTags by remember { mutableStateOf(NyanpasuPrefs.readSoftTags(context)) }
-    var styleValue by remember { mutableStateOf(NyanpasuPrefs.readStyle(context)) }
-    var r18Mode by remember { mutableStateOf(NyanpasuPrefs.readR18(context)) }
+    var strictTags by remember { mutableStateOf(DiscoverPrefs.readStrictTags(context)) }
+    var softTags by remember { mutableStateOf(DiscoverPrefs.readSoftTags(context)) }
+    var styleValue by remember { mutableStateOf(DiscoverPrefs.readStyle(context)) }
+    var r18Mode by remember { mutableStateOf(DiscoverPrefs.readR18(context)) }
     // v0.8.18: the booru source picker ("add the ability to choose the
     // booru sources for the discover page").
-    var sources by remember { mutableStateOf(NyanpasuPrefs.readSources(context)) }
-    var screens by remember { mutableStateOf(NyanpasuPrefs.readScreens(context)) }
+    var sources by remember { mutableStateOf(DiscoverPrefs.readSources(context)) }
+    var screens by remember { mutableStateOf(DiscoverPrefs.readScreens(context)) }
     val homeState = screens.first
     val lockState = screens.second
 
@@ -150,7 +150,7 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
     var fetching by remember { mutableStateOf(false) }
     var applying by remember { mutableStateOf(false) }
     var statusLine by remember { mutableStateOf<String?>(null) }
-    var history by remember { mutableStateOf(NyanpasuApplier.readHistory(context)) }
+    var history by remember { mutableStateOf(DiscoverApplier.readHistory(context)) }
     // v0.8.17: the Set-as-wallpaper choice ("crop it from there if you push
     // set as wallpaper") + the crop dialog itself.
     var showSetChoice by remember { mutableStateOf(false) }
@@ -234,6 +234,21 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
         if (w > 0f && h > 0f) w / h else 9f / 19.5f
     }
 
+    // v0.8.20 (fixed window): the preview window's HEIGHT is FIXED —
+    // 42% of the physical screen ("the image in discover is too big. it
+    // covers up the buttons. it should be in fixed window above the
+    // buttons"). The window keeps the PHONE's aspect ratio and is
+    // CENTERED horizontally (letterboxed when the phone is wider than
+    // the window), so the window itself can never grow past the budget
+    // and every action row below stays on screen.
+    val fixedWindowHeight = with(androidx.compose.ui.platform.LocalDensity.current) {
+        (context.resources.displayMetrics.heightPixels * 0.42f).toDp()
+    }
+    // The window's width at the phone aspect, capped by the available
+    // width (the horizontal padding eats 32dp; the cap keeps the aspect
+    // exact on very wide screens by letterboxing instead).
+    val fixedWindowWidth = (fixedWindowHeight * phoneAspect.coerceIn(0.4f, 2.5f))
+
     // v0.8.19: the pan/zoom state of the preview window. zoom ≥ 1; pan
     // fractions −1..1 of the available slack on each axis.
     var previewZoom by remember { mutableStateOf(1f) }
@@ -246,7 +261,7 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
         previewPanY = 0f
     }
 
-    fun persistTags() = NyanpasuPrefs.writeTags(context, strictTags, softTags)
+    fun persistTags() = DiscoverPrefs.writeTags(context, strictTags, softTags)
 
     /**
      * v0.8.16: background refill of the preload queue — keeps 3 images
@@ -268,7 +283,7 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
      * OLD (or empty) tags and tags appeared dead. Queued slots are now
      * stamped with this signature; only matching slots are ever popped.
      */
-    fun currentSignature() = NyanpasuPrefs.searchSignature(
+    fun currentSignature() = DiscoverPrefs.searchSignature(
         strictTags, softTags, styleValue, r18Mode, sources)
 
     val refilling = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
@@ -278,32 +293,32 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
             try {
                 val signature = currentSignature()
                 // v0.8.19: the queue target comes from the prefs
-                // constant (8 — see NyanpasuPrefs.QUEUE_SIZE).
-                while (NyanpasuPrefs.queueDepth(context, signature) <
-                    com.wepwawet.nyanpasu.NyanpasuPrefs.QUEUE_TARGET) {
+                // constant (8 — see DiscoverPrefs.QUEUE_SIZE).
+                while (DiscoverPrefs.queueDepth(context, signature) <
+                    DiscoverPrefs.QUEUE_TARGET) {
                     val nextUrl = withContext(Dispatchers.IO) {
                         runCatching {
-                            NyanpasuSearch.searchOne(
+                            DiscoverSearch.searchOne(
                                 context = context,
                                 strictTags = strictTags,
                                 softTags = softTags,
                                 styleValue = styleValue,
                                 r18Mode = r18Mode,
-                                recentUrls = NyanpasuPrefs.readRecentUrls(context),
+                                recentUrls = DiscoverPrefs.readRecentUrls(context),
                                 sources = sources,
                             )
                         }.getOrNull()
                     } ?: break
                     val nextBytes = withContext(Dispatchers.IO) {
-                        runCatching { NyanpasuSearch.downloadImage(nextUrl) }.getOrNull()
+                        runCatching { DiscoverSearch.downloadImage(nextUrl) }.getOrNull()
                     }
                     if (nextBytes == null || nextBytes.size <= 1024) break
                     withContext(Dispatchers.IO) {
-                        NyanpasuPrefs.appendQueuedImage(context, nextUrl, nextBytes, signature)
+                        DiscoverPrefs.appendQueuedImage(context, nextUrl, nextBytes, signature)
                     }
                     WepWawetLogger.appInfo("DiscoverScreen: preloaded image queued",
                         "bytes" to nextBytes.size,
-                        "depth" to NyanpasuPrefs.queueDepth(context, signature))
+                        "depth" to DiscoverPrefs.queueDepth(context, signature))
                 }
             } finally {
                 refilling.set(false)
@@ -324,7 +339,7 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
         r18Mode: Int,
         sources: Set<String>,
     ) {
-        val maxDim = NyanpasuApplier.maxDecodeDimension(context)
+        val maxDim = DiscoverApplier.maxDecodeDimension(context)
         var url: String? = null
         var bytes: ByteArray? = null
         // v0.8.16: PRELOADED QUEUE — Refresh pops an already-downloaded
@@ -333,9 +348,9 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
         // to ensure it can change it instantly"). v0.8.18: only slots
         // fetched under the SAME search parameters are eligible — a tag or
         // source change makes every old slot stale (dropped on sight).
-        val signature = NyanpasuPrefs.searchSignature(
+        val signature = DiscoverPrefs.searchSignature(
             strictTags, softTags, styleValue, r18Mode, sources)
-        NyanpasuPrefs.consumeQueuedImage(context, signature)?.let { (cached, cachedUrl) ->
+        DiscoverPrefs.consumeQueuedImage(context, signature)?.let { (cached, cachedUrl) ->
             url = cachedUrl
             bytes = cached
             WepWawetLogger.appInfo("DiscoverScreen: using preloaded image",
@@ -343,23 +358,23 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
         }
         if (bytes == null) {
             val fetched = withContext(Dispatchers.IO) {
-                NyanpasuSearch.searchOne(
+                DiscoverSearch.searchOne(
                     context = context,
                     strictTags = strictTags,
                     softTags = softTags,
                     styleValue = styleValue,
                     r18Mode = r18Mode,
-                    recentUrls = NyanpasuPrefs.readRecentUrls(context),
+                    recentUrls = DiscoverPrefs.readRecentUrls(context),
                     sources = sources,
                 )
             }
             statusLine = "Downloading…"
             url = fetched
-            bytes = withContext(Dispatchers.IO) { NyanpasuSearch.downloadImage(fetched) }
+            bytes = withContext(Dispatchers.IO) { DiscoverSearch.downloadImage(fetched) }
         }
         val imgBytes = bytes!!
-        NyanpasuPrefs.pushRecentUrl(context, url!!)
-        val bmp = withContext(Dispatchers.IO) { NyanpasuApplier.decode(imgBytes, maxDim) }
+        DiscoverPrefs.pushRecentUrl(context, url!!)
+        val bmp = withContext(Dispatchers.IO) { DiscoverApplier.decode(imgBytes, maxDim) }
         if (bmp == null) {
             statusLine = "Downloaded image failed to decode"
             WepWawetLogger.appWarn("DiscoverScreen: decode failed",
@@ -375,23 +390,23 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
         refillQueue()
 
         // Dual mode (pink/blue): a separate image for the lock screen.
-        if (NyanpasuPrefs.isDualMode(homeState, lockState)) {
+        if (DiscoverPrefs.isDualMode(homeState, lockState)) {
             statusLine = "Matching a lock-screen image…"
             val lockUrl = withContext(Dispatchers.IO) {
-                NyanpasuSearch.searchOne(
+                DiscoverSearch.searchOne(
                     context = context,
                     strictTags = strictTags,
                     softTags = softTags,
                     styleValue = styleValue,
                     r18Mode = r18Mode,
-                    recentUrls = NyanpasuPrefs.readRecentUrls(context) + url!!,
+                    recentUrls = DiscoverPrefs.readRecentUrls(context) + url!!,
                     sources = sources,
                 )
             }
-            val lockBytes = withContext(Dispatchers.IO) { NyanpasuSearch.downloadImage(lockUrl) }
-            NyanpasuPrefs.pushRecentUrl(context, lockUrl)
+            val lockBytes = withContext(Dispatchers.IO) { DiscoverSearch.downloadImage(lockUrl) }
+            DiscoverPrefs.pushRecentUrl(context, lockUrl)
             val lockBmp = withContext(Dispatchers.IO) {
-                NyanpasuApplier.decode(lockBytes, maxDim)
+                DiscoverApplier.decode(lockBytes, maxDim)
             }
             previewLockBitmap = lockBmp
             WepWawetLogger.appInfo("DiscoverScreen: lock image fetched",
@@ -421,7 +436,7 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
         statusLine = "Applying…"
         scope.launch {
             try {
-                val lockBmp = if (NyanpasuPrefs.isDualMode(homeState, lockState))
+                val lockBmp = if (DiscoverPrefs.isDualMode(homeState, lockState))
                     (lockOverride ?: previewLockBitmap) else null
                 // v0.8.19 (preview window): a plain Set applies exactly the
                 // VISIBLE region of the preview window (WYSIWYG — the
@@ -431,31 +446,31 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                 // choice they made).
                 val homeCrop = withContext(Dispatchers.IO) {
                     if (homeOverride != null) {
-                        NyanpasuApplier.cropForScreen(context, bmp, matchScreenAspect = false)
+                        DiscoverApplier.cropForScreen(context, bmp, matchScreenAspect = false)
                     } else {
-                        NyanpasuApplier.cropVisibleWindow(
+                        DiscoverApplier.cropVisibleWindow(
                             context, bmp, phoneAspect, previewZoom, previewPanX, previewPanY)
                     }
                 }
                 val lockCrop = lockBmp?.let {
                     withContext(Dispatchers.IO) {
                         if (lockOverride != null) {
-                            NyanpasuApplier.cropForScreen(context, it, matchScreenAspect = false)
+                            DiscoverApplier.cropForScreen(context, it, matchScreenAspect = false)
                         } else {
-                            NyanpasuApplier.cropVisibleWindow(
+                            DiscoverApplier.cropVisibleWindow(
                                 context, it, phoneAspect, previewZoom, previewPanX, previewPanY)
                         }
                     }
                 }
-                val result = NyanpasuApplier.applyScreens(
+                val result = DiscoverApplier.applyScreens(
                     context, homeCrop, homeState, lockState, lockCrop)
                 if (result.ok) {
                     // v0.8.18: ok = ANY requested screen was written — the
                     // old strict AND meant a device whose lock write fails
                     // never recorded history even though the home wallpaper
                     // visibly changed ("the history doesnt work").
-                    NyanpasuApplier.pushHistory(context, homeCrop)
-                    history = NyanpasuApplier.readHistory(context)
+                    DiscoverApplier.pushHistory(context, homeCrop)
+                    history = DiscoverApplier.readHistory(context)
                     previewIsFresh = false
                     statusLine = if (result.allOk) "Wallpaper set"
                         else "Wallpaper set (one screen failed)"
@@ -504,7 +519,7 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
         WepWawetLogger.appInfo("DiscoverScreen: refresh start (preview only)",
             "home_state" to homeState,
             "lock_state" to lockState,
-            "dual" to NyanpasuPrefs.isDualMode(homeState, lockState))
+            "dual" to DiscoverPrefs.isDualMode(homeState, lockState))
         scope.launch {
             try {
                 fetchAndShow(
@@ -517,7 +532,7 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                     sources = sources,
                 )
                 statusLine = "New image — press Set to apply"
-            } catch (e: NyanpasuSearch.NoImageException) {
+            } catch (e: DiscoverSearch.NoImageException) {
                 statusLine = when {
                     sources.isEmpty() ->
                         "Pick at least one booru source below"
@@ -557,13 +572,13 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                     return@launch
                 }
                 val crop = withContext(Dispatchers.IO) {
-                    NyanpasuApplier.cropForScreen(context, bmp)
+                    DiscoverApplier.cropForScreen(context, bmp)
                 }
-                val result = NyanpasuApplier.applyScreens(context, crop, homeState, lockState, null)
+                val result = DiscoverApplier.applyScreens(context, crop, homeState, lockState, null)
                 if (result.ok) {
                     // Pop the restored entry off the ring.
                     runCatching { entry.file.delete() }
-                    history = NyanpasuApplier.readHistory(context)
+                    history = DiscoverApplier.readHistory(context)
                     previewBitmap = bmp
                     previewIsFresh = false
                     statusLine = "Previous wallpaper restored"
@@ -582,40 +597,40 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
     /** Cycle a screen's tri-state Off → Pink → Blue → Off. */
     fun cycleScreen(isHome: Boolean) {
         val (h, l) = screens
-        val wasDual = NyanpasuPrefs.isDualMode(h, l)
+        val wasDual = DiscoverPrefs.isDualMode(h, l)
         val newPair = if (isHome) ((h + 1) % 3) to l else h to ((l + 1) % 3)
         screens = newPair
-        NyanpasuPrefs.writeScreens(context, newPair.first, newPair.second)
+        DiscoverPrefs.writeScreens(context, newPair.first, newPair.second)
         WepWawetLogger.appInfo("DiscoverScreen: screen toggled",
             "which" to if (isHome) "home" else "lock",
             "home_state" to newPair.first,
             "lock_state" to newPair.second,
             "mode" to when {
-                NyanpasuPrefs.isDualMode(newPair.first, newPair.second) -> "dual"
-                NyanpasuPrefs.isSyncMode(newPair.first, newPair.second) -> "sync"
+                DiscoverPrefs.isDualMode(newPair.first, newPair.second) -> "dual"
+                DiscoverPrefs.isSyncMode(newPair.first, newPair.second) -> "sync"
                 else -> "single"
             })
         // Entering dual mode with a home image but no lock image → fetch
         // the lock complement in the background (1.0's complement work).
-        val nowDual = NyanpasuPrefs.isDualMode(newPair.first, newPair.second)
+        val nowDual = DiscoverPrefs.isDualMode(newPair.first, newPair.second)
         if (nowDual && !wasDual && previewBitmap != null && previewLockBitmap == null && !fetching) {
             scope.launch {
                 try {
                     val lockUrl = withContext(Dispatchers.IO) {
-                        NyanpasuSearch.searchOne(
+                        DiscoverSearch.searchOne(
                             context = context,
                             strictTags = strictTags,
                             softTags = softTags,
                             styleValue = styleValue,
                             r18Mode = r18Mode,
-                            recentUrls = NyanpasuPrefs.readRecentUrls(context),
+                            recentUrls = DiscoverPrefs.readRecentUrls(context),
                             sources = sources,
                         )
                     }
-                    val lockBytes = withContext(Dispatchers.IO) { NyanpasuSearch.downloadImage(lockUrl) }
-                    NyanpasuPrefs.pushRecentUrl(context, lockUrl)
+                    val lockBytes = withContext(Dispatchers.IO) { DiscoverSearch.downloadImage(lockUrl) }
+                    DiscoverPrefs.pushRecentUrl(context, lockUrl)
                     previewLockBitmap = withContext(Dispatchers.IO) {
-                        NyanpasuApplier.decode(lockBytes, NyanpasuApplier.maxDecodeDimension(context))
+                        DiscoverApplier.decode(lockBytes, DiscoverApplier.maxDecodeDimension(context))
                     }
                     WepWawetLogger.appInfo("DiscoverScreen: dual complement fetched",
                         "url" to lockUrl.take(100))
@@ -688,25 +703,31 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            // ===== v0.8.19 PREVIEW WINDOW: full width at the PHONE's
-            // aspect ratio — "i want the image to be in a window that is
-            // the aspect ratio of the phone. you should be able to manuver
-            // it in this window". The image floats inside, pan/zoomable
-            // (drag to move, pinch to zoom); Set applies exactly the
-            // VISIBLE region. The 42%-height sanity cap only guards
-            // absurdly wide window aspects (landscape phones).
+            // ===== v0.8.20 FIXED PREVIEW WINDOW: the window's height is
+            // FIXED at 42% of the screen (phone aspect, centered) — the
+            // action rows below can never be pushed off screen. The image
+            // floats inside, pan/zoomable; Set applies exactly the VISIBLE
+            // region.
             val shownBmp =
                 if (previewingLock && previewLockBitmap != null) previewLockBitmap else previewBitmap
-            Box(
+            androidx.compose.foundation.layout.BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .aspectRatio(phoneAspect.coerceIn(0.4f, 2.5f))
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                    .heightIn(max = fixedWindowHeight),
+                contentAlignment = Alignment.Center,
             ) {
+                // The exact window size: phone aspect inside the fixed
+                // height budget, capped by the available width.
+                val winW = minOf(maxWidth, fixedWindowWidth)
+                Box(
+                    modifier = Modifier
+                        .size(width = winW, height = fixedWindowHeight)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                ) {
                 if (shownBmp != null) {
                     // The pan/zoomable image. The math here mirrors
-                    // NyanpasuApplier.cropVisibleWindow EXACTLY, so what Set
+                    // DiscoverApplier.cropVisibleWindow EXACTLY, so what Set
                     // applies is exactly what this window shows.
                     //
                     // Units: dispW/dispH are multipliers of the WINDOW size
@@ -778,7 +799,7 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                         )
                     }
                     // Dual-mode preview switch (tap the label).
-                    if (NyanpasuPrefs.isDualMode(homeState, lockState) &&
+                    if (DiscoverPrefs.isDualMode(homeState, lockState) &&
                         previewLockBitmap != null
                     ) {
                         Text(
@@ -821,6 +842,7 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                         textAlign = TextAlign.Center,
                         modifier = Modifier.padding(horizontal = 16.dp),
                     )
+                }
                 }
             }
 
@@ -976,13 +998,13 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                for (id in NyanpasuPrefs.ALL_SOURCES) {
+                for (id in DiscoverPrefs.ALL_SOURCES) {
                     FilterChip(
                         selected = id in sources,
                         onClick = {
                             sources = if (id in sources) sources - id
                                 else sources + id
-                            NyanpasuPrefs.writeSources(context, sources)
+                            DiscoverPrefs.writeSources(context, sources)
                             WepWawetLogger.appInfo("DiscoverScreen: source toggled",
                                 "source" to id,
                                 "enabled" to (id in sources),
@@ -990,7 +1012,7 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                             // Re-stock the queue for the new selection.
                             refillQueue()
                         },
-                        label = { Text(NyanpasuPrefs.sourceLabel(id)) },
+                        label = { Text(DiscoverPrefs.sourceLabel(id)) },
                     )
                 }
             }
@@ -1012,7 +1034,7 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                 value = styleValue.toFloat(),
                 onValueChange = { styleValue = it.toInt() },
                 onValueChangeFinished = {
-                    NyanpasuPrefs.writeStyle(context, styleValue)
+                    DiscoverPrefs.writeStyle(context, styleValue)
                 },
                 valueRange = 0f..100f,
             )
@@ -1030,28 +1052,28 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
             Text("Content", style = MaterialTheme.typography.titleMedium)
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                 SegmentedButton(
-                    selected = r18Mode == NyanpasuPrefs.R18_PURE,
+                    selected = r18Mode == DiscoverPrefs.R18_PURE,
                     onClick = {
-                        r18Mode = NyanpasuPrefs.R18_PURE
-                        NyanpasuPrefs.writeR18(context, r18Mode)
+                        r18Mode = DiscoverPrefs.R18_PURE
+                        DiscoverPrefs.writeR18(context, r18Mode)
                         WepWawetLogger.appInfo("DiscoverScreen: content mode", "mode" to "pure")
                     },
                     shape = SegmentedButtonDefaults.itemShape(0, 3),
                 ) { Text("Pure") }
                 SegmentedButton(
-                    selected = r18Mode == NyanpasuPrefs.R18_MIX,
+                    selected = r18Mode == DiscoverPrefs.R18_MIX,
                     onClick = {
-                        r18Mode = NyanpasuPrefs.R18_MIX
-                        NyanpasuPrefs.writeR18(context, r18Mode)
+                        r18Mode = DiscoverPrefs.R18_MIX
+                        DiscoverPrefs.writeR18(context, r18Mode)
                         WepWawetLogger.appInfo("DiscoverScreen: content mode", "mode" to "mix")
                     },
                     shape = SegmentedButtonDefaults.itemShape(1, 3),
                 ) { Text("Mix") }
                 SegmentedButton(
-                    selected = r18Mode == NyanpasuPrefs.R18_NSFW,
+                    selected = r18Mode == DiscoverPrefs.R18_NSFW,
                     onClick = {
-                        r18Mode = NyanpasuPrefs.R18_NSFW
-                        NyanpasuPrefs.writeR18(context, r18Mode)
+                        r18Mode = DiscoverPrefs.R18_NSFW
+                        DiscoverPrefs.writeR18(context, r18Mode)
                         WepWawetLogger.appInfo("DiscoverScreen: content mode", "mode" to "nsfw")
                     },
                     shape = SegmentedButtonDefaults.itemShape(2, 3),
@@ -1089,9 +1111,9 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                                                 entry.file.absolutePath)
                                         } ?: return@launch
                                         val crop = withContext(Dispatchers.IO) {
-                                            NyanpasuApplier.cropForScreen(context, bmp)
+                                            DiscoverApplier.cropForScreen(context, bmp)
                                         }
-                                        val result = NyanpasuApplier.applyScreens(
+                                        val result = DiscoverApplier.applyScreens(
                                             context, crop, homeState, lockState, null)
                                         if (result.ok) {
                                             previewBitmap = bmp
@@ -1323,11 +1345,11 @@ private fun TriStateButton(
     modifier: Modifier = Modifier,
 ) {
     val container = when (state) {
-        NyanpasuPrefs.SCREEN_PINK -> PinkState
-        NyanpasuPrefs.SCREEN_BLUE -> BlueState
+        DiscoverPrefs.SCREEN_PINK -> PinkState
+        DiscoverPrefs.SCREEN_BLUE -> BlueState
         else -> MaterialTheme.colorScheme.surfaceVariant
     }
-    val content = if (state > NyanpasuPrefs.SCREEN_OFF) Color.White
+    val content = if (state > DiscoverPrefs.SCREEN_OFF) Color.White
     else MaterialTheme.colorScheme.onSurfaceVariant
     Button(
         onClick = onCycle,
@@ -1341,7 +1363,7 @@ private fun TriStateButton(
             horizontal = 16.dp, vertical = 10.dp),
     ) {
         Text(label, style = MaterialTheme.typography.labelLarge)
-        if (state > NyanpasuPrefs.SCREEN_OFF) {
+        if (state > DiscoverPrefs.SCREEN_OFF) {
             Spacer(Modifier.width(6.dp))
             Text("✓", style = MaterialTheme.typography.labelLarge)
         }
@@ -1436,7 +1458,7 @@ private fun TagEditor(
 }
 
 @Composable
-private fun HistoryThumb(entry: NyanpasuApplier.HistoryEntry) {
+private fun HistoryThumb(entry: DiscoverApplier.HistoryEntry) {
     // Light-weight decode: subsample to ~128 px for the strip.
     // No border (user request).
     // v0.8.18 (review B22): the decode moved OFF the composition thread —

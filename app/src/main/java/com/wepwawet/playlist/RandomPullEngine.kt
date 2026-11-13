@@ -3,8 +3,8 @@ package com.wepwawet.playlist
 import android.content.Context
 import android.graphics.Bitmap
 import com.wepwawet.log.WepWawetLogger
-import com.wepwawet.nyanpasu.NyanpasuPrefs
-import com.wepwawet.nyanpasu.NyanpasuSearch
+import com.wepwawet.discover.DiscoverPrefs
+import com.wepwawet.discover.DiscoverSearch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -65,18 +65,18 @@ object RandomPullEngine {
             // Resolve the effective settings: the playlist's own values,
             // falling back to Discover's current ones (1.0's parity knobs).
             val strict = playlist.randomStrictTags
-                ?: NyanpasuPrefs.readStrictTags(context)
+                ?: DiscoverPrefs.readStrictTags(context)
             val soft = playlist.randomSoftTags
-                ?: NyanpasuPrefs.readSoftTags(context)
+                ?: DiscoverPrefs.readSoftTags(context)
             val style = playlist.randomStyleValue
-                ?: NyanpasuPrefs.readStyle(context)
+                ?: DiscoverPrefs.readStyle(context)
             val r18 = playlist.randomR18Mode
-                ?: NyanpasuPrefs.readR18(context)
+                ?: DiscoverPrefs.readR18(context)
             val sources = playlist.randomSources?.toSet()
-                ?: NyanpasuPrefs.readSources(context)
+                ?: DiscoverPrefs.readSources(context)
             val recent = readRecent(context, playlist.id)
 
-            val url = NyanpasuSearch.searchOne(
+            val url = DiscoverSearch.searchOne(
                 context = context,
                 strictTags = strict,
                 softTags = soft,
@@ -85,8 +85,8 @@ object RandomPullEngine {
                 recentUrls = recent,
                 sources = sources,
             )
-            val bytes = NyanpasuSearch.downloadImage(url)
-            NyanpasuPrefs.pushRecentUrl(context, url)
+            val bytes = DiscoverSearch.downloadImage(url)
+            DiscoverPrefs.pushRecentUrl(context, url)
 
             // Write the new file FIRST, then delete the old (a failure
             // mid-way keeps the previous slot working).
@@ -123,7 +123,7 @@ object RandomPullEngine {
 
     /** Decode a file into a bitmap (system-wallpaper set path). */
     fun decode(file: File, maxDim: Int): Bitmap? =
-        com.wepwawet.nyanpasu.NyanpasuApplier.decode(file.readBytes(), maxDim)
+        com.wepwawet.discover.DiscoverApplier.decode(file.readBytes(), maxDim)
 
     /** Is [path] inside the random-slot directory? (history pinning etc.) */
     fun isSlotFile(path: String): Boolean = path.contains("/playlist_random/")
@@ -133,7 +133,7 @@ object RandomPullEngine {
         // The playlist's own last URL + Discover's global recents (a
         // different playlist just set the same image — don't repeat it).
         val own = p.getString(KEY_RECENT_PREFIX + playlistId, null)
-        val global = NyanpasuPrefs.readRecentUrls(context)
+        val global = DiscoverPrefs.readRecentUrls(context)
         return if (own != null) global + own else global
     }
 

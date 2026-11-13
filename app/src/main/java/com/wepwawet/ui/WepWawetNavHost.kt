@@ -305,7 +305,7 @@ fun WepWawetNavHost() {
         // implementation package keeps its historical name but NO
         // user-visible string carries it.
         composable("discover") {
-            com.wepwawet.nyanpasu.NyanpasuScreen(onBack = null)
+            com.wepwawet.discover.DiscoverScreen(onBack = null)
         }
 
         // v0.8.0: live-rendering preview + apply + properties + playlist.

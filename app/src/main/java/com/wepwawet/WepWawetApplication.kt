@@ -182,7 +182,7 @@ class WepWawetApplication : Application(), Configuration.Provider, ImageLoaderFa
         // the first Discover visit of a session pops an already-downloaded
         // image instead of hitting the network.
         runCatching {
-            com.wepwawet.nyanpasu.DiscoverPreload.kick(this)
+            com.wepwawet.discover.DiscoverPreload.kick(this)
         }.onFailure { t ->
             Log.e(TAG, "DiscoverPreload.kick failed", t)
         }
