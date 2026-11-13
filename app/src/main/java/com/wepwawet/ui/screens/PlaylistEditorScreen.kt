@@ -39,6 +39,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -78,6 +79,10 @@ import io.wallpaperengine.weclient.WeEnginePrefs
 import io.wallpaperengine.weutil.WallpaperInfoSparse
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
+import androidx.compose.material.icons.filled.Casino
+import com.wepwawet.nyanpasu.NyanpasuPrefs
+import com.wepwawet.nyanpasu.NyanpasuSearch
 
 /**
  * The playlist editor — one saved playlist.
@@ -104,7 +109,15 @@ fun PlaylistEditorScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     var showAddPicker by remember { mutableStateOf(false) }
+    // v0.8.18: "add the ability in playlists to get a random wallpaper from
+    // the same system as the discover page" — one tap pulls a fresh image
+    // through the SAME booru search (same tags, style, content tier and
+    // source picks as Discover) straight into this playlist.
+    var addingRandom by remember { mutableStateOf(false) }
+    var randomNote by remember { mutableStateOf<String?>(null) }
+
     var editingRuleIndex by remember { mutableStateOf<Int?>(null) } // -1 = new rule
     var libraryWallpapers by remember { mutableStateOf<List<WallpaperInfoSparse>>(emptyList()) }
 
@@ -141,6 +154,57 @@ fun PlaylistEditorScreen(
         SuitePlaylistStore.upsert(context, current)
         // Re-read so the UI reflects the persisted object.
         playlist = SuitePlaylistStore.read(context, playlistId)
+    }
+
+    fun addRandomFromDiscover() {
+        if (addingRandom) return
+        addingRandom = true
+        randomNote = null
+        scope.launch {
+            try {
+                val url = withContext(Dispatchers.IO) {
+                    NyanpasuSearch.searchOne(
+                        context = context,
+                        strictTags = NyanpasuPrefs.readStrictTags(context),
+                        softTags = NyanpasuPrefs.readSoftTags(context),
+                        styleValue = NyanpasuPrefs.readStyle(context),
+                        r18Mode = NyanpasuPrefs.readR18(context),
+                        recentUrls = NyanpasuPrefs.readRecentUrls(context),
+                        sources = NyanpasuPrefs.readSources(context),
+                    )
+                }
+                val bytes = withContext(Dispatchers.IO) {
+                    NyanpasuSearch.downloadImage(url)
+                }
+                NyanpasuPrefs.pushRecentUrl(context, url)
+                val dir = java.io.File(context.filesDir, "playlist_random")
+                    .apply { mkdirs() }
+                val img = java.io.File(dir, "random_${System.currentTimeMillis()}.jpg")
+                withContext(Dispatchers.IO) {
+                    java.io.FileOutputStream(img).use { out -> out.write(bytes) }
+                }
+                save {
+                    entries.add(
+                        SuitePlaylistStore.Entry(
+                            filepath = img.absolutePath,
+                            title = "Discover ${entries.size + 1}",
+                            type = "Image"))
+                }
+                randomNote = "Added a random Discover image"
+                WepWawetLogger.appInfo("PlaylistEditor: random discover image added",
+                    "file" to img.name,
+                    "url" to url.take(80))
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                randomNote = "Random add failed: ${e.message ?: e.javaClass.simpleName}"
+                WepWawetLogger.appWarn("PlaylistEditor: random add failed",
+                    "exception" to e.javaClass.name,
+                    "message" to (e.message ?: ""))
+            } finally {
+                addingRandom = false
+            }
+        }
     }
 
     Scaffold(
@@ -222,11 +286,39 @@ fun PlaylistEditorScreen(
                 ) {
                     Text("Wallpapers (${current.entries.size})",
                         style = MaterialTheme.typography.titleMedium)
-                    TextButton(onClick = { showAddPicker = true }) {
-                        Icon(Icons.Filled.Add, contentDescription = null)
-                        Spacer(Modifier.width(4.dp))
-                        Text("Add")
+                    Row {
+                        TextButton(
+                            onClick = { addRandomFromDiscover() },
+                            enabled = !addingRandom,
+                        ) {
+                            if (addingRandom) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                            } else {
+                                Icon(Icons.Filled.Casino, contentDescription = null)
+                            }
+                            Spacer(Modifier.width(4.dp))
+                            Text(if (addingRandom) "Finding…" else "Random")
+                        }
+                        TextButton(onClick = { showAddPicker = true }) {
+                            Icon(Icons.Filled.Add, contentDescription = null)
+                            Spacer(Modifier.width(4.dp))
+                            Text("Add")
+                        }
                     }
+                }
+            }
+            item {
+                // v0.8.18: outcome of the random pull (and a hint that it
+                // follows Discover's tags/sources).
+                randomNote?.let {
+                    Text(
+                        "$it — pulled with your Discover tags and sources.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
 

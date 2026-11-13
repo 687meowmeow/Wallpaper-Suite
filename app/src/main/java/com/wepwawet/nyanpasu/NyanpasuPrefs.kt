@@ -26,6 +26,9 @@ object NyanpasuPrefs {
     private const val KEY_R18 = "r18_mode"
     private const val KEY_SCHEDULE = "schedule_mode"
     private const val KEY_RECENT_URLS = "recent_urls"
+    // v0.8.18: which booru sources Discover searches ("add the ability to
+    // choose the booru sources for the discover page").
+    private const val KEY_SOURCES = "booru_sources"
 
     // ── v1.0.0 tri-state screens ─────────────────────────────────────
     private const val KEY_HOME_STATE = "home_state"
@@ -84,6 +87,57 @@ object NyanpasuPrefs {
 
     fun writeR18(context: Context, mode: Int) {
         prefs(context).edit().putInt(KEY_R18, mode).apply()
+    }
+
+    // ── v0.8.18: booru sources ────────────────────────────────────────
+    // Every source NyanpasuSearch can query. Defaults: everything except
+    // Gelbooru (its anonymous JSON API now answers 401 — it requires an
+    // API key) and Behoimi (connection-dead). Both stay selectable.
+
+    const val SOURCE_LOLICON = "lolicon"
+    const val SOURCE_DANBOORU = "danbooru"
+    const val SOURCE_KONACHAN = "konachan"
+    const val SOURCE_YANDE = "yande"
+    const val SOURCE_SAFEBOORU = "safebooru"
+    const val SOURCE_TBIB = "tbib"
+    const val SOURCE_XBOORU = "xbooru"
+    const val SOURCE_GELBOORU = "gelbooru"
+    const val SOURCE_BEHOIMI = "behoimi"
+
+    val ALL_SOURCES = listOf(
+        SOURCE_LOLICON, SOURCE_DANBOORU, SOURCE_KONACHAN, SOURCE_YANDE,
+        SOURCE_SAFEBOORU, SOURCE_TBIB, SOURCE_XBOORU,
+        SOURCE_GELBOORU, SOURCE_BEHOIMI,
+    )
+
+    private val DEFAULT_SOURCES = setOf(
+        SOURCE_LOLICON, SOURCE_DANBOORU, SOURCE_KONACHAN, SOURCE_YANDE,
+        SOURCE_SAFEBOORU, SOURCE_TBIB, SOURCE_XBOORU,
+    )
+
+    fun readSources(context: Context): Set<String> {
+        val saved = prefs(context).getStringSet(KEY_SOURCES, null) ?: return DEFAULT_SOURCES
+        // Empty set = everything (kept honest for anyone who ticked every
+        // box; an explicitly saved empty selection is treated as "all").
+        return saved.ifEmpty { ALL_SOURCES.toSet() }
+    }
+
+    fun writeSources(context: Context, sources: Set<String>) {
+        prefs(context).edit().putStringSet(KEY_SOURCES, sources).apply()
+    }
+
+    /** UI labels for the source chips. */
+    fun sourceLabel(id: String): String = when (id) {
+        SOURCE_LOLICON -> "Lolicon"
+        SOURCE_DANBOORU -> "Danbooru"
+        SOURCE_KONACHAN -> "Konachan"
+        SOURCE_YANDE -> "Yande.re"
+        SOURCE_SAFEBOORU -> "Safebooru"
+        SOURCE_TBIB -> "TBIB"
+        SOURCE_XBOORU -> "Xbooru"
+        SOURCE_GELBOORU -> "Gelbooru"
+        SOURCE_BEHOIMI -> "Behoimi"
+        else -> id
     }
 
     // ── Tri-state screens (v1.0.0 WallpaperTargetMode) ───────────────
@@ -173,7 +227,40 @@ object NyanpasuPrefs {
     fun queueFile(context: Context, slot: Int) =
         java.io.File(context.cacheDir, "nyanpasu_queue_$slot.img")
 
-    /** How many downloaded images are sitting in the queue right now. */
+    /**
+     * v0.8.18: the search parameters a queued image was fetched under
+     * (tags + style + content tier + sources). THE TAGS BUG: the queue used
+     * to be parameter-blind — changing tags and tapping Refresh still popped
+     * an image preloaded under the OLD (or empty) tags, so tags appeared to
+     * do nothing. Slots are now stamped; only slots whose signature matches
+     * the CURRENT search are eligible.
+     */
+    fun searchSignature(
+        strictTags: Collection<String>,
+        softTags: Collection<String>,
+        styleValue: Int,
+        r18Mode: Int,
+        sources: Set<String>,
+    ): String =
+        (strictTags.filter { it.isNotBlank() }.sorted() + "|" +
+            softTags.filter { it.isNotBlank() }.sorted() + "|" +
+            styleValue + "|" + r18Mode + "|" + sources.sorted())
+            .toString()
+
+    /** How many downloaded images with THIS signature sit in the queue. */
+    fun queueDepth(context: Context, signature: String): Int {
+        val p = prefs(context)
+        var n = 0
+        for (s in 0 until QUEUE_SIZE) {
+            if (p.getString("nyanpasu_q_sig_$s", "") == signature &&
+                !p.getString("nyanpasu_q_url_$s", "").isNullOrBlank() &&
+                queueFile(context, s).isFile
+            ) n++
+        }
+        return n
+    }
+
+    /** Back-compat overload for logs. */
     fun queueDepth(context: Context): Int {
         val p = prefs(context)
         var n = 0
@@ -186,28 +273,38 @@ object NyanpasuPrefs {
     }
 
     /**
-     * Pop the OLDEST queued image (slot order). Returns (bytes, url) or
-     * null when the queue is empty. Stale slots (meta without a file) are
-     * dropped on sight.
+     * Pop the OLDEST queued image fetched under `signature`. Stale slots
+     * (different signature, or meta without a file) are dropped on sight.
      */
-    fun consumeQueuedImage(context: Context): Pair<ByteArray, String>? {
+    fun consumeQueuedImage(context: Context, signature: String): Pair<ByteArray, String>? {
         val p = prefs(context)
         for (s in 0 until QUEUE_SIZE) {
             val url = p.getString("nyanpasu_q_url_$s", null)
             val at = p.getLong("nyanpasu_q_at_$s", 0L)
+            val sig = p.getString("nyanpasu_q_sig_$s", null)
             if (url.isNullOrBlank() || at <= 0L) continue
+            if (sig != signature) {
+                // Fetched under different search parameters — stale, drop.
+                queueFile(context, s).delete()
+                p.edit().remove("nyanpasu_q_url_$s").remove("nyanpasu_q_at_$s")
+                    .remove("nyanpasu_q_sig_$s").apply()
+                continue
+            }
             val f = queueFile(context, s)
             if (!f.isFile) {
-                p.edit().remove("nyanpasu_q_url_$s").remove("nyanpasu_q_at_$s").apply()
+                p.edit().remove("nyanpasu_q_url_$s").remove("nyanpasu_q_at_$s")
+                    .remove("nyanpasu_q_sig_$s").apply()
                 continue
             }
             return try {
                 val bytes = f.readBytes()
-                p.edit().remove("nyanpasu_q_url_$s").remove("nyanpasu_q_at_$s").apply()
+                p.edit().remove("nyanpasu_q_url_$s").remove("nyanpasu_q_at_$s")
+                    .remove("nyanpasu_q_sig_$s").apply()
                 f.delete()
                 bytes to url
             } catch (e: Exception) {
-                p.edit().remove("nyanpasu_q_url_$s").remove("nyanpasu_q_at_$s").apply()
+                p.edit().remove("nyanpasu_q_url_$s").remove("nyanpasu_q_at_$s")
+                    .remove("nyanpasu_q_sig_$s").apply()
                 f.delete()
                 null
             }
@@ -216,7 +313,7 @@ object NyanpasuPrefs {
     }
 
     /** Add a downloaded image to the first free slot (oldest slot when full). */
-    fun appendQueuedImage(context: Context, url: String, bytes: ByteArray) {
+    fun appendQueuedImage(context: Context, url: String, bytes: ByteArray, signature: String) {
         if (bytes.size <= 1024) return
         val p = prefs(context)
         var slot = -1
@@ -238,10 +335,12 @@ object NyanpasuPrefs {
             p.edit()
                 .putString("nyanpasu_q_url_$slot", url)
                 .putLong("nyanpasu_q_at_$slot", System.currentTimeMillis())
+                .putString("nyanpasu_q_sig_$slot", signature)
                 .apply()
         } catch (e: Exception) {
             queueFile(context, slot).delete()
-            p.edit().remove("nyanpasu_q_url_$slot").remove("nyanpasu_q_at_$slot").apply()
+            p.edit().remove("nyanpasu_q_url_$slot").remove("nyanpasu_q_at_$slot")
+                .remove("nyanpasu_q_sig_$slot").apply()
         }
     }
 }

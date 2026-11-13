@@ -66,12 +66,30 @@ object NyanpasuApplier {
         zoom: Float = 1f,
         panX: Float = 0f,
         panY: Float = 0f,
+        /** v0.8.18: false = the bitmap is ALREADY user-cropped — keep its
+         *  exact aspect (no center-crop), just scale to screen width. */
+        matchScreenAspect: Boolean = true,
     ): Bitmap {
         val metrics = context.resources.displayMetrics
         val screenWidth = metrics.widthPixels
         val screenHeight = metrics.heightPixels
 
         val bitmap = downscaleIfNeeded(source, maxDecodeDimension(context))
+
+        if (!matchScreenAspect) {
+            // Respect the user's crop: scale to screen width, keep aspect.
+            val scale = screenWidth.toFloat() / bitmap.width.toFloat()
+            val matrix = Matrix()
+            matrix.setScale(scale, scale)
+            val tw = (bitmap.width * scale).toInt().coerceAtLeast(1)
+            val th = (bitmap.height * scale).toInt().coerceAtLeast(1)
+            val target = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(target)
+            val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+            canvas.drawBitmap(bitmap, matrix, paint)
+            return target
+        }
+
         val bitmapRatio = bitmap.width.toFloat() / bitmap.height.toFloat()
         val screenRatio = screenWidth.toFloat() / screenHeight.toFloat()
 
@@ -126,7 +144,13 @@ object NyanpasuApplier {
     // ════════════════════════════════════════════════════════════════
 
     class ApplyResult(val homeOk: Boolean, val lockOk: Boolean) {
-        val ok: Boolean get() = homeOk && lockOk
+        /** v0.8.18: history-worthy when ANY screen write succeeded — the old
+         *  strict AND meant a device whose lock write fails never recorded
+         *  history even though the home wallpaper visibly changed ("the
+         *  history doesnt work"). */
+        val ok: Boolean get() = homeOk || lockOk
+        /** Strict success: every requested screen was written. */
+        val allOk: Boolean get() = homeOk && lockOk
     }
 
     suspend fun apply(

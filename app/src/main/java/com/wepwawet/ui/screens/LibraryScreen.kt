@@ -3,7 +3,6 @@ package com.wepwawet.ui.screens
 import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -216,6 +215,12 @@ fun LibraryScreen(
         mutableStateOf<List<Pair<ImageFolderAssets.SavedFolder, ImageFolderAssets.ImageEntry>>>(emptyList())
     }
     var removeFolderTarget by remember { mutableStateOf<ImageFolderAssets.SavedFolder?>(null) }
+    // v0.8.18: the "+" / "＋ Folder" menu ("make the create folder button
+    // come up with menu asking if you want to use an already existing or
+    // make one") and the shared create-folder flow.
+    var showPlusMenu by remember { mutableStateOf(false) }
+    var plusMenuForImport by remember { mutableStateOf(false) }
+    var showCreateFolder by remember { mutableStateOf(false) }
     // The folder image whose fullscreen preview dialog is open.
     var selectedImage by remember {
         mutableStateOf<Pair<ImageFolderAssets.SavedFolder, ImageFolderAssets.ImageEntry>?>(null)
@@ -284,12 +289,15 @@ fun LibraryScreen(
         }
     }
 
-    // v0.8.13: "+" while a folder chip is active → add images to THAT
-    // folder. The photo picker's URIs are transient-grant, but we copy the
-    // bytes straight into the folder's tree, so that is all we need.
+    // v0.8.18: "+" while a folder chip is active → add images to THAT
+    // folder, picked through the system GET_CONTENT chooser ("that one
+    // android menu that asks if you want to use files or gallery"). The
+    // returned URIs are transient-grant, but we copy the bytes straight
+    // into the folder's tree, so that is all we need.
     val folderImagePicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.PickMultipleVisualMedia()
-    ) { uris ->
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val uris = urisFromGetContentResult(result.resultCode, result.data)
         if (uris.isNotEmpty()) {
             val target = activeFolder
             if (target != null) {
@@ -496,10 +504,14 @@ fun LibraryScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // v0.8.18: the general import now goes through the system GET_CONTENT
+    // chooser too — the Files/Gallery disambiguation menu the user asked
+    // for when importing.
     val importLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenMultipleDocuments()
-    ) { uris ->
-        if (uris.isNullOrEmpty()) return@rememberLauncherForActivityResult
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val uris = urisFromGetContentResult(result.resultCode, result.data)
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
         scope.launch {
             var firstImported: WallpaperInfoSparse? = null
             var failure: String? = null
@@ -667,35 +679,29 @@ fun LibraryScreen(
                     title = "Wallpapers",
                     onBack = null,
                     actions = {
-                        // v0.8.13: the "+" is context-sensitive — while a
+                        // v0.8.18: the "+" is context-sensitive — while a
                         // folder chip is active it ADDS IMAGES TO THAT
-                        // FOLDER (photo picker → copy into the tree);
-                        // otherwise it imports wallpapers into the library
-                        // (mpkg / video / image) as before.
+                        // FOLDER (GET_CONTENT chooser → copy into the
+                        // tree); otherwise importing an image asks you to
+                        // CHOOSE OR MAKE A FOLDER first (mpkg/video imports
+                        // stay reachable via "Import other files…").
                         SlimTopBarIcon(
                             onClick = {
                                 val folder = activeFolder
                                 if (folder != null) {
                                     try {
                                         folderImagePicker.launch(
-                                            PickVisualMediaRequest(
-                                                ActivityResultContracts
-                                                    .PickVisualMedia.ImageOnly))
+                                            getContentChooserIntent(
+                                                mimeTypes = arrayOf("image/*"),
+                                                allowMultiple = true))
                                     } catch (t: Throwable) {
                                         WepWawetLogger.appWarn(
                                             "LibraryScreen: image picker failed",
                                             "exception" to t.javaClass.name)
                                     }
                                 } else {
-                                    try {
-                                        importLauncher.launch(
-                                            arrayOf(
-                                                "video/*", "image/jpg", "image/jpeg", "image/png",
-                                                "image/webp", "image/gif", "application/*",
-                                            )
-                                        )
-                                    } catch (t: Throwable) {
-                                    }
+                                    plusMenuForImport = true
+                                    showPlusMenu = true
                                 }
                             },
                             contentDescription = if (activeFolder != null)
@@ -911,12 +917,10 @@ fun LibraryScreen(
                 FilterChip(
                     selected = false,
                     onClick = {
-                        try {
-                            folderPicker.launch(null)
-                        } catch (t: Throwable) {
-                            WepWawetLogger.appWarn("LibraryScreen: folder picker failed",
-                                "exception" to t.javaClass.name)
-                        }
+                        // v0.8.18: the menu first ("use an already existing
+                        // or make one"), not the raw tree picker.
+                        plusMenuForImport = false
+                        showPlusMenu = true
                     },
                     label = { Text("＋ Folder") },
                     leadingIcon = {
@@ -1488,43 +1492,82 @@ fun LibraryScreen(
 
     // ===== Remove-folder dialog (long-press a folder chip) =====
     removeFolderTarget?.let { folder ->
-        // v0.8.17: the built-in Suite folder is not removable — it is where
-        // "Save to suite" images live.
-        if (ImageFolderAssets.isSuiteFolder(folder.treeUri)) {
-            AlertDialog(
-                onDismissRequest = { removeFolderTarget = null },
-                title = { Text("Suite images") },
-                text = {
-                    Text("This built-in folder holds images you save to the suite. " +
-                        "It can't be removed — delete individual images by holding them.")
-                },
-                confirmButton = {
-                    TextButton(onClick = { removeFolderTarget = null }) { Text("OK") }
-                },
-            )
-        } else {
-            AlertDialog(
-                onDismissRequest = { removeFolderTarget = null },
-                title = { Text("Remove folder?") },
-                text = {
-                    Text("\"${folder.name}\" disappears from this page. Its files stay on " +
-                        "your device; wallpapers already set from it keep working.")
-                },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            ImageFolderAssets.removeFolder(context, folder.treeUri)
-                            if (activeFolder == folder.treeUri) activeFolder = null
-                            removeFolderTarget = null
-                            reload()
-                        },
-                    ) { Text("Remove") }
-                },
-                dismissButton = {
-                    TextButton(onClick = { removeFolderTarget = null }) { Text("Cancel") }
-                },
-            )
-        }
+        AlertDialog(
+            onDismissRequest = { removeFolderTarget = null },
+            title = { Text("Remove folder?") },
+            text = {
+                Text("\"${folder.name}\" disappears from this page. Its files stay on " +
+                    "your device; wallpapers already set from it keep working.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        ImageFolderAssets.removeFolder(context, folder.treeUri)
+                        if (activeFolder == folder.treeUri) activeFolder = null
+                        removeFolderTarget = null
+                        reload()
+                    },
+                ) { Text("Remove") }
+            },
+            dismissButton = {
+                TextButton(onClick = { removeFolderTarget = null }) { Text("Cancel") }
+            },
+        )
+    }
+
+    // v0.8.18: the "+" / "＋ Folder" MENU — choose an existing folder,
+    // create a new one (with the hidden-from-gallery option), and for the
+    // top-bar "+" also the general file import.
+    if (showPlusMenu) {
+        FolderAddMenuDialog(
+            onDismiss = { showPlusMenu = false },
+            onChooseExisting = {
+                showPlusMenu = false
+                try {
+                    folderPicker.launch(null)
+                } catch (t: Throwable) {
+                    WepWawetLogger.appWarn("LibraryScreen: folder picker failed",
+                        "exception" to t.javaClass.name)
+                }
+            },
+            onCreateNew = {
+                showPlusMenu = false
+                showCreateFolder = true
+            },
+            onImportOther = if (plusMenuForImport) {
+                {
+                    showPlusMenu = false
+                    try {
+                        importLauncher.launch(
+                            getContentChooserIntent(
+                                mimeTypes = arrayOf(
+                                    "video/*", "image/jpg", "image/jpeg", "image/png",
+                                    "image/webp", "image/gif", "application/*",
+                                ),
+                                allowMultiple = true))
+                    } catch (t: Throwable) {
+                        WepWawetLogger.appWarn("LibraryScreen: import picker failed",
+                            "exception" to t.javaClass.name)
+                    }
+                }
+            } else null,
+        )
+    }
+
+    // v0.8.18: the shared create-folder flow (parent picker → name +
+    // hidden-from-gallery → subfolder registered as a library folder).
+    if (showCreateFolder) {
+        CreateFolderFlow(
+            visible = true,
+            onDismiss = { showCreateFolder = false },
+            onCreated = { dirUri ->
+                showCreateFolder = false
+                activeFolder = dirUri
+                WepWawetLogger.appInfo("LibraryScreen: folder created",
+                    "uri" to dirUri.takeLast(48))
+                reload()
+            },
+        )
     }
 
     // ===== Folder image fullscreen preview + set =====

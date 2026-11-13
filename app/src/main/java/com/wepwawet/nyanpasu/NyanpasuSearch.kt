@@ -62,7 +62,12 @@ object NyanpasuSearch {
     /**
      * Search for ONE image URL that is not in `recentUrls`.
      * Throws [NoImageException] when the whole ladder fails (rare — the
-     * untaged fallback tier exists exactly so this doesn't happen).
+     * untaged fallback tier exists exactly so this doesn't happen) or when
+     * no booru source is selected.
+     *
+     * v0.8.18: `sources` ("add the ability to choose the booru sources for
+     * the discover page") — the ids from [NyanpasuPrefs.ALL_SOURCES]; only
+     * the selected ones are queried at every tier.
      */
     suspend fun searchOne(
         context: Context,
@@ -71,7 +76,11 @@ object NyanpasuSearch {
         styleValue: Int,
         r18Mode: Int,
         recentUrls: Set<String>,
+        sources: Set<String> = NyanpasuPrefs.ALL_SOURCES.toSet(),
     ): String = withContext(Dispatchers.IO) {
+        if (sources.isEmpty()) {
+            throw NoImageException("No booru source selected")
+        }
         val startedAt = System.currentTimeMillis()
         val deadline = startedAt + TOTAL_BUDGET_MS
         val recent = recentUrls.toMutableSet()
@@ -88,7 +97,7 @@ object NyanpasuSearch {
         // Up to 8 draws, preferring non-recent results (soft dedup).
         while (System.currentTimeMillis() < deadline) {
             attempts++
-            val url = tryLadder(effStrict, effSoft, styleValue, r18Mode, tried, deadline)
+            val url = tryLadder(effStrict, effSoft, styleValue, r18Mode, sources, tried, deadline)
             if (url.isNullOrEmpty()) break
             tried.add(url)
             if (url !in recent) {
@@ -115,43 +124,56 @@ object NyanpasuSearch {
         soft: List<String>,
         styleValue: Int,
         r18Mode: Int,
+        sources: Set<String>,
         tried: Set<String>,
         deadline: Long,
     ): String? {
         // ── Tier 1: Lolicon with tags (the flagship source) ──
-        lolicon(strict, soft, styleValue, r18Mode, attachSoft = true, tried)?.let { return it }
+        if (NyanpasuPrefs.SOURCE_LOLICON in sources) {
+            lolicon(strict, soft, styleValue, r18Mode, attachSoft = true, tried)?.let { return it }
+        }
 
         // ── Tier 1b: Danbooru with tags ──
-        if (System.currentTimeMillis() < deadline) {
+        if (NyanpasuPrefs.SOURCE_DANBOORU in sources &&
+            System.currentTimeMillis() < deadline
+        ) {
             danbooru(strict, soft, r18Mode, tried)?.let { return it }
         }
 
         // ── Tier 2: booru pool with tags ──
         if (System.currentTimeMillis() < deadline) {
-            booruPool(strict, r18Mode, tried)?.let { return it }
+            booruPool(strict, r18Mode, sources, tried)?.let { return it }
         }
 
         // ── R18 escalations (v1.0.0 tierEscalations) ──
         for (escalated in r18Escalations(r18Mode)) {
             if (System.currentTimeMillis() >= deadline) break
-            lolicon(strict, soft, styleValue, escalated, attachSoft = false, tried)?.let { return it }
-            booruPool(strict, escalated, tried)?.let { return it }
+            if (NyanpasuPrefs.SOURCE_LOLICON in sources) {
+                lolicon(strict, soft, styleValue, escalated, attachSoft = false, tried)?.let { return it }
+            }
+            booruPool(strict, escalated, sources, tried)?.let { return it }
         }
 
         // ── Tier 3: slider-only (style band alone) ──
         if (System.currentTimeMillis() < deadline) {
             sliderTagGroup(styleValue)?.let { band ->
-                lolicon(listOf(band), emptyList(), styleValue, r18Mode, attachSoft = false, tried)?.let { return it }
-                booruPool(listOf(band), r18Mode, tried)?.let { return it }
+                if (NyanpasuPrefs.SOURCE_LOLICON in sources) {
+                    lolicon(listOf(band), emptyList(), styleValue, r18Mode, attachSoft = false, tried)?.let { return it }
+                }
+                booruPool(listOf(band), r18Mode, sources, tried)?.let { return it }
             }
         }
 
         // ── Tier 4: untagged fallback — ALWAYS something when the network is up ──
         // (v1.0.0's contract: this tier exists exactly so a no-match never
         // strands the user; only a truly dead network reaches the exception.)
-        lolicon(emptyList(), emptyList(), styleValue, r18Mode, attachSoft = false, tried)?.let { return it }
-        danbooru(emptyList(), emptyList(), r18Mode, tried)?.let { return it }
-        booruPool(emptyList(), r18Mode, tried)?.let { return it }
+        if (NyanpasuPrefs.SOURCE_LOLICON in sources) {
+            lolicon(emptyList(), emptyList(), styleValue, r18Mode, attachSoft = false, tried)?.let { return it }
+        }
+        if (NyanpasuPrefs.SOURCE_DANBOORU in sources) {
+            danbooru(emptyList(), emptyList(), r18Mode, tried)?.let { return it }
+        }
+        booruPool(emptyList(), r18Mode, sources, tried)?.let { return it }
         return null
     }
 
@@ -226,26 +248,41 @@ object NyanpasuSearch {
 
     /**
      * The booru pool (v1.0.0 BooruPoolClient) — shuffled, rating-filtered
-     * per site family. Each site tries once; the first hit wins.
+     * per site family. Each site tries once; the first hit wins. v0.8.18:
+     * only sites whose source id is in `sources` are tried.
      */
-    private fun booruPool(tags: List<String>, r18Mode: Int, tried: Set<String>): String? {
-        data class MoeSite(val endpoint: String, val explicitAllowed: Boolean, val api: String)
+    private fun booruPool(
+        tags: List<String>,
+        r18Mode: Int,
+        sources: Set<String>,
+        tried: Set<String>,
+    ): String? {
+        data class MoeSite(
+            val sourceId: String,
+            val endpoint: String,
+            val explicitAllowed: Boolean,
+            val api: String,
+        )
 
         val moe = listOf(
-            MoeSite("https://konachan.net/post.json", false, "moe"),
-            MoeSite("https://behoimi.org/post.json", false, "moe"),
-            MoeSite("https://yande.re/post.json", true, "moe"),
-            MoeSite("https://konachan.com/post.json", true, "moe"),
+            MoeSite(NyanpasuPrefs.SOURCE_KONACHAN, "https://konachan.net/post.json", false, "moe"),
+            MoeSite(NyanpasuPrefs.SOURCE_BEHOIMI, "https://behoimi.org/post.json", false, "moe"),
+            MoeSite(NyanpasuPrefs.SOURCE_YANDE, "https://yande.re/post.json", true, "moe"),
+            MoeSite("konachan_com", "https://konachan.com/post.json", true, "moe"),
         )
         val dapi = listOf(
-            "https://safebooru.org/index.php?page=dapi&s=post&q=index&json=1",
-            "https://tbib.org/index.php?page=dapi&s=post&q=index&json=1",
-            "https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1",
-            "https://xbooru.com/index.php?page=dapi&s=post&q=index&json=1",
+            NyanpasuPrefs.SOURCE_SAFEBOORU to
+                "https://safebooru.org/index.php?page=dapi&s=post&q=index&json=1",
+            NyanpasuPrefs.SOURCE_TBIB to
+                "https://tbib.org/index.php?page=dapi&s=post&q=index&json=1",
+            NyanpasuPrefs.SOURCE_GELBOORU to
+                "https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1",
+            NyanpasuPrefs.SOURCE_XBOORU to
+                "https://xbooru.com/index.php?page=dapi&s=post&q=index&json=1",
         )
 
         // Moe-style sites first (shuffled like v1.0.0's pool).
-        for (site in moe.shuffled()) {
+        for (site in moe.filter { it.sourceId in sources }.shuffled()) {
             if (r18Mode == NyanpasuPrefs.R18_PURE && site.explicitAllowed) continue
             val expanded = expandTags(tags).map { moeTag(it) }
             val url = buildString {
@@ -263,7 +300,7 @@ object NyanpasuSearch {
             }
         }
         // dapi-style (safebooru/tbib/gelbooru/xbooru).
-        for (base in dapi.shuffled()) {
+        for ((sourceId, base) in dapi.filter { it.first in sources }.shuffled()) {
             val explicitSite = "gelbooru.com" in base || "xbooru.com" in base || "konachan.com" in base
             if (r18Mode == NyanpasuPrefs.R18_PURE && explicitSite) continue
             val expanded = expandTags(tags)
