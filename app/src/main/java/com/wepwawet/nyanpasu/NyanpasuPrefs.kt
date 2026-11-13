@@ -1,6 +1,8 @@
 package com.wepwawet.nyanpasu
 
 import android.content.Context
+import android.content.SharedPreferences
+import com.wepwawet.log.WepWawetLogger
 
 /**
  * Discover (the booru auto-wallpaper screen) — settings persistence.
@@ -18,7 +20,12 @@ import android.content.Context
  *   • Schedule    — off / daily 7:00 / every 6 / 12 / 24 h
  */
 object NyanpasuPrefs {
-    private const val PREFS = "wallpapersuite_nyanpasu"
+    // v0.8.19 (rename): the prefs file is "wallpapersuite_discover" now
+    // ("rename the nyanpasu file in the app"). The legacy
+    // "wallpapersuite_nyanpasu" prefs migrate wholesale on first read —
+    // every key moves in one copy (see prefs()).
+    private const val PREFS = "wallpapersuite_discover"
+    private const val LEGACY_PREFS = "wallpapersuite_nyanpasu"
 
     private const val KEY_STRICT_TAGS = "strict_tags"
     private const val KEY_SOFT_TAGS = "soft_tags"
@@ -62,8 +69,31 @@ object NyanpasuPrefs {
     const val SCHEDULE_H12 = "h12"
     const val SCHEDULE_H24 = "h24"
 
-    private fun prefs(context: Context) =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private fun prefs(context: Context): SharedPreferences {
+        val fresh = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (fresh.getBoolean("migrated_from_legacy", false) || fresh.all.isNotEmpty()) {
+            return fresh
+        }
+        // v0.8.19: one-time wholesale migration from the legacy prefs file.
+        val legacy = context.getSharedPreferences(LEGACY_PREFS, Context.MODE_PRIVATE)
+        if (legacy.all.isEmpty()) return fresh
+        val edit = fresh.edit()
+        for ((key, value) in legacy.all) {
+            when (value) {
+                is String -> edit.putString(key, value)
+                is Int -> edit.putInt(key, value)
+                is Long -> edit.putLong(key, value)
+                is Float -> edit.putFloat(key, value)
+                is Boolean -> edit.putBoolean(key, value)
+                is Set<*> -> @Suppress("UNCHECKED_CAST") edit.putStringSet(
+                    key, value as Set<String>)
+            }
+        }
+        edit.putBoolean("migrated_from_legacy", true).apply()
+        WepWawetLogger.appInfo("NyanpasuPrefs: migrated legacy prefs",
+            "keys" to legacy.all.size)
+        return fresh
+    }
 
     fun readStrictTags(context: Context): List<String> =
         prefs(context).getStringSet(KEY_STRICT_TAGS, emptySet())?.sorted() ?: emptyList()
@@ -258,14 +288,30 @@ object NyanpasuPrefs {
     // "refresh takes too long on the downloading stage. it should have
     // them preloaded to ensure it can change it instantly." — Refresh now
     // pops an ALREADY-DOWNLOADED image (instant swap) and a background
-    // refill keeps three images ready at all times. The old single-slot
+    // refill keeps the queue ready at all times. The old single-slot
     // prefetch only restocked after a Set, so consecutive Refreshes each
     // hit the network.
+    //
+    // v0.8.19: QUEUE_SIZE 3 → 8 ("increase the number of images
+    // preloaded") and the queue is kicked ON APP START (see
+    // WepWawetApplication.onCreate — "have them preload on app start"),
+    // so the first Discover visit of a session already has a full queue.
 
-    private const val QUEUE_SIZE = 3
+    private const val QUEUE_SIZE = 8
 
-    fun queueFile(context: Context, slot: Int) =
-        java.io.File(context.cacheDir, "nyanpasu_queue_$slot.img")
+    /** How many images the refill loop keeps ready (the queue size). */
+    const val QUEUE_TARGET = 8
+
+    // v0.8.19 (rename): queue files are "discover_queue_N.img" now; a
+    // legacy "nyanpasu_queue_N.img" is picked up on sight (same slot).
+    fun queueFile(context: Context, slot: Int): java.io.File {
+        val fresh = java.io.File(context.cacheDir, "discover_queue_$slot.img")
+        if (!fresh.isFile) {
+            val legacy = java.io.File(context.cacheDir, "nyanpasu_queue_$slot.img")
+            if (legacy.isFile) legacy.renameTo(fresh)
+        }
+        return fresh
+    }
 
     /**
      * v0.8.18: the search parameters a queued image was fetched under

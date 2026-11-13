@@ -83,6 +83,35 @@ jobs:
           echo "apk_path=$APK" >> $GITHUB_OUTPUT
           ls -lh "$APK"
 
+      # v0.8.19 (storage): the APK is attached to a release on EVERY
+      # successful build — "the apk from the action must be added to
+      # release because im out of github storage. so always do that."
+      # Tags keep their own per-version release (draft, as before). Every
+      # OTHER build (branch pushes + manual runs) uploads to a ROLLING
+      # "latest build" release (tag: latest-build) — release assets do
+      # NOT count against the Actions artifact-storage quota, and the
+      # action's overwrite_files replaces the APK each run, so nothing
+      # accumulates. No upload-artifact step exists anymore.
+      - name: Attach APK to latest-build release (non-tag builds)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: softprops/action-gh-release@v3.0.4
+        with:
+          tag_name: latest-build
+          name: Latest build (dev)
+          files: ${{ steps.find-apk.outputs.apk_path }}
+          draft: true
+          prerelease: true
+          body: >-
+            The newest APK from the latest successful CI build on the dev
+            branch. Replaced on every push — grab the APK here, not from
+            the Actions artifacts (the repo keeps no build artifacts).
+          # v0.8.4: no auto-generated release notes — the repo history is
+          # squashed clean; the release is just the APK.
+          generate_release_notes: false
+          overwrite_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       # v0.8.1: the release is created DIRECTLY from this job — the old
       # artifact handoff (upload-artifact -> download-artifact in a release
       # job) blew the free Actions artifact-storage quota (150 MB APKs,

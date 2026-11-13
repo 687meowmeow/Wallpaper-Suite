@@ -8,6 +8,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -188,6 +189,12 @@ fun LibraryScreen(
     var groupTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
     // Rename/delete dialog for a group (long-press a group chip).
     var manageGroupName by remember { mutableStateOf<String?>(null) }
+    // v0.8.19: hold-drag group chip REORDERING ("hold to drag them to move
+    // their position at the top"). A long-press on a group chip arms the
+    // drag for THAT chip; dragging then slides it across the row (the
+    // pointer's x position picks the slot); release persists the order.
+    var dragGroupName by remember { mutableStateOf<String?>(null) }
+    var dragGroupIndex by remember { mutableStateOf(-1) }
 
     // ===== WORKSHOP TAGS (v0.8.12 "sort by tag"; v0.8.13 sheet) =====
     var workshopTags by remember { mutableStateOf<Map<String, List<String>>>(emptyMap()) }
@@ -908,11 +915,15 @@ fun LibraryScreen(
                         )
                     },
                 )
-                for (group in groups) {
+                for ((groupIndex, group) in groups.withIndex()) {
                     val count = groupOf.count { it.value == group }
                     FilterChip(
                         selected = activeGroup == group,
                         onClick = {
+                            // v0.8.19: after a hold-drag the tap that ends
+                            // the drag must NOT toggle the filter — the
+                            // drag flag swallows this one click.
+                            if (dragGroupName != null) { dragGroupName = null; return@FilterChip }
                             activeFolder = null
                             activeTags = emptySet()
                             animatedActive = false
@@ -921,9 +932,57 @@ fun LibraryScreen(
                         // Long-press → rename/delete dialog. detectTapGestures
                         // with only onLongPress doesn't consume taps, so the
                         // chip's own onClick keeps handling those.
-                        modifier = Modifier.pointerInput(group) {
-                            detectTapGestures(onLongPress = { manageGroupName = group })
-                        },
+                        // v0.8.19: the long-press ALSO arms the drag —
+                        // "hold to drag them to move their position at the
+                        // top": keep holding and slide sideways to reorder.
+                        modifier = Modifier
+                            .pointerInput(group, groupIndex, groups.size) {
+                                detectDragGesturesAfterLongPress(
+                                    onDragStart = {
+                                        dragGroupName = group
+                                        dragGroupIndex = groupIndex
+                                    },
+                                    onDrag = { change, _ ->
+                                        change.consume()
+                                        // Which slot is the finger over?
+                                        // The chips row spans the visible
+                                        // width; slot = x / (width / count).
+                                        val w = size.width.toFloat()
+                                        if (w > 0f && groups.isNotEmpty()) {
+                                            val slot = (change.position.x / w * groups.size)
+                                                .toInt().coerceIn(0, groups.size - 1)
+                                            if (slot != dragGroupIndex) {
+                                                // Reorder live: remove + insert
+                                                // so the row shifts as you go.
+                                                val moved = groups.toMutableList()
+                                                val from = moved.indexOf(group)
+                                                if (from >= 0) {
+                                                    moved.removeAt(from)
+                                                    moved.add(slot, group)
+                                                    groups = moved
+                                                    dragGroupIndex = slot
+                                                }
+                                            }
+                                        }
+                                    },
+                                    onDragEnd = {
+                                        // Persist the full new order.
+                                        dragGroupName = null
+                                        dragGroupIndex = -1
+                                        LibraryPrefs.writeGroupsOrderPublic(context, groups)
+                                        WepWawetLogger.engineDebug(
+                                            "LibraryScreen: group order saved",
+                                            "groups" to groups.size)
+                                    },
+                                    onDragCancel = {
+                                        dragGroupName = null
+                                        dragGroupIndex = -1
+                                    },
+                                )
+                            }
+                            .pointerInput(group) {
+                                detectTapGestures(onLongPress = { manageGroupName = group })
+                            },
                         label = { Text("$group ($count)") },
                         leadingIcon = {
                             Icon(
@@ -2026,7 +2085,12 @@ internal object LibraryPrefs {
     // A group is just a name; each wallpaper maps to at most one group
     // (filePath → groupName). Stored with one prefs key per wallpaper —
     // simple, and removing a deleted wallpaper is a one-line remove().
+    // v0.8.19: the group ORDER is user-controlled ("hold to drag them to
+    // move their position at the top") — an ordered JSON array under
+    // KEY_GROUPS_ORDER; the legacy StringSet is migrated on first read
+    // (alphabetical, the old display order, so nothing jumps).
     private const val KEY_GROUPS = "wallpaper_groups"
+    private const val KEY_GROUPS_ORDER = "wallpaper_groups_order"
     private const val KEY_GROUP_OF_PREFIX = "wallpaper_group_of:"
     private const val KEY_TILE_SIZE = "library_tile_size"
 
@@ -2049,11 +2113,66 @@ internal object LibraryPrefs {
         prefs.edit().putStringSet(KEY_PINNED, current).apply()
     }
 
-    fun readGroups(context: android.content.Context): List<String> =
-        (context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
-            .getStringSet(KEY_GROUPS, emptySet()) ?: emptySet())
+    /**
+     * The group list in the USER'S chosen order (v0.8.19: hold-drag
+     * reordering). One-time migration from the legacy StringSet in the old
+     * alphabetical display order; groups created afterwards append.
+     */
+    fun readGroups(context: android.content.Context): List<String> {
+        val prefs = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+        val ordered = prefs.getString(KEY_GROUPS_ORDER, null)
+        if (ordered != null) {
+            return try {
+                org.json.JSONArray(ordered).let { arr ->
+                    List(arr.length()) { i -> arr.optString(i) }
+                        .filter { it.isNotBlank() }
+                }
+            } catch (t: Throwable) {
+                emptyList()
+            }
+        }
+        // One-time migration: the old StringSet, alphabetical (the old
+        // display order) — then the ordered form takes over.
+        val legacy = (prefs.getStringSet(KEY_GROUPS, emptySet()) ?: emptySet())
             .filter { it.isNotBlank() }
             .sorted()
+        writeGroupsOrder(context, legacy)
+        return legacy
+    }
+
+    private fun writeGroupsOrder(context: android.content.Context, groups: List<String>) {
+        context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_GROUPS_ORDER, org.json.JSONArray(groups).toString())
+            .apply()
+    }
+
+    /**
+     * v0.8.19: persist a COMPLETE new group order (the chip hold-drag
+     * writes the whole row at drop). Public for the drag handler; keeps
+     * the legacy StringSet in sync.
+     */
+    fun writeGroupsOrderPublic(context: android.content.Context, groups: List<String>) {
+        writeGroupsOrder(context, groups)
+        writeGroups(context, groups)
+    }
+
+    /**
+     * v0.8.19: move a group to a new position in the user's order (the
+     * chip hold-drag). `toIndex` is clamped to the list bounds.
+     */
+    fun moveGroupTo(context: android.content.Context, name: String, toIndex: Int) {
+        val groups = readGroups(context).toMutableList()
+        val from = groups.indexOf(name)
+        if (from < 0) return
+        val to = toIndex.coerceIn(0, groups.size - 1)
+        if (to == from) return
+        groups.removeAt(from)
+        groups.add(to, name)
+        writeGroupsOrder(context, groups)
+        // Keep the legacy set in sync for any pre-migration reader.
+        writeGroups(context, groups)
+    }
 
     private fun writeGroups(context: android.content.Context, groups: Collection<String>) {
         context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
@@ -2063,9 +2182,10 @@ internal object LibraryPrefs {
     fun createGroup(context: android.content.Context, name: String): Boolean {
         val trimmed = name.trim().take(30)
         if (trimmed.isEmpty()) return false
-        val groups = readGroups(context).toMutableSet()
+        val groups = readGroups(context).toMutableList()
         if (groups.contains(trimmed)) return false
-        groups.add(trimmed)
+        groups.add(trimmed) // v0.8.19: new groups append (user's order).
+        writeGroupsOrder(context, groups)
         writeGroups(context, groups)
         return true
     }
@@ -2073,12 +2193,17 @@ internal object LibraryPrefs {
     fun renameGroup(context: android.content.Context, oldName: String, newName: String): Boolean {
         val trimmed = newName.trim().take(30)
         if (trimmed.isEmpty() || trimmed == oldName) return false
-        val groups = readGroups(context).toMutableSet()
-        if (groups.contains(trimmed)) return false
-        groups.remove(oldName)
-        groups.add(trimmed)
+        // v0.8.19: rename IN PLACE — the group keeps its position in the
+        // user's order (was a Set round-trip that re-sorted alphabetically).
+        val ordered = readGroups(context).toMutableList()
+        val idx = ordered.indexOf(oldName)
+        if (idx < 0) return false
+        if (ordered.contains(trimmed)) return false
+        ordered[idx] = trimmed
         val prefs = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
-        val edit = prefs.edit().putStringSet(KEY_GROUPS, groups)
+        val edit = prefs.edit()
+            .putString(KEY_GROUPS_ORDER, org.json.JSONArray(ordered).toString())
+            .putStringSet(KEY_GROUPS, ordered.toSet())
         // Re-key every member's assignment.
         for ((key, value) in prefs.all) {
             if (key.startsWith(KEY_GROUP_OF_PREFIX) && value == oldName) {
@@ -2090,10 +2215,14 @@ internal object LibraryPrefs {
     }
 
     fun deleteGroup(context: android.content.Context, name: String) {
-        val groups = readGroups(context).toMutableSet()
-        groups.remove(name)
+        // v0.8.19: delete from the ordered list (position-aware) and the
+        // legacy set, then unassign every member.
+        val ordered = readGroups(context).toMutableList()
+        ordered.remove(name)
         val prefs = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
-        val edit = prefs.edit().putStringSet(KEY_GROUPS, groups)
+        val edit = prefs.edit()
+            .putString(KEY_GROUPS_ORDER, org.json.JSONArray(ordered).toString())
+            .putStringSet(KEY_GROUPS, ordered.toSet())
         for ((key, value) in prefs.all) {
             if (key.startsWith(KEY_GROUP_OF_PREFIX) && value == name) {
                 edit.remove(key)

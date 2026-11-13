@@ -32,6 +32,7 @@ import io.wallpaperengine.weutil.WallpaperSurfaceHack
 import io.wallpaperengine.weviews.SceneWallpaperView
 import io.wallpaperengine.weviews.VideoWallpaperView
 import io.wallpaperengine.weviews.WallpaperControls
+import kotlinx.coroutines.launch
 import io.wallpaperengine.wrapper.SceneLib
 import com.wepwawet.log.WepWawetLogger
 import java.util.Calendar
@@ -389,7 +390,14 @@ class WEWallpaperService : WallpaperService() {
                 suiteOrderRandom =
                     playlist.orderMode == com.wepwawet.playlist.SuitePlaylistStore.ORDER_RANDOM
                 duration = playlist.intervalMinutes * 60000
-                isValid = suiteEntries.isNotEmpty()
+                // v0.8.19 (random-pull rework): the DYNAMIC random slot —
+                // a playlist with randomPullEnabled pulls a FRESH image
+                // through its OWN tag settings every time the rotation
+                // lands on the slot (see suitePickNew). The old model
+                // froze one pulled image into the list forever.
+                suiteRandomSlot = playlist.randomPullEnabled
+                suiteRandomPullInFlight = false
+                isValid = suiteEntries.isNotEmpty() || suiteRandomSlot
                 randomPool.clear()
                 fullSortedList.clear()
                 timePlaylist.clear()
@@ -401,7 +409,78 @@ class WEWallpaperService : WallpaperService() {
                     "entries" to suiteEntries.size,
                     "order" to playlist.orderMode,
                     "interval_min" to playlist.intervalMinutes,
-                    "time_rules" to playlist.timeRules.size)
+                    "time_rules" to playlist.timeRules.size,
+                    "random_slot" to suiteRandomSlot)
+            }
+
+            // ── v0.8.19: the dynamic random slot state ──
+            private var suiteRandomSlot: Boolean = false
+            private var suiteRandomPullInFlight: Boolean = false
+
+            /**
+             * v0.8.19: pick + apply the next wallpaper for the current
+             * step. Returns the picked file path, or "" when the pick is
+             * the RANDOM SLOT and its fresh image is still downloading —
+             * the caller then keeps the current wallpaper (the pull
+             * completes asynchronously and applies itself).
+             */
+            private fun suitePickNewAndMaybePull(): String {
+                val set = suiteSetForNow()
+                val slotEnabled = suiteRandomSlot
+                if (set.isEmpty() && !slotEnabled) return ""
+                val candidates = ArrayList<String>(set.size + 1)
+                candidates.addAll(set)
+                val slotMarker = com.wepwawet.playlist.RandomPullEngine.SLOT_MARKER
+                if (slotEnabled) candidates.add(slotMarker)
+                if (candidates.size == 1) {
+                    return applyCandidate(candidates[0])
+                }
+                val currentIndex = candidates.indexOf(currentFile)
+                val picked = when {
+                    suiteOrderRandom -> {
+                        val pool = candidates.filter { it != currentFile }
+                        if (pool.isEmpty()) candidates[0]
+                        else pool[kotlin.random.Random.nextInt(pool.size)]
+                    }
+                    else -> {
+                        val next = if (currentIndex >= 0) (currentIndex + 1) % candidates.size else 0
+                        candidates[next]
+                    }
+                }
+                return applyCandidate(picked)
+            }
+
+            /** Apply one candidate: a plain entry loads directly; the slot pulls. */
+            private fun applyCandidate(candidate: String): String {
+                if (candidate != com.wepwawet.playlist.RandomPullEngine.SLOT_MARKER) {
+                    return candidate
+                }
+                // The RANDOM SLOT: pull a fresh image NOW (single-flight —
+                // a pull already in flight keeps the current wallpaper).
+                if (suiteRandomPullInFlight) return ""
+                val playlist = suitePlaylist ?: return ""
+                val svc = this@WEWallpaperService
+                suiteRandomPullInFlight = true
+                WepWawetLogger.engine("Service: random slot — pulling a fresh image",
+                    "playlist" to playlist.name)
+                com.wepwawet.WepWawetApplication.appScope.launch {
+                    try {
+                        val path = com.wepwawet.playlist.RandomPullEngine
+                            .pull(svc, playlist)
+                        if (path != null) {
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                WeEnginePrefs.storeString(
+                                    svc, WeEnginePrefs.PREF_KEY_SELECTED_WALLPAPER, path)
+                                svc.currentEngine?.playlistReloadAfterExternalChange()
+                                // Stamp the switch so the interval restarts.
+                                svc.currentEngine?.onWallpaperChangedExternally()
+                            }
+                        }
+                    } finally {
+                        suiteRandomPullInFlight = false
+                    }
+                }
+                return ""
             }
 
             /** The entries that own the current minute (time rule) — or the whole playlist. */
@@ -414,21 +493,7 @@ class WEWallpaperService : WallpaperService() {
 
             /** Pick the next wallpaper inside the current set per the order mode. */
             private fun suitePickNew(): String {
-                val set = suiteSetForNow()
-                if (set.isEmpty()) return ""
-                if (set.size == 1) return set[0]
-                val currentIndex = set.indexOf(currentFile)
-                return when {
-                    suiteOrderRandom -> {
-                        val candidates = set.filter { it != currentFile }
-                        if (candidates.isEmpty()) set[0]
-                        else candidates[kotlin.random.Random.nextInt(candidates.size)]
-                    }
-                    else -> {
-                        val next = if (currentIndex >= 0) (currentIndex + 1) % set.size else 0
-                        set[next]
-                    }
-                }
+                return suitePickNewAndMaybePull()
             }
 
             fun onWallpaperChangedExternally() {
@@ -521,12 +586,17 @@ class WEWallpaperService : WallpaperService() {
                 if (!isActive() || isPreview) return false
                 if (suiteMode) {
                     val set = suiteSetForNow()
-                    if (set.isEmpty()) return false
+                    // v0.8.19: the dynamic random slot counts as a candidate.
+                    if (set.isEmpty() && !suiteRandomSlot) return false
                     // A window change (or playlist edit) that no longer
                     // contains the current wallpaper switches immediately.
-                    if (currentFile != null && currentFile !in set) return true
-                    // A single-entry window pins its wallpaper.
-                    if (set.size <= 1) return false
+                    // (A random-slot image IS a legit current wallpaper.)
+                    if (currentFile != null && currentFile !in set &&
+                        !com.wepwawet.playlist.RandomPullEngine.isSlotFile(currentFile!!)
+                    ) return true
+                    // A single-entry window pins its wallpaper (the random
+                    // slot alone keeps rotating — that's its purpose).
+                    if (set.size <= 1 && !suiteRandomSlot) return false
                     return (System.currentTimeMillis() - lastChangeTime) > duration
                 }
                 val currentTime = System.currentTimeMillis()
@@ -626,6 +696,15 @@ class WEWallpaperService : WallpaperService() {
             handler.post {
                 playlist.onWallpaperChangedExternally()
             }
+        }
+
+        /**
+         * v0.8.19 (random-pull rework): the freshly pulled random-slot
+         * image was written as the selected wallpaper — reload + load it
+         * (the same reloadActiveWallpaper path playlistUpdate uses).
+         */
+        fun playlistReloadAfterExternalChange() {
+            reloadActiveWallpaper()
         }
 
         fun reloadActiveWallpaper() {

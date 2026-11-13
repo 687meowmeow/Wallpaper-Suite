@@ -77,6 +77,20 @@ object SuitePlaylistStore {
         var intervalMinutes: Int = 15,
         var entries: MutableList<Entry> = ArrayList(),
         var timeRules: MutableList<TimeRule> = ArrayList(),
+        // ── v0.8.19 (random-pull rework): the "Random" pull button no
+        // longer freezes ONE fetched image into the list. Instead, a
+        // dynamic RANDOM SLOT lives in the playlist: each time the
+        // rotation lands on it, a FRESH image is pulled through the SAME
+        // booru search Discover uses — with THIS playlist's OWN tag
+        // settings (strict/soft tags, style, content tier, sources), so
+        // two playlists can pull from completely different feeds.
+        // Defaults: null = inherit Discover's current settings.
+        var randomPullEnabled: Boolean = false,
+        var randomStrictTags: List<String>? = null,
+        var randomSoftTags: List<String>? = null,
+        var randomStyleValue: Int? = null,
+        var randomR18Mode: Int? = null,
+        var randomSources: List<String>? = null,
     )
 
     const val ORDER_RANDOM = "random"
@@ -146,6 +160,12 @@ object SuitePlaylistStore {
             intervalMinutes = intervalMinutes,
             entries = (entries ?: emptyList()).toMutableList(),
             timeRules = (timeRules ?: emptyList()).toMutableList(),
+            randomPullEnabled = randomPullEnabled ?: false,
+            randomStrictTags = randomStrictTags,
+            randomSoftTags = randomSoftTags,
+            randomStyleValue = randomStyleValue,
+            randomR18Mode = randomR18Mode,
+            randomSources = randomSources,
         )
     }
 

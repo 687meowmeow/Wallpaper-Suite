@@ -243,13 +243,13 @@ fun WepWawetNavHost() {
                                     Icon(
                                         tab.icon,
                                         contentDescription = tab.label,
-                                        // v0.8.18 (review B11): size(), not
-                                        // height() — a fixed height lets the
-                                        // width float to the glyph's intrinsic
-                                        // aspect and non-square icons render
-                                        // squashed. Every other Icon in the
-                                        // app already uses .size(...).
-                                        modifier = Modifier.size(20.dp),
+                                        // v0.8.19 (user request): back to
+                                        // height(20.dp) — the bottom bar was
+                                        // made 60dp-compact on purpose (the
+                                        // stock M3 bar is 80dp) to leave room
+                                        // for content; keep it exactly as it
+                                        // was before the B11 change.
+                                        modifier = Modifier.height(20.dp),
                                         tint = if (selected) MaterialTheme.colorScheme.onSecondaryContainer
                                         else MaterialTheme.colorScheme.onSurfaceVariant,
                                     )

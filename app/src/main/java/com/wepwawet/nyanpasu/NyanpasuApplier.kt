@@ -15,6 +15,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.math.roundToInt
 
 /**
  * Discover — image processing + system wallpaper application.
@@ -132,6 +133,79 @@ object NyanpasuApplier {
         return Bitmap.createScaledBitmap(source, w, h, true)
     }
 
+    /**
+     * v0.8.19 (preview window): crop the VISIBLE region of the pan/zoom
+     * preview out of the source bitmap.
+     *
+     * The Discover preview is now a fixed window at the PHONE's aspect
+     * ratio ("i want the image to be in a window that is the aspect ratio
+     * of the phone. you should be able to manuver it in this window"). The
+     * image floats inside it: `zoom` scales the image about the window
+     * center, `panX`/`panY` shift it (both in WINDOW-fraction units,
+     * −1..1). This maps the window's visible content straight onto the
+     * physical screen.
+     *
+     * Rendering contract (mirrored by the preview UI):
+     *  • base: the image is fit so it COVERS the window (like
+     *    ContentScale.Crop at zoom 1);
+     *  • zoom ≥ 1 multiplies that cover scale;
+     *  • pan (in px) = panFraction × (windowSize − scaledImageSize) / 2,
+     *    clamped so the window stays covered — the same clamp the
+     *    preview's transformable state enforces.
+     */
+    fun cropVisibleWindow(
+        context: Context,
+        source: Bitmap,
+        windowAspect: Float,
+        zoom: Float,
+        panX: Float,
+        panY: Float,
+    ): Bitmap {
+        val metrics = context.resources.displayMetrics
+        val screenWidth = metrics.widthPixels
+        val screenHeight = metrics.heightPixels
+
+        val bitmap = downscaleIfNeeded(source, maxDecodeDimension(context))
+
+        // The crop window in BITMAP pixels: the largest windowAspect rect
+        // that fits the bitmap (the "cover at zoom 1" base).
+        val bitmapRatio = bitmap.width.toFloat() / bitmap.height.toFloat()
+        var cropW: Int
+        var cropH: Int
+        if (bitmapRatio > windowAspect) {
+            cropH = bitmap.height
+            cropW = (bitmap.height * windowAspect).toInt()
+        } else {
+            cropW = bitmap.width
+            cropH = (bitmap.width / windowAspect).toInt()
+        }
+        // zoom ≥ 1 shrinks the crop window about its center.
+        val z = zoom.coerceAtLeast(1f)
+        cropW = (cropW / z).toInt().coerceAtLeast(8)
+        cropH = (cropH / z).toInt().coerceAtLeast(8)
+
+        // Pan: fraction −1..1 of the available slack on each axis, clamped.
+        val slackX = (bitmap.width - cropW).coerceAtLeast(0)
+        val slackY = (bitmap.height - cropH).coerceAtLeast(0)
+        val cx = (bitmap.width / 2f + panX * slackX / 2f - cropW / 2f)
+            .roundToInt().coerceIn(0, bitmap.width - cropW)
+        val cy = (bitmap.height / 2f + panY * slackY / 2f - cropH / 2f)
+            .roundToInt().coerceIn(0, bitmap.height - cropH)
+
+        val cropped = Bitmap.createBitmap(bitmap, cx, cy, cropW, cropH)
+        // Scale the window's content to the physical screen.
+        val scale = screenWidth.toFloat() / cropped.width.toFloat()
+        val matrix = Matrix()
+        matrix.setScale(scale, scale)
+        val tw = (cropped.width * scale).toInt().coerceAtLeast(1)
+        val th = (cropped.height * scale).toInt().coerceAtLeast(1)
+        val target = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(target)
+        val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+        canvas.drawBitmap(cropped, matrix, paint)
+        return target
+    }
+
     /** WallpaperManager on some OEMs only accepts software bitmaps. */
     private fun forWallpaperManager(bitmap: Bitmap): Bitmap {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return bitmap
@@ -227,8 +301,21 @@ object NyanpasuApplier {
 
     data class HistoryEntry(val file: File, val timestamp: Long)
 
-    private fun historyDir(context: Context): File =
-        File(context.filesDir, "nyanpasu/history").apply { mkdirs() }
+    /**
+     * v0.8.19 (rename): the history lives under filesDir/discover/history
+     * now ("rename the nyanpasu file in the app" — no on-disk name carries
+     * the upstream project's name anymore). One-time migration moves any
+     * legacy nyanpasu/history entries into the new directory.
+     */
+    private fun historyDir(context: Context): File {
+        val dir = File(context.filesDir, "discover/history").apply { mkdirs() }
+        val legacy = File(context.filesDir, "nyanpasu/history")
+        if (legacy.isDirectory) {
+            legacy.listFiles()?.forEach { f -> f.renameTo(File(dir, f.name)) }
+            runCatching { legacy.parentFile?.let { File(it, "nyanpasu").delete() } }
+        }
+        return dir
+    }
 
     /** Save an applied bitmap into the 5-deep history ring; returns its entry. */
     suspend fun pushHistory(context: Context, bitmap: Bitmap): HistoryEntry? =

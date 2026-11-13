@@ -391,21 +391,54 @@ private fun CropSurface(
                     val minPx = 36.dp.toPx()
                     val cornerPx = 28.dp.toPx()
                     val edgePx = 22.dp.toPx()
+                    // v0.8.19 (crop fix): ABSOLUTE finger tracking. The old
+                    // handler fed each frame's DELTA into the corner math
+                    // (`finger = corner + frameDelta`), which double-counted
+                    // the axis the ratio fit snapped back on the previous
+                    // frame and lost the touch-slop distance entirely —
+                    // drags felt dead, corners "didn't work", and a locked
+                    // ratio made it worse every frame. Now the drag tracks
+                    // the finger's ABSOLUTE position: at drag start we
+                    // remember which handle was grabbed and how far the
+                    // finger sat from it; every frame re-derives the rect
+                    // from (finger − grabOffset) directly — the same math
+                    // on every frame, no accumulation drift, slop included.
                     var active = CropHandle.NONE
+                    var grabDx = 0f
+                    var grabDy = 0f
                     detectDragGestures(
                         onDragStart = { offset ->
-                            val r = Rect(
+                            val r = androidx.compose.ui.geometry.Rect(
                                 liveRect.left * dispW.value,
                                 liveRect.top * dispH.value,
                                 liveRect.right * dispW.value,
                                 liveRect.bottom * dispH.value,
                             )
                             active = hitTest(offset, r, cornerPx, edgePx)
+                            // Where the finger sits relative to the grabbed
+                            // anchor point (the MOVE rect's top-left, or the
+                            // grabbed corner itself).
+                            when (active) {
+                                CropHandle.MOVE -> {
+                                    grabDx = offset.x - r.left
+                                    grabDy = offset.y - r.top
+                                }
+                                CropHandle.TL -> { grabDx = offset.x - r.left; grabDy = offset.y - r.top }
+                                CropHandle.TR -> { grabDx = offset.x - r.right; grabDy = offset.y - r.top }
+                                CropHandle.BL -> { grabDx = offset.x - r.left; grabDy = offset.y - r.bottom }
+                                CropHandle.BR -> { grabDx = offset.x - r.right; grabDy = offset.y - r.bottom }
+                                CropHandle.L -> { grabDx = offset.x - r.left; grabDy = 0f }
+                                CropHandle.R -> { grabDx = offset.x - r.right; grabDy = 0f }
+                                CropHandle.T -> { grabDx = 0f; grabDy = offset.y - r.top }
+                                CropHandle.B -> { grabDx = 0f; grabDy = offset.y - r.bottom }
+                                CropHandle.NONE -> Unit
+                            }
                         },
-                        onDrag = { change, drag ->
+                        onDrag = { change, _ ->
                             change.consume()
                             if (active == CropHandle.NONE) return@detectDragGestures
-                            val r = Rect(
+                            val finger = change.position
+                            val prev = androidx.compose.ui.geometry.Rect(
                                 liveRect.left * dispW.value,
                                 liveRect.top * dispH.value,
                                 liveRect.right * dispW.value,
@@ -413,15 +446,18 @@ private fun CropSurface(
                             )
                             val px = dragRect(
                                 handle = active,
-                                drag = drag,
-                                r = r,
+                                // The finger position minus the grab offset:
+                                // where the grabbed anchor should now be.
+                                fingerX = finger.x - grabDx,
+                                fingerY = finger.y - grabDy,
+                                prev = prev,
                                 dispW = dispW.value,
                                 dispH = dispH.value,
                                 ratio = lockRatio,
                                 minPx = minPx,
                             )
                             liveOnChange(
-                                Rect(
+                                androidx.compose.ui.geometry.Rect(
                                     (px.left / dispW.value).coerceIn(0f, 1f),
                                     (px.top / dispH.value).coerceIn(0f, 1f),
                                     (px.right / dispW.value).coerceIn(0f, 1f),
@@ -643,75 +679,89 @@ private fun hitTest(touch: Offset, r: Rect, corner: Float, edge: Float): CropHan
     }
 }
 
-/** Apply one drag step to the crop rect (display px), respecting the lock. */
+/**
+ * v0.8.19 (crop fix): apply one drag step from the finger's ABSOLUTE
+ * position. `fingerX`/`fingerY` are where the grabbed anchor (the corner, or
+ * the rect's top-left for MOVE) should sit NOW, already adjusted by the grab
+ * offset captured at drag start. The rect is re-derived from the anchors
+ * every frame — no delta accumulation, no drift, and the touch-slop distance
+ * is included because the offset was captured when the gesture began.
+ *
+ * The OPPOSITE corner stays anchored; a locked ratio clamps the box into the
+ * space between the anchor and the image edges (never under [minPx] when
+ * space allows).
+ */
 private fun dragRect(
     handle: CropHandle,
-    drag: Offset,
-    r: Rect,
+    fingerX: Float,
+    fingerY: Float,
+    prev: Rect,
     dispW: Float,
     dispH: Float,
     ratio: Float?,
     minPx: Float,
 ): Rect {
-    var l = r.left; var t = r.top; var rr = r.right; var b = r.bottom
+    var l = prev.left; var t = prev.top; var rr = prev.right; var b = prev.bottom
     when (handle) {
         CropHandle.MOVE -> {
-            val dx = drag.x.coerceIn(-l, dispW - rr)
-            val dy = drag.y.coerceIn(-t, dispH - b)
-            l += dx; rr += dx; t += dy; b += dy
+            // v0.8.19: the MOVE anchor drives the top-left DIRECTLY. The
+            // old delta-coerce (`dx.coerceIn(-l, dispW - rr)`) was a hard 0
+            // whenever the crop equaled the full image (l=0, rr=dispW), so
+            // dragging inside a fresh full-image crop did NOTHING ("the
+            // image doesnt work" to move). Clamping the absolute position
+            // has the same effect with no dead zone.
+            val sizeW = rr - l
+            val sizeH = b - t
+            val newL = fingerX.coerceIn(0f, (dispW - sizeW).coerceAtLeast(0f))
+            val newT = fingerY.coerceIn(0f, (dispH - sizeH).coerceAtLeast(0f))
+            l = newL; t = newT; rr = newL + sizeW; b = newT + sizeH
         }
-        // v0.8.18: corner drags with a locked ratio now follow the finger
-        // on BOTH axes and clamp the ratio into the available space. The
-        // old math derived height from width only — for portrait ratios
-        // (the Phone preset) the height instantly overflowed the image and
-        // the box SNAPPED to a fixed size, so the preset read as broken
-        // ("the phone aspect ratio doesnt work in the crop menu").
         CropHandle.TL -> if (ratio != null) {
             val box = lockedCornerRect(
                 anchorX = rr, anchorY = b, signX = -1f, signY = -1f,
-                fingerX = l + drag.x, fingerY = t + drag.y,
+                fingerX = fingerX, fingerY = fingerY,
                 availW = rr, availH = b, ratio = ratio, minPx = minPx)
             l = box.left; t = box.top; rr = box.right; b = box.bottom
         } else {
-            l = (l + drag.x).coerceIn(0f, rr - minPx)
-            t = (t + drag.y).coerceIn(0f, b - minPx)
+            l = fingerX.coerceIn(0f, (rr - minPx).coerceAtLeast(0f))
+            t = fingerY.coerceIn(0f, (b - minPx).coerceAtLeast(0f))
         }
         CropHandle.TR -> if (ratio != null) {
             val box = lockedCornerRect(
                 anchorX = l, anchorY = b, signX = +1f, signY = -1f,
-                fingerX = rr + drag.x, fingerY = t + drag.y,
+                fingerX = fingerX, fingerY = fingerY,
                 availW = dispW - l, availH = b, ratio = ratio, minPx = minPx)
             l = box.left; t = box.top; rr = box.right; b = box.bottom
         } else {
-            rr = (rr + drag.x).coerceIn(l + minPx, dispW)
-            t = (t + drag.y).coerceIn(0f, b - minPx)
+            rr = fingerX.coerceIn(l + minPx, dispW)
+            t = fingerY.coerceIn(0f, (b - minPx).coerceAtLeast(0f))
         }
         CropHandle.BL -> if (ratio != null) {
             val box = lockedCornerRect(
                 anchorX = rr, anchorY = t, signX = -1f, signY = +1f,
-                fingerX = l + drag.x, fingerY = b + drag.y,
+                fingerX = fingerX, fingerY = fingerY,
                 availW = rr, availH = dispH - t, ratio = ratio, minPx = minPx)
             l = box.left; t = box.top; rr = box.right; b = box.bottom
         } else {
-            l = (l + drag.x).coerceIn(0f, rr - minPx)
-            b = (b + drag.y).coerceIn(t + minPx, dispH)
+            l = fingerX.coerceIn(0f, (rr - minPx).coerceAtLeast(0f))
+            b = fingerY.coerceIn(t + minPx, dispH)
         }
         CropHandle.BR -> if (ratio != null) {
             val box = lockedCornerRect(
                 anchorX = l, anchorY = t, signX = +1f, signY = +1f,
-                fingerX = rr + drag.x, fingerY = b + drag.y,
+                fingerX = fingerX, fingerY = fingerY,
                 availW = dispW - l, availH = dispH - t, ratio = ratio, minPx = minPx)
             l = box.left; t = box.top; rr = box.right; b = box.bottom
         } else {
-            rr = (rr + drag.x).coerceIn(l + minPx, dispW)
-            b = (b + drag.y).coerceIn(t + minPx, dispH)
+            rr = fingerX.coerceIn(l + minPx, dispW)
+            b = fingerY.coerceIn(t + minPx, dispH)
         }
         // Edge handles are FREE-mode only (a locked ratio can't resize
         // one axis alone).
-        CropHandle.L -> if (ratio == null) l = (l + drag.x).coerceIn(0f, rr - minPx)
-        CropHandle.R -> if (ratio == null) rr = (rr + drag.x).coerceIn(l + minPx, dispW)
-        CropHandle.T -> if (ratio == null) t = (t + drag.y).coerceIn(0f, b - minPx)
-        CropHandle.B -> if (ratio == null) b = (b + drag.y).coerceIn(t + minPx, dispH)
+        CropHandle.L -> if (ratio == null) l = fingerX.coerceIn(0f, (rr - minPx).coerceAtLeast(0f))
+        CropHandle.R -> if (ratio == null) rr = fingerX.coerceIn((l + minPx).coerceAtMost(dispW), dispW)
+        CropHandle.T -> if (ratio == null) t = fingerY.coerceIn(0f, (b - minPx).coerceAtLeast(0f))
+        CropHandle.B -> if (ratio == null) b = fingerY.coerceIn((t + minPx).coerceAtMost(dispH), dispH)
         CropHandle.NONE -> Unit
     }
     return Rect(

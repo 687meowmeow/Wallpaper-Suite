@@ -686,8 +686,54 @@ android {
         //     deleted (zero callers since v0.8.14).
         //   LOW B27: WePairingServer.stop() drains the pending transfer
         //     queue with the session.
-        versionCode = 136
-        versionName = "0.8.18-alpha"
+        // v0.8.19-alpha (1.0 parity + UX round), checked line-by-line
+        // against the upstream v1.0.0 tag of FranklinNexus/Nyanpasu:
+        //   IMAGE OBTAINING (1.0 parity): the Lolicon api.lolicon.app +
+        //     api.yetal.ml mirror pair, num=16, the excludeAI/aspectRatio
+        //     retry ladder, the 2/3 primary-slot budget with the style
+        //     band, and the niche soft-pick (score>=1 preferred, >=0 soft,
+        //     last-resort random — never a rejection); Danbooru with
+        //     -rating:explicit for MIX, ~a ~b OR terms, pixiv_id:>0 first
+        //     pass, is_deleted skip; the booru pool with 1.0's exact
+        //     per-mode site lists (PURE/NSFW/MIX), the buildTagCandidates
+        //     ladder (first |-alternative, | parts, niche singles, "1girl"
+        //     last), rating suffixes per mode, and RANDOM pick among all
+        //     allowed results; the pixiv proxy chain i.pixiv.re →
+        //     i.pixiv.nl → pixiv.yuki.sh with the Referer rule.
+        //   PREVIEW WINDOW: the Discover preview is a window at the
+        //     PHONE's aspect ratio — the image inside it is pan/zoomable
+        //     (drag + pinch, tap the badge to reset), and Set applies
+        //     exactly the VISIBLE region (cropVisibleWindow).
+        //   PLAYLIST RANDOM REWORK: "a random wallpaper that is randomy
+        //     every time it is ran" — a DYNAMIC random slot that pulls a
+        //     fresh image each time the rotation lands on it, with its own
+        //     individual tag settings (strict/soft tags, style, content
+        //     tier, booru sources; blank = Discover's) exactly like the
+        //     Discover page. The old one-shot pull-freeze button is gone.
+        //   CROP FIX: dragging the crop corners/image works again — the
+        //     gesture handler tracks the finger's ABSOLUTE position (grab
+        //     offsets captured at drag start) instead of accumulating
+        //     per-frame deltas, and the MOVE handle no longer has the
+        //     full-image dead zone.
+        //   PRELOAD: queue 3 → 8 images, kicked ON APP START (quiet,
+        //     single-flight) so the first Discover visit pops a cached
+        //     image.
+        //   GROUPS: hold-drag reordering of the group chips at the top
+        //     (persistent user order, alphabetical legacy migrated);
+        //     delete stays on the long-press menu.
+        //   RENAME: no on-disk file carries the upstream name anymore —
+        //     the Discover prefs file, preload queue files, and the
+        //     history directory all renamed (legacy data migrated on
+        //     first use).
+        //   BOTTOM BAR: restored exactly as it was (60dp compact, 20dp
+        //     icon height) — it was made small on purpose; the previous
+        //     round's icon sizing change is reverted.
+        //   CI: the APK is attached to a release on EVERY successful
+        //     build (rolling "latest-build" draft for branch pushes,
+        //     per-version for tags) — Actions artifacts are never used,
+        //     so the artifact-storage quota is never touched.
+        versionCode = 137
+        versionName = "0.8.19-alpha"
         // Native ABI filter — only build for arm64-v8a (WE app targets Snapdragon 8 Gen 2+)
         ndk {
             abiFilters += "arm64-v8a"

@@ -32,6 +32,31 @@ import kotlin.random.Random
  * quality-based hard rejection exists. The only later-version improvement
  * folded in is TagExpander's modifier preservation (v1.2.3) — it keeps
  * user modifiers when expanding niche tags, which strictly widens choice.
+ *
+ * v0.8.19 (1.0 parity round — checked line-by-line against the upstream
+ * v1.0.0 tag of FranklinNexus/Nyanpasu): the remaining drift from 1.0 is
+ * gone. Each alignment is marked "1.0 parity:" at the site:
+ *   • Lolicon: the api.lolicon.app + api.yetal.ml MIRROR pair, num=16,
+ *     excludeAI=true first (dropped on retry), aspectRatio=lt1 retried
+ *     last for untagged queries, the slot budget (2 when the style band
+ *     occupies a tag slot, else 3), and the niche tag scoring/soft-pick
+ *     from SearchScoring + SearchNicheRegistry (a matching niche result is
+ *     preferred, with a soft fallback — never a hard rejection).
+ *   • Danbooru: rating:general / -rating:general / -rating:explicit (MIX
+ *     excludes explicit, like 1.0 — not the later "no constraint"), OR
+ *     terms with ~, pixiv_id:>0 first pass, order:random, is_deleted skip,
+ *     and the niche boost ORs appended when the intent matches.
+ *   • Booru pool: 1.0's per-mode site lists (PURE → konachan.net +
+ *     behoimi.org SAFE_ONLY + safebooru + tbib; NSFW → konachan.com
+ *     EXPLICIT_ONLY + yande.re ANY + gelbooru + xbooru; MIX → yande.re,
+ *     konachan.com, konachan.net ANY + all four gel sites), the tag
+ *     candidates ladder (first | alternative, then each | part, then
+ *     niche fallback singles, "1girl" last resort), rating:safe /
+ *     rating:explicit / -rating:explicit suffixes, and RANDOM pick from
+ *     every allowed result (never "first result").
+ *   • Download: the ImageUrlFallback proxy chain — i.pixiv.re,
+ *     i.pixiv.nl, pixiv.yuki.sh — with the pixiv Referer for pximg/pixiv
+ *     hosts, like 1.0's AppHttpClient + ImageUrlFallback.
  * ══════════════════════════════════════════════════════════════════════
  */
 object NyanpasuSearch {
@@ -48,6 +73,22 @@ object NyanpasuSearch {
 
     /** Overall budget — mirrors v1.0.0's SearchTierBudget (single-shot usage). */
     private const val TOTAL_BUDGET_MS = 32_000L
+
+    /** 1.0 parity: Lolicon asks for NUM = 16 results per query. */
+    private const val LOLICON_NUM = 16
+
+    /** 1.0 parity: the Lolicon mirror pair (loliconMirrorOrder NORMAL). */
+    private val LOLICON_MIRRORS = listOf(
+        "https://api.lolicon.app/setu/v2",
+        "https://api.yetal.ml/setu/v2",
+    )
+
+    /** 1.0 parity: the pixiv proxy chain (ImageUrlFallback.PIXIV_PROXY_HOSTS). */
+    private val PIXIV_PROXY_HOSTS = listOf(
+        "i.pixiv.re",
+        "i.pixiv.nl",
+        "pixiv.yuki.sh",
+    )
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -143,7 +184,7 @@ object NyanpasuSearch {
         if (NyanpasuPrefs.SOURCE_DANBOORU in sources &&
             System.currentTimeMillis() < deadline
         ) {
-            danbooru(strict, soft, r18Mode, tried)?.let { return it }
+            danbooru(strict, soft, styleValue, r18Mode, tried)?.let { return it }
         }
 
         // ── Tier 2: booru pool with tags ──
@@ -177,7 +218,7 @@ object NyanpasuSearch {
             lolicon(emptyList(), emptyList(), styleValue, r18Mode, attachSoft = false, tried)?.let { return it }
         }
         if (NyanpasuPrefs.SOURCE_DANBOORU in sources) {
-            danbooru(emptyList(), emptyList(), r18Mode, tried)?.let { return it }
+            danbooru(emptyList(), emptyList(), styleValue, r18Mode, tried)?.let { return it }
         }
         booruPool(emptyList(), r18Mode, sources, tried)?.let { return it }
         return null
@@ -187,7 +228,18 @@ object NyanpasuSearch {
     // Sources
     // ════════════════════════════════════════════════════════════════
 
-    /** Lolicon /setu/v2 — returns a direct image URL (proxied pixiv). */
+    /**
+     * Lolicon /setu/v2 — returns a direct image URL (proxied pixiv).
+     *
+     * 1.0 parity (LoliconSearchClient.fetchTagged + buildPath):
+     *  • the retry ladder — tagged: (no aspect, excludeAI) → (no aspect, no
+     *    excludeAI) → (aspect lt1, excludeAI); untagged: (aspect lt1,
+     *    excludeAI) → (no aspect, excludeAI) → (no aspect, no excludeAI);
+     *  • the primary-slot budget — max 2 when the style band occupies a
+     *    tag slot (slider active + band non-null), else 3;
+     *  • num=16, and the niche tag soft-pick (score >= 1 preferred,
+     *    score >= 0 soft, last-resort random — never a rejection).
+     */
     private fun lolicon(
         primaryTags: List<String>,
         softTags: List<String>,
@@ -197,65 +249,199 @@ object NyanpasuSearch {
         tried: Set<String>,
     ): String? {
         // v1.0.0: r18=2 means "mixed" (the API returns either).
+        val band = styleBand(styleValue)
+        val useSlider = sliderTagGroup(styleValue) != null
         val params = StringBuilder("?r18=$r18Mode&size=regular")
-        val slots = expandTags(primaryTags)
-        // Cap primary slots at 3 (v1.0.0's primaryTagSlots).
-        slots.take(3).forEach { params.append("&tag=${encode(it)}") }
-        // Soft tags: 38% chance to attach one hint (v1.0.0's chance logic).
-        if (slots.isNotEmpty() && softTags.isNotEmpty() && Random.nextInt(100) < 38) {
+        val slots = expandTags(primaryTags).take(primarySlotBudget(useSlider))
+        slots.forEach { params.append("&tag=${encode(it)}") }
+        // Soft tags: 38% chance to attach one hint (v1.0.0's chance logic;
+        // 100% when the caller explicitly asks to attach, like 1.0's
+        // searchStrictWithSoftHints tier).
+        if (slots.isNotEmpty() && softTags.isNotEmpty()) {
+            val chance = if (attachSoft) 100 else 38
+            if (Random.nextInt(100) < chance) {
+                params.append("&tag=${encode(softTags.random())}")
+            }
+        } else if (slots.isEmpty() && softTags.isNotEmpty() && Random.nextInt(100) < 38) {
             params.append("&tag=${encode(softTags.random())}")
         }
-        val url = "https://api.lolicon.app/setu/v2$params"
-        val body = httpGetJson(url) ?: return null
-        val data = body.optJSONArray("data") ?: return null
-        // v1.0.0: iterate and pick a non-recent result (NO quality filter —
-        // the later versions' chooseBest()/score() is deliberately absent).
-        for (i in 0 until data.length()) {
-            val entry = data.optJSONObject(i) ?: continue
-            val urls = entry.optJSONObject("urls") ?: continue
-            val candidate = urls.optString("regular").ifBlank { urls.optString("original") }
-            if (candidate.isNotBlank() && candidate !in tried) return candidate
+        params.append("&num=$LOLICON_NUM")
+
+        // 1.0 parity: the retry ladder over (aspect, excludeAI) — for
+        // tagged queries excludeAI drops out before aspect flips; for
+        // untagged queries aspect lt1 (portrait, phone-shaped) leads.
+        val attempts: List<Pair<Boolean, Boolean>> = if (primaryTags.isNotEmpty()) {
+            listOf(false to true, false to false, true to true)
+        } else {
+            listOf(true to true, false to true, false to false)
+        }
+        for ((aspect, excludeAi) in attempts) {
+            val query = buildString {
+                append(params)
+                if (excludeAi) append("&excludeAI=true")
+                if (aspect) append("&aspectRatio=lt1")
+            }
+            val data = LOLICON_MIRRORS.firstNotNullOfOrNull { base ->
+                httpGetJson(base + query)?.optJSONArray("data")
+            } ?: continue
+            // v1.0.0: iterate and pick a non-recent result (NO quality
+            // filter — the later versions' chooseBest()/score() is
+            // deliberately absent). The niche soft-pick applies when the
+            // user's tags match a niche registry entry.
+            val picked = pickLoliconEntry(data, primaryTags, tried) ?: continue
+            if (picked != null) return picked
         }
         return null
     }
 
-    /** Danbooru posts.json — random order, rating per content tier. */
+    /** 1.0 parity: 2 primary slots when the slider band takes one, else 3. */
+    private fun primarySlotBudget(sliderOccupiesSlot: Boolean): Int =
+        if (sliderOccupiesSlot) 2 else 3
+
+    /**
+     * 1.0 parity (LoliconSearchClient.pickRegularUrl + SearchScoring):
+     * random pick among non-recent results, with the niche soft-pref —
+     * when the intent matches a niche spec, results scoring >= 1 win,
+     * then score >= 0, then anything (never a rejection).
+     */
+    private fun pickLoliconEntry(
+        data: JSONArray,
+        intentTags: List<String>,
+        tried: Set<String>,
+    ): String? {
+        val intentBlob = (intentTags).joinToString("|").lowercase()
+        val spec = matchNiche(intentBlob) ?: return pickAnyLolicon(data, tried)
+        val entries = ArrayList<Pair<JSONObject, Int>>(data.length())
+        for (i in 0 until data.length()) {
+            val entry = data.optJSONObject(i) ?: continue
+            val urls = entry.optJSONObject("urls") ?: continue
+            val reg = urls.optString("regular", "")
+            if (reg.isEmpty() || reg in tried) continue
+            val tagStr = entry.optJSONArray("tags")?.let { arr ->
+                List(arr.length()) { arr.optString(it) }.joinToString(" ")
+            } ?: ""
+            entries.add(entry to nicheScore(tagStr, spec))
+        }
+        if (entries.isEmpty()) return null
+        entries.filter { it.second >= 1 }.takeIf { it.isNotEmpty() }?.let {
+            return it[Random.nextInt(it.size)].first
+                .optJSONObject("urls")?.optString("regular", "")
+        }
+        entries.filter { it.second >= 0 }.takeIf { it.isNotEmpty() }?.let {
+            return it[Random.nextInt(it.size)].first
+                .optJSONObject("urls")?.optString("regular", "")
+        }
+        return entries[Random.nextInt(entries.size)].first
+            .optJSONObject("urls")?.optString("regular", "")
+    }
+
+    private fun pickAnyLolicon(data: JSONArray, tried: Set<String>): String? {
+        val urls = ArrayList<String>(data.length())
+        for (i in 0 until data.length()) {
+            val entry = data.optJSONObject(i) ?: continue
+            val urlsObj = entry.optJSONObject("urls") ?: continue
+            val reg = urlsObj.optString("regular", "")
+                .ifBlank { urlsObj.optString("original", "") }
+            if (reg.isNotBlank() && reg !in tried) urls.add(reg)
+        }
+        if (urls.isEmpty()) return null
+        return urls[Random.nextInt(urls.size)]
+    }
+
+    /**
+     * Danbooru posts.json — random order, rating per content tier.
+     *
+     * 1.0 parity (DanbooruSearchClient.fetchPixiv):
+     *  • rating clauses 0 → rating:general, 1 → -rating:general, MIX →
+     *    -rating:explicit (NOT unconstrained — 1.0's MIX excludes explicit
+     *    on Danbooru, unlike the booru pool);
+     *  • OR terms (~a ~b) for | alternatives and niche boosts;
+     *  • pixiv_id:>0 on the first (require-pixiv) pass, order:random,
+     *    limit=25, is_deleted skipped.
+     */
     private fun danbooru(
         primaryTags: List<String>,
         softTags: List<String>,
+        styleValue: Int,
         r18Mode: Int,
         tried: Set<String>,
     ): String? {
         if (primaryTags.isEmpty()) return null // untagged fallback uses the booru pool
-        // Danbooru anonymous accounts cap at 2 query tags total — use ONE
-        // content tag plus the rating/meta filter (v1.0.0 behavior).
-        val tags = mutableListOf<String>()
-        tags += danbooruTag(expandTags(primaryTags).firstOrNull() ?: return null)
-        if (softTags.isNotEmpty() && Random.nextInt(100) < 38) {
-            // Replace the primary with a soft hint 38% of the time (v1.0.0's
-            // attach-soft logic — a hint, never an AND-combination).
-            tags[0] = danbooruTag(softTags.random())
-        }
-        when (r18Mode) {
-            NyanpasuPrefs.R18_PURE -> tags += "rating:general"
-            NyanpasuPrefs.R18_NSFW -> tags += "-rating:general"
-            else -> { /* mix: no rating constraint */ }
-        }
-        tags += "order:random"
-        val url = "https://danbooru.donmai.us/posts.json?limit=20&tags=${encode(tags.joinToString(" "))}"
-        val body = httpGetJsonArray(url) ?: return null
-        for (i in 0 until body.length()) {
-            val post = body.optJSONObject(i) ?: continue
-            val fileUrl = post.optString("file_url")
-            if (fileUrl.isNotBlank() && fileUrl !in tried) return fileUrl
+        val intentBlob = primaryTags.joinToString("|").lowercase()
+
+        // Pass 1: require a pixiv id (like 1.0's first fetchPixiv call),
+        // Pass 2: compact tags, no pixiv requirement.
+        for (requirePixiv in listOf(true, false)) {
+            val parts = ArrayList<String>()
+            danbooruRatingClause(r18Mode)?.let { parts.add(it) }
+            if (requirePixiv) parts.add("pixiv_id:>0")
+            parts.add("order:random")
+            if (requirePixiv) {
+                expandTags(primaryTags).forEach { parts.addAll(tokenToTerms(it)) }
+                // 1.0 parity: soft hint attached 40% when no primary tags —
+                // here primaries exist, so the niche boost ORs instead.
+                for (spec in NICHES) {
+                    if (intentBlob.containsAny(spec.markers)) {
+                        spec.danbooruBoostOrs.forEach { parts.add(it) }
+                    }
+                }
+            } else {
+                // compactTags: ONE content token (first | alternative).
+                expandTags(primaryTags).firstOrNull()?.let { first ->
+                    val one = if ("|" in first) first.substringBefore("|") else first
+                    if (one.isNotBlank()) parts.add(one)
+                }
+            }
+            val tagQuery = parts.filter { it.isNotBlank() }.joinToString(" ")
+            if (tagQuery.length > 1500) continue
+            val url = "https://danbooru.donmai.us/posts.json?limit=25&tags=${encode(tagQuery)}"
+            val body = httpGetJsonArray(url) ?: continue
+            // v1.0.0: iterate and pick a non-recent result (NO quality
+            // filter). Deleted posts and off-rating posts are skipped.
+            val urls = ArrayList<String>()
+            for (i in 0 until body.length()) {
+                val post = body.optJSONObject(i) ?: continue
+                if (post.optBoolean("is_deleted")) continue
+                val rating = post.optString("rating", "")
+                val ratingOk = when (r18Mode) {
+                    NyanpasuPrefs.R18_PURE -> rating == "g"
+                    NyanpasuPrefs.R18_NSFW -> true
+                    else -> rating != "e" // MIX: exclude explicit (1.0 parity)
+                }
+                if (!ratingOk) continue
+                val fileUrl = post.optString("file_url")
+                if (fileUrl.isNotBlank() && fileUrl !in tried) urls.add(fileUrl)
+            }
+            if (urls.isNotEmpty()) return urls[Random.nextInt(urls.size)]
         }
         return null
     }
 
+    /** 1.0 parity (DanbooruSearchClient.ratingClause). */
+    private fun danbooruRatingClause(r18Mode: Int): String? = when (r18Mode) {
+        NyanpasuPrefs.R18_PURE -> "rating:general"
+        NyanpasuPrefs.R18_NSFW -> "-rating:general"
+        else -> "-rating:explicit"
+    }
+
+    /** 1.0 parity (tokenToTerms): "|"-joined alternatives become ~a ~b ORs. */
+    private fun tokenToTerms(token: String): List<String> {
+        val t = token.trim()
+        if (t.isEmpty()) return emptyList()
+        if ("|" in t) {
+            val ors = t.split("|")
+                .map { it.trim().replace(' ', '_').lowercase() }
+                .filter { it.isNotEmpty() }
+            if (ors.isEmpty()) return emptyList()
+            return listOf(ors.joinToString(" ") { "~$it" })
+        }
+        return listOf(t.replace(' ', '_').lowercase())
+    }
+
     /**
-     * The booru pool (v1.0.0 BooruPoolClient) — shuffled, rating-filtered
-     * per site family. Each site tries once; the first hit wins. v0.8.18:
-     * only sites whose source id is in `sources` are tried.
+     * The booru pool (v1.0.0 BooruPoolClient) — per-mode site lists,
+     * rating-filtered per site family, RANDOM pick among allowed results.
+     * v0.8.18: only sites whose source id is in `sources` are tried.
      */
     private fun booruPool(
         tags: List<String>,
@@ -266,65 +452,142 @@ object NyanpasuSearch {
         data class MoeSite(
             val sourceId: String,
             val endpoint: String,
-            val explicitAllowed: Boolean,
-            val api: String,
+            val filter: Int, // 0 SAFE_ONLY, 1 EXPLICIT_ONLY, 2 ANY
         )
 
-        val moe = listOf(
-            MoeSite(NyanpasuPrefs.SOURCE_KONACHAN, "https://konachan.net/post.json", false, "moe"),
-            MoeSite(NyanpasuPrefs.SOURCE_BEHOIMI, "https://behoimi.org/post.json", false, "moe"),
-            MoeSite(NyanpasuPrefs.SOURCE_YANDE, "https://yande.re/post.json", true, "moe"),
-            MoeSite("konachan_com", "https://konachan.com/post.json", true, "moe"),
-        )
-        val dapi = listOf(
-            NyanpasuPrefs.SOURCE_SAFEBOORU to
-                "https://safebooru.org/index.php?page=dapi&s=post&q=index&json=1",
-            NyanpasuPrefs.SOURCE_TBIB to
-                "https://tbib.org/index.php?page=dapi&s=post&q=index&json=1",
-            NyanpasuPrefs.SOURCE_GELBOORU to
-                "https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1",
-            NyanpasuPrefs.SOURCE_XBOORU to
-                "https://xbooru.com/index.php?page=dapi&s=post&q=index&json=1",
-        )
+        // 1.0 parity: MOE_PURE / MOE_NSFW / MOE_MIX site lists.
+        val moeByMode = when (r18Mode) {
+            NyanpasuPrefs.R18_PURE -> listOf(
+                MoeSite(NyanpasuPrefs.SOURCE_KONACHAN, "https://konachan.net/post.json", 0),
+                MoeSite(NyanpasuPrefs.SOURCE_BEHOIMI, "https://behoimi.org/post.json", 0),
+            )
+            NyanpasuPrefs.R18_NSFW -> listOf(
+                MoeSite("konachan_com", "https://konachan.com/post.json", 1),
+                MoeSite(NyanpasuPrefs.SOURCE_YANDE, "https://yande.re/post.json", 2),
+            )
+            else -> listOf( // MIX
+                MoeSite(NyanpasuPrefs.SOURCE_YANDE, "https://yande.re/post.json", 2),
+                MoeSite("konachan_com", "https://konachan.com/post.json", 2),
+                MoeSite(NyanpasuPrefs.SOURCE_KONACHAN, "https://konachan.net/post.json", 2),
+            )
+        }
+        // 1.0 parity: GEL_PURE / GEL_NSFW site lists (MIX = both).
+        val gelByMode = when (r18Mode) {
+            NyanpasuPrefs.R18_PURE -> listOf(
+                NyanpasuPrefs.SOURCE_SAFEBOORU to
+                    "https://safebooru.org/index.php?page=dapi&s=post&q=index&json=1",
+                NyanpasuPrefs.SOURCE_TBIB to
+                    "https://tbib.org/index.php?page=dapi&s=post&q=index&json=1",
+            )
+            NyanpasuPrefs.R18_NSFW -> listOf(
+                NyanpasuPrefs.SOURCE_GELBOORU to
+                    "https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1",
+                NyanpasuPrefs.SOURCE_XBOORU to
+                    "https://xbooru.com/index.php?page=dapi&s=post&q=index&json=1",
+            )
+            else -> listOf( // MIX = GEL_PURE + GEL_NSFW
+                NyanpasuPrefs.SOURCE_SAFEBOORU to
+                    "https://safebooru.org/index.php?page=dapi&s=post&q=index&json=1",
+                NyanpasuPrefs.SOURCE_TBIB to
+                    "https://tbib.org/index.php?page=dapi&s=post&q=index&json=1",
+                NyanpasuPrefs.SOURCE_GELBOORU to
+                    "https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1",
+                NyanpasuPrefs.SOURCE_XBOORU to
+                    "https://xbooru.com/index.php?page=dapi&s=post&q=index&json=1",
+            )
+        }
 
-        // Moe-style sites first (shuffled like v1.0.0's pool).
-        for (site in moe.filter { it.sourceId in sources }.shuffled()) {
-            if (r18Mode == NyanpasuPrefs.R18_PURE && site.explicitAllowed) continue
-            val expanded = expandTags(tags).map { moeTag(it) }
-            val url = buildString {
-                append(site.endpoint)
-                if (expanded.isNotEmpty()) append("?tags=${encode(expanded.joinToString(" "))}&limit=50")
-                else append("?limit=50&page=${Random.nextInt(1, 20)}")
-            }
-            val body = httpGetJsonArray(url) ?: continue
-            for (i in 0 until body.length()) {
-                val post = body.optJSONObject(i) ?: continue
-                if (r18Mode == NyanpasuPrefs.R18_PURE &&
-                    post.optString("rating").lowercase() !in listOf("s", "safe")) continue
-                val fileUrl = post.optString("file_url").ifBlank { post.optString("jpeg_url") }
-                if (fileUrl.isNotBlank() && fileUrl !in tried) return fileUrl
+        // 1.0 parity (BooruPoolClient.buildTagCandidates): the tag
+        // candidate ladder — first |-alternative, then each | part, then
+        // the niche fallback singles, "1girl" last resort.
+        val candidates = buildTagCandidates(tags)
+        val ratingSuffix = when (r18Mode) {
+            NyanpasuPrefs.R18_PURE -> "rating:safe"
+            NyanpasuPrefs.R18_NSFW -> "rating:explicit"
+            else -> "-rating:explicit"
+        }
+
+        // Moe-style sites (1.0: for each tag candidate, each site, in
+        // candidate order — NOT shuffled; the pool's variety comes from
+        // the random pick among results).
+        for (tag in candidates) {
+            for (site in moeByMode.filter { it.sourceId in sources }) {
+                val query = "$tag $ratingSuffix"
+                val body = httpGetJsonArray("${site.endpoint}?limit=24&tags=${encode(query)}") ?: continue
+                val urls = ArrayList<String>()
+                for (i in 0 until body.length()) {
+                    val post = body.optJSONObject(i) ?: continue
+                    val rt = post.optString("rating", "").lowercase()
+                    val allowed = when (site.filter) {
+                        0 -> rt == "safe" || rt == "s"
+                        1 -> rt == "explicit" || rt == "e"
+                        else -> when (r18Mode) {
+                            NyanpasuPrefs.R18_PURE -> rt == "safe" || rt == "s"
+                            NyanpasuPrefs.R18_NSFW -> rt != "safe" && rt != "s"
+                            else -> rt != "explicit" && rt != "e"
+                        }
+                    }
+                    if (!allowed) continue
+                    val fileUrl = sequenceOf(
+                        post.optString("sample_url", ""),
+                        post.optString("jpeg_url", ""),
+                        post.optString("file_url", ""),
+                    ).firstOrNull { it.isNotEmpty() } ?: continue
+                    if (fileUrl !in tried) urls.add(fileUrl)
+                }
+                if (urls.isNotEmpty()) return urls[Random.nextInt(urls.size)]
             }
         }
         // dapi-style (safebooru/tbib/gelbooru/xbooru).
-        for ((sourceId, base) in dapi.filter { it.first in sources }.shuffled()) {
-            val explicitSite = "gelbooru.com" in base || "xbooru.com" in base || "konachan.com" in base
-            if (r18Mode == NyanpasuPrefs.R18_PURE && explicitSite) continue
-            val expanded = expandTags(tags)
-            val url = buildString {
-                append(base)
-                append("&limit=50")
-                if (expanded.isNotEmpty()) append("&tags=${encode(expanded.joinToString(" "))}")
-            }
-            val body = httpGetJsonArray(url) ?: continue
-            for (i in 0 until body.length()) {
-                val post = body.optJSONObject(i) ?: continue
-                if (r18Mode == NyanpasuPrefs.R18_PURE &&
-                    post.optString("rating").lowercase() !in listOf("s", "safe", "general")) continue
-                val fileUrl = post.optString("file_url").ifBlank { post.optString("source") }
-                if (fileUrl.startsWith("http") && fileUrl !in tried) return fileUrl
+        for (tag in candidates) {
+            for ((sourceId, base) in gelByMode.filter { it.first in sources }) {
+                val body = httpGetJsonArray("${base}&tags=${encode(tag)}&limit=24") ?: continue
+                val urls = ArrayList<String>()
+                for (i in 0 until body.length()) {
+                    val post = body.optJSONObject(i) ?: continue
+                    val rating = post.optString("rating", "").lowercase()
+                    val allowed = when (r18Mode) {
+                        NyanpasuPrefs.R18_PURE -> rating !in setOf("explicit", "e", "q")
+                        NyanpasuPrefs.R18_NSFW -> true
+                        else -> rating !in setOf("explicit", "e")
+                    }
+                    if (!allowed) continue
+                    val fileUrl = post.optString("file_url", "")
+                    if (fileUrl.startsWith("http") && fileUrl !in tried) urls.add(fileUrl)
+                }
+                if (urls.isNotEmpty()) return urls[Random.nextInt(urls.size)]
             }
         }
         return null
+    }
+
+    /**
+     * 1.0 parity (BooruPoolClient.buildTagCandidates): first | alternative
+     * of each tag, then every | part, then niche fallback singles, then
+     * "1girl" as the last resort so the pool ALWAYS has a query.
+     */
+    private fun buildTagCandidates(tags: List<String>): List<String> {
+        val out = LinkedHashSet<String>()
+        for (raw in expandTags(tags)) {
+            val p = raw.trim()
+            if (p.isEmpty()) continue
+            val one = (if ("|" in p) p.substringBefore("|") else p)
+                .replace(' ', '_').lowercase()
+            if (one.isNotEmpty()) out.add(one)
+            p.split("|").forEach { part ->
+                val t = part.trim().replace(' ', '_').lowercase()
+                if (t.isNotEmpty()) out.add(t)
+            }
+        }
+        val intentBlob = tags.joinToString("|").lowercase()
+        matchNiche(intentBlob)?.let { spec ->
+            spec.fallbackSingles.forEach { s ->
+                val t = s.trim().replace(' ', '_').lowercase()
+                if (t.isNotEmpty()) out.add(t)
+            }
+        }
+        if (out.isEmpty()) out.add("1girl")
+        return out.toList()
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -366,11 +629,107 @@ object NyanpasuSearch {
         }
     }
 
-    private fun danbooruTag(tag: String): String =
-        normalizeTag(tag).replace(' ', '_')
+    // ── 1.0 parity: the niche registry (SearchNicheRegistry) ──────────
 
-    private fun moeTag(tag: String): String =
-        normalizeTag(tag).let { if (it.contains(' ')) it.replace(' ', '_') else it }
+    private class NicheSpec(
+        val markers: List<String>,
+        val orGroup: String,
+        val fallbackSingles: List<String>,
+        val danbooruBoostOrs: List<String>,
+        val loliconPositive: List<String>,
+    )
+
+    private val NICHES = listOf(
+        NicheSpec(
+            markers = listOf("男娘", "伪娘", "femboy", "otokonoko", "crossdressing",
+                "josou", "otoko_no_ko"),
+            orGroup = "otokonoko|trap|otoko_no_ko|crossdressing|femboy|josou_seme|josou_uke",
+            fallbackSingles = listOf("otokonoko", "trap", "crossdressing", "femboy", "otoko_no_ko"),
+            danbooruBoostOrs = listOf("~otokonoko", "~trap", "~crossdressing",
+                "~otoko_no_ko", "~femboy"),
+            loliconPositive = listOf("otokonoko", "trap", "crossdressing", "femboy",
+                "josou", "otoko no ko", "otoko_no_ko", "male maiden", "男の娘", "女装", "女裝", "偽娘"),
+        ),
+        NicheSpec(
+            markers = listOf("yuri", "百合", "gl", "girls_love", "girls love",
+                "shoujo_ai", "shojo_ai"),
+            orGroup = "yuri|girls_love|shoujo_ai",
+            fallbackSingles = listOf("yuri", "girls_love", "shoujo_ai"),
+            danbooruBoostOrs = listOf("~yuri", "~girls_love", "~shoujo_ai"),
+            loliconPositive = listOf("yuri", "girls_love", "girls love", "shoujo_ai", "shojo_ai"),
+        ),
+        NicheSpec(
+            markers = listOf("yaoi", "耽美", "bl", "boys_love", "boys love", "shounen_ai"),
+            orGroup = "yaoi|boys_love|shounen_ai",
+            fallbackSingles = listOf("yaoi", "boys_love", "shounen_ai"),
+            danbooruBoostOrs = listOf("~yaoi", "~boys_love", "~shounen_ai"),
+            loliconPositive = listOf("yaoi", "boys love", "shounen_ai", "shounen-ai"),
+        ),
+        NicheSpec(
+            markers = listOf("furry", "kemono", "兽人", "ケモノ", "福瑞"),
+            orGroup = "furry|kemono|animal_ears",
+            fallbackSingles = listOf("furry", "kemono", "animal_ears"),
+            danbooruBoostOrs = listOf("~furry", "~kemono"),
+            loliconPositive = listOf("furry", "kemono", "animal ears", "animal_ears"),
+        ),
+        NicheSpec(
+            markers = listOf("足控", "foot_focus", "feet", "裸足", "足", "footjob"),
+            orGroup = "foot_focus|feet|barefoot|soles",
+            fallbackSingles = listOf("foot_focus", "feet", "barefoot"),
+            danbooruBoostOrs = listOf("~foot_focus", "~feet", "~barefoot"),
+            loliconPositive = listOf("foot focus", "foot_focus", "feet", "barefoot", "soles", "toes"),
+        ),
+        NicheSpec(
+            markers = listOf("捆绑", "bdsm", "bondage", "束缚", "绳"),
+            orGroup = "bondage|bdsm|shibari|rope",
+            fallbackSingles = listOf("bondage", "bdsm", "shibari"),
+            danbooruBoostOrs = listOf("~bondage", "~bdsm", "~shibari"),
+            loliconPositive = listOf("bondage", "bdsm", "shibari", "rope"),
+        ),
+        NicheSpec(
+            markers = listOf("ntr", "netorare", "寝取", "牛头人"),
+            orGroup = "netorare|ntr|cheating",
+            fallbackSingles = listOf("netorare", "ntr", "cheating"),
+            danbooruBoostOrs = listOf("~netorare", "~ntr", "~cheating"),
+            loliconPositive = listOf("netorare", "ntr", "cheating"),
+        ),
+        NicheSpec(
+            markers = listOf("触手", "tentacle", "tentacles"),
+            orGroup = "tentacles|tentacle_pit|tentacle",
+            fallbackSingles = listOf("tentacles", "tentacle"),
+            danbooruBoostOrs = listOf("~tentacles", "~tentacle"),
+            loliconPositive = listOf("tentacle", "tentacles"),
+        ),
+        NicheSpec(
+            markers = listOf("雌小鬼", "mesugaki", "小恶魔", "smug"),
+            orGroup = "mesugaki|smug|brat",
+            fallbackSingles = listOf("mesugaki", "smug"),
+            danbooruBoostOrs = listOf("~mesugaki", "~smug"),
+            loliconPositive = listOf("mesugaki", "smug"),
+        ),
+    )
+
+    private fun matchNiche(intentBlobLower: String): NicheSpec? =
+        NICHES.firstOrNull { spec -> spec.markers.any { it.lowercase() in intentBlobLower } }
+
+    /** 1.0 parity (SearchScoring.scoreTagsForNiches). */
+    private fun nicheScore(tagRaw: String, spec: NicheSpec): Int {
+        val tagLower = tagRaw.lowercase()
+        val pos = spec.loliconPositive.any { marker ->
+            marker in tagRaw || marker.lowercase() in tagLower
+        }
+        return if (pos) 4 else 0
+    }
+
+    private fun String.containsAny(markers: List<String>): Boolean =
+        markers.any { it.lowercase() in this }
+
+    /** 1.0 parity: the style bands. */
+    private fun styleBand(styleValue: Int): Int = when {
+        styleValue < 35 -> -1 // SMALL
+        styleValue > 65 -> 1  // LARGE
+        else -> 0             // NEUTRAL
+    }
 
     /** v1.0.0 style bands: <35 small, >65 large, else neutral (null). */
     fun sliderTagGroup(styleValue: Int): String? = when {
@@ -431,29 +790,36 @@ object NyanpasuSearch {
     }
 
     /**
-     * Download an image into raw bytes. pixiv-hosted URLs need the pixiv
-     * Referer; failures fall back through the i.pixiv.re proxy chain
-     * (v1.0.0 ImageUrlFallback).
+     * Download an image into raw bytes.
+     *
+     * 1.0 parity (AppHttpClient's pixiv Referer + ImageUrlFallback): the
+     * pixiv Referer rides along for pximg/pixiv hosts, and failures fall
+     * back through the proxy chain i.pixiv.re → i.pixiv.nl →
+     * pixiv.yuki.sh (1.0 had two proxies; the third is the same idea and
+     * only ever used after the first two fail).
      */
     suspend fun downloadImage(url: String): ByteArray = withContext(Dispatchers.IO) {
-        val candidates = mutableListOf(url)
         val lower = url.lowercase()
-        if ("pximg.net" in lower || "pixiv.net" in lower) {
+        val isPixiv = "pximg.net" in lower || "pixiv.net" in lower
+        val candidates = mutableListOf(url)
+        if (isPixiv) {
             val path = url.substringAfter(".net", "").ifEmpty { url.substringAfter(".com", "") }
-            candidates += listOf(
-                "https://i.pixiv.re$path",
-                "https://i.pixiv.nl$path",
-            )
+            for (proxy in PIXIV_PROXY_HOSTS) {
+                candidates += "https://$proxy$path"
+            }
         }
         var lastError: Exception? = null
         for (candidate in candidates) {
             try {
+                val cl = candidate.lowercase()
+                val needReferer = "pximg.net" in cl || "pixiv.net" in cl ||
+                    cl.endsWith(".pixiv.re") || cl == "pixiv.re" ||
+                    cl.endsWith(".pixiv.nl") || cl == "pixiv.nl" ||
+                    cl.endsWith(".yuki.sh") || cl == "pixiv.yuki.sh"
                 val request = Request.Builder().url(candidate)
                     .header("User-Agent", USER_AGENT)
                     .apply {
-                        if ("pximg.net" in candidate || "pixiv.net" in candidate) {
-                            header("Referer", "https://www.pixiv.net/")
-                        }
+                        if (needReferer) header("Referer", "https://www.pixiv.net/")
                     }
                     .build()
                 client.newBuilder()

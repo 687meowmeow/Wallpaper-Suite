@@ -6,6 +6,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -70,6 +71,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -216,14 +220,30 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
     var showFolderMenu by remember { mutableStateOf(false) }
     var showCreateFolder by remember { mutableStateOf(false) }
 
-    // v0.8.17: the preview sits at the TOP at the IMAGE's own aspect
-    // ratio, full width. v0.8.18: the sanity cap is 42% of the screen —
-    // "make it so the image is not big enough to go past the buttons":
-    // the preview plus every action row (tools, Set/Refresh, save) fit on
-    // one screen; taller images letterbox (Fit) and the aspect is never
-    // distorted.
-    val maxPreviewHeight = with(androidx.compose.ui.platform.LocalDensity.current) {
-        (context.resources.displayMetrics.heightPixels * 0.42f).toDp()
+    // v0.8.19 (preview window): the preview is a WINDOW at the PHONE's
+    // aspect ratio ("i want the image to be in a window that is the aspect
+    // ratio of the phone. you should be able to manuver it in this
+    // window") — full width, phone aspect, the image inside it pan/zoom
+    // (drag to move, pinch to zoom), and Set applies exactly the VISIBLE
+    // region (WYSIWYG). A 42%-screen height sanity cap only letterboxes
+    // absurdly wide aspects; the window itself keeps the phone ratio.
+    val phoneAspect = run {
+        val dm = context.resources.displayMetrics
+        val w = dm.widthPixels.toFloat()
+        val h = dm.heightPixels.toFloat()
+        if (w > 0f && h > 0f) w / h else 9f / 19.5f
+    }
+
+    // v0.8.19: the pan/zoom state of the preview window. zoom ≥ 1; pan
+    // fractions −1..1 of the available slack on each axis.
+    var previewZoom by remember { mutableStateOf(1f) }
+    var previewPanX by remember { mutableStateOf(0f) }
+    var previewPanY by remember { mutableStateOf(0f) }
+    /** Reset the window whenever a NEW image is shown. */
+    fun resetPreviewWindow() {
+        previewZoom = 1f
+        previewPanX = 0f
+        previewPanY = 0f
     }
 
     fun persistTags() = NyanpasuPrefs.writeTags(context, strictTags, softTags)
@@ -257,7 +277,10 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
         scope.launch {
             try {
                 val signature = currentSignature()
-                while (NyanpasuPrefs.queueDepth(context, signature) < 3) {
+                // v0.8.19: the queue target comes from the prefs
+                // constant (8 — see NyanpasuPrefs.QUEUE_SIZE).
+                while (NyanpasuPrefs.queueDepth(context, signature) <
+                    com.wepwawet.nyanpasu.NyanpasuPrefs.QUEUE_TARGET) {
                     val nextUrl = withContext(Dispatchers.IO) {
                         runCatching {
                             NyanpasuSearch.searchOne(
@@ -346,6 +369,8 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
         previewBitmap = bmp
         previewIsFresh = true
         previewingLock = false
+        // v0.8.19: every NEW image starts with a centered, unzoomed window.
+        resetPreviewWindow()
         // Keep the queue full for the NEXT Refresh.
         refillQueue()
 
@@ -398,17 +423,28 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
             try {
                 val lockBmp = if (NyanpasuPrefs.isDualMode(homeState, lockState))
                     (lockOverride ?: previewLockBitmap) else null
-                // v0.8.18: a bitmap the user CROPPED in the crop dialog is
-                // applied as-is (its aspect is the choice they made) — no
-                // automatic center-crop to the screen ratio on top of it.
+                // v0.8.19 (preview window): a plain Set applies exactly the
+                // VISIBLE region of the preview window (WYSIWYG — the
+                // window pans/zooms the image, Set crops what's visible at
+                // the phone's aspect). A bitmap the user CROPPED in the
+                // crop dialog is applied as-is instead (its aspect is the
+                // choice they made).
                 val homeCrop = withContext(Dispatchers.IO) {
-                    NyanpasuApplier.cropForScreen(
-                        context, bmp, matchScreenAspect = homeOverride == null)
+                    if (homeOverride != null) {
+                        NyanpasuApplier.cropForScreen(context, bmp, matchScreenAspect = false)
+                    } else {
+                        NyanpasuApplier.cropVisibleWindow(
+                            context, bmp, phoneAspect, previewZoom, previewPanX, previewPanY)
+                    }
                 }
                 val lockCrop = lockBmp?.let {
                     withContext(Dispatchers.IO) {
-                        NyanpasuApplier.cropForScreen(
-                            context, it, matchScreenAspect = lockOverride == null)
+                        if (lockOverride != null) {
+                            NyanpasuApplier.cropForScreen(context, it, matchScreenAspect = false)
+                        } else {
+                            NyanpasuApplier.cropVisibleWindow(
+                                context, it, phoneAspect, previewZoom, previewPanX, previewPanY)
+                        }
                     }
                 }
                 val result = NyanpasuApplier.applyScreens(
@@ -652,32 +688,95 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            // ===== v0.8.17 LAYOUT: preview at the TOP, at the IMAGE's own
-            // aspect ratio ("now the discover image is too small and in the
-            // wrong place. it should be at the top and match the aspect
-            // ratio of the image") — full width, exact aspect (a sane 70%
-            // screen-height cap only letterboxes absurdly tall images,
-            // aspect always preserved). The action rows follow.
+            // ===== v0.8.19 PREVIEW WINDOW: full width at the PHONE's
+            // aspect ratio — "i want the image to be in a window that is
+            // the aspect ratio of the phone. you should be able to manuver
+            // it in this window". The image floats inside, pan/zoomable
+            // (drag to move, pinch to zoom); Set applies exactly the
+            // VISIBLE region. The 42%-height sanity cap only guards
+            // absurdly wide window aspects (landscape phones).
             val shownBmp =
                 if (previewingLock && previewLockBitmap != null) previewLockBitmap else previewBitmap
-            val imgAspect = shownBmp
-                ?.let { it.width.toFloat() / it.height } ?: 0.75f
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = maxPreviewHeight)
-                    .aspectRatio(imgAspect.coerceIn(0.2f, 5f))
+                    .aspectRatio(phoneAspect.coerceIn(0.4f, 2.5f))
                     .clip(RoundedCornerShape(12.dp))
                     .background(MaterialTheme.colorScheme.surfaceVariant),
-                contentAlignment = Alignment.Center,
             ) {
                 if (shownBmp != null) {
-                    Image(
-                        bitmap = shownBmp.asImageBitmap(),
-                        contentDescription = "Wallpaper preview",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxSize(),
-                    )
+                    // The pan/zoomable image. The math here mirrors
+                    // NyanpasuApplier.cropVisibleWindow EXACTLY, so what Set
+                    // applies is exactly what this window shows.
+                    //
+                    // Units: dispW/dispH are multipliers of the WINDOW size
+                    // (the image layer fills the Box, then scales). The
+                    // aspect is preserved in PIXELS: drawn width =
+                    // dispW·Wpx, drawn height = dispW·Wpx/imgAspect, so
+                    // scaleY = dispW·windowAspect/imgAspect — NOT
+                    // dispW/imgAspect (that would distort the image by the
+                    // window's aspect).
+                    val imgAspect = shownBmp.width.toFloat() / shownBmp.height
+                    // The scale (at zoom 1) that COVERS the window:
+                    //   tall image → dispW = 1 (full width; height covers);
+                    //   wide image → dispW = imgAspect/winAspect (height
+                    //   covers). Verified against cropVisibleWindow's math.
+                    val cover = maxOf(1f, imgAspect.coerceAtLeast(0.01f) / phoneAspect)
+                    val dispW = cover * previewZoom
+                    val dispH = dispW * phoneAspect / imgAspect.coerceAtLeast(0.01f)
+                    // Pan (fraction −1..1 of the slack per axis) → top-left
+                    // offset in window fractions.
+                    val slackW = maxOf(0f, dispW - 1f)
+                    val slackH = maxOf(0f, dispH - 1f)
+                    val offX = 0.5f - previewPanX * slackW / 2f - dispW / 2f
+                    val offY = 0.5f - previewPanY * slackH / 2f - dispH / 2f
+                    androidx.compose.foundation.layout.Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clipToBounds()
+                            .pointerInput(Unit) {
+                                detectTransformGestures { _, pan, gestureZoom, _ ->
+                                    if (gestureZoom != 1f) {
+                                        previewZoom =
+                                            (previewZoom * gestureZoom).coerceIn(1f, 6f)
+                                    }
+                                    if (pan != Offset.Zero) {
+                                        // Pan px → window fractions.
+                                        val w = size.width.toFloat()
+                                        val h = size.height.toFloat()
+                                        if (w > 0f && h > 0f) {
+                                            // Drag moves the IMAGE with the
+                                            // finger; the pan fraction runs
+                                            // −1..1 of the axis slack.
+                                            val fw = pan.x / w
+                                            val fh = pan.y / h
+                                            previewPanX =
+                                                (previewPanX - fw / maxOf(slackW, 1e-6f) * 2f)
+                                                    .coerceIn(-1f, 1f)
+                                            previewPanY =
+                                                (previewPanY - fh / maxOf(slackH, 1e-6f) * 2f)
+                                                    .coerceIn(-1f, 1f)
+                                        }
+                                    }
+                                }
+                            },
+                    ) {
+                        Image(
+                            bitmap = shownBmp.asImageBitmap(),
+                            contentDescription = "Wallpaper preview",
+                            // The layer fills the Box; the graphicsLayer
+                            // below gives it the aspect-correct drawn size.
+                            contentScale = ContentScale.FillBounds,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer {
+                                    scaleX = dispW
+                                    scaleY = dispH
+                                    translationX = offX * size.width
+                                    translationY = offY * size.height
+                                },
+                        )
+                    }
                     // Dual-mode preview switch (tap the label).
                     if (NyanpasuPrefs.isDualMode(homeState, lockState) &&
                         previewLockBitmap != null
@@ -693,6 +792,22 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                                 .clip(RoundedCornerShape(10.dp))
                                 .background(Color.Black.copy(alpha = 0.55f))
                                 .clickable { previewingLock = !previewingLock }
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                        )
+                    }
+                    // v0.8.19: the zoom badge — shows the current zoom and
+                    // resets the window on tap (pan/zoom back to center).
+                    if (previewZoom > 1.001f || previewPanX != 0f || previewPanY != 0f) {
+                        Text(
+                            "%.1f× — tap to reset".format(previewZoom),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(top = 8.dp, end = 8.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color.Black.copy(alpha = 0.55f))
+                                .clickable { resetPreviewWindow() }
                                 .padding(horizontal = 10.dp, vertical = 4.dp),
                         )
                     }

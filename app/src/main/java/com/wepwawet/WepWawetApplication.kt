@@ -177,6 +177,16 @@ class WepWawetApplication : Application(), Configuration.Provider, ImageLoaderFa
             else Log.e(TAG, "createNotificationChannels failed", t)
         }
 
+        // v0.8.19: kick the Discover preload queue ON APP START ("have
+        // them preload on app start") — background, quiet, single-flight;
+        // the first Discover visit of a session pops an already-downloaded
+        // image instead of hitting the network.
+        runCatching {
+            com.wepwawet.nyanpasu.DiscoverPreload.kick(this)
+        }.onFailure { t ->
+            Log.e(TAG, "DiscoverPreload.kick failed", t)
+        }
+
         // Step 5: Log a startup-complete event with build info.
         if (loggerOk) {
             runCatching {
