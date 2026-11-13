@@ -609,6 +609,83 @@ android {
         // last-open filter restored on start; deterministic tile-size
         // columns; "+" adds images to the open folder; workshop filter-tag
         // pruning; tighter search↔filter spacing.
+        // v0.8.18-alpha (bug-review round): all 27 findings from the
+        // WallpaperSuite_Review_1_Bugs_and_Code_Issues audit fixed, each
+        // verified against the live code before the change:
+        //   HIGH B1: send-to-phone can no longer lie — queueWallpaper returns
+        //     Boolean, launchSendToPhone gates on a LIVE pairing server
+        //     (isPaired() alone is true for a remembered pairing with the
+        //     service stopped), and every queue failure (send, video-send,
+        //     both trim paths) reports an honest error and keeps the source
+        //     file. Source videos are only deleted after a confirmed queue.
+        //   HIGH B2: texture conversion cache key now folds in the pack-time
+        //     settings (textureShrinkFactor + forceEtc2Compression) — a
+        //     settings change no longer serves stale, wrongly-sized ETC2.
+        //   HIGH B3: the preview's applied check only turns green when the
+        //     wallpaper is really active (hot reload or already-active
+        //     picker-free path) — cancelling the system picker no longer
+        //     counts as applied.
+        //   HIGH B4: cache temp-file cleanup on delete matches the workshop
+        //     ID SEGMENT exactly (substringBefore('_')) — deleting one item
+        //     no longer deletes another item's files whose id merely starts
+        //     with the deleted one.
+        //   HIGH B5: the apply→playlist-add conversion (official behavior
+        //     while a playlist exists and the service is down) now says what
+        //     happened instead of being a silent no-op.
+        //   HIGH B6: static image applies respect the Discover Home/Lock
+        //     tri-state (defaulting to both only when the user never chose)
+        //     — the lock screen the user excluded is no longer overwritten.
+        //   HIGH B7: manifest no longer requires Vulkan 1.3 at install time —
+        //     every render path is GLES3; capable GLES-only devices can
+        //     install again.
+        //   MED B8: Discover preload refill guard is a remembered
+        //     AtomicBoolean — recomposition can no longer launch a second
+        //     concurrent refill loop.
+        //   MED B9: streamPack validates the container magic BEFORE writing
+        //     (pack() got this fix in v0.7.24; the streaming path now
+        //     matches — no more corrupt truncated .mpkg on a bad magic).
+        //   MED B10: all three write-per-drag-frame sliders (Discover style,
+        //     page size, video alignment) persist in onValueChangeFinished.
+        //   MED B11: bottom-bar tab icons use size(20.dp) instead of
+        //     height(20.dp) — non-square glyphs no longer render squashed.
+        //   MED B12: Library reload is tiered — pin toggles refresh prefs
+        //     only; disk-changing events run a 250ms-debounced full
+        //     enumeration (coalesced bursts, no more seconds of IO per tap).
+        //   MED B13: Settings pkg-cache/pagination/page-size states read
+        //     their persisted values synchronously — no first-frame flash of
+        //     wrong defaults.
+        //   MED B14: ONE shared workshop import-id parser
+        //     (WorkshopDownloadJob.workshopItemIdOf) replaces the three
+        //     hand-copied regexes (Library, EngineLibrary, Preview).
+        //   MED B15: both empty catch blocks around picker launches now log
+        //     and surface a snackbar ("Couldn't open the file picker").
+        //   LOW B16: PairingScreen uses LaunchedEffect (the old
+        //     DisposableEffect had an empty onDispose).
+        //   LOW B17: image crops keep transparency — the crop is saved as
+        //     PNG when the source bitmap has alpha (JPEG otherwise).
+        //   LOW B18: AudioRecorder KDoc corrected — the session-0 Visualizer
+        //     DOES require RECORD_AUDIO (comment no longer invites removing
+        //     the permission).
+        //   LOW B19: the first-seen added-date registry prunes entries for
+        //     images that left every folder (no more monotonic prefs growth).
+        //   LOW B20: Discover recent-URL dedup is an ordered JSON array
+        //     (newest-last, oldest evicted) with one-time migration from the
+        //     legacy StringSet whose unspecified order evicted arbitrary
+        //     members.
+        //   LOW B21: the booru User-Agent embeds the real
+        //     Build.VERSION.RELEASE (was hardcoded "Android 14").
+        //   LOW B22: Discover history thumbnails decode on Dispatchers.IO
+        //     (was composition-time BitmapFactory on the main thread).
+        //   LOW B23: the preview drawer's tap-vs-drag threshold is
+        //     density-converted (8dp) instead of raw 15px.
+        //   LOW B24: Logs copy builds its text on Dispatchers.IO (was a
+        //     5,000-entry format on the click thread).
+        //   LOW B25: time-of-day playlist tick reads ONE Calendar instance
+        //     (the old two reads could straddle an hour boundary).
+        //   LOW B26: dead packAndImportImage pipeline + its three helpers
+        //     deleted (zero callers since v0.8.14).
+        //   LOW B27: WePairingServer.stop() drains the pending transfer
+        //     queue with the session.
         versionCode = 136
         versionName = "0.8.18-alpha"
         // Native ABI filter — only build for arm64-v8a (WE app targets Snapdragon 8 Gen 2+)

@@ -280,6 +280,25 @@ object WorkshopDownloadJob {
      * check + copy). A rejected version deletes the target and returns false
      * so the caller can surface a proper failure.
      */
+    /**
+     * v0.8.18 (review B14): THE single parser for the library's workshop
+     * import naming convention ("downloads/<itemId> - <title>.mpkg", built
+     * by [autoImportToLibrary] below). The pattern used to be hand-copied in
+     * three places (LibraryScreen, EngineLibrary.deleteWallpaper,
+     * WallpaperPreviewScreen) — any naming change had to be replicated three
+     * times, and a miss silently broke the "Open workshop page" button and
+     * the delete-cache cleanup for that site.
+     *
+     * @return the workshop item id parsed from a library-relative path, or
+     *   null when the path is not a workshop import (folder images, local
+     *   imports, suite images).
+     */
+    fun workshopItemIdOf(filePath: String): String? =
+        WORKSHOP_IMPORT_ID_REGEX.find(filePath)?.groupValues?.get(1)
+
+    /** "downloads/3767714202 - Name.mpkg" — the import-naming convention. */
+    private val WORKSHOP_IMPORT_ID_REGEX = Regex("^downloads/(\\d{6,}) - ")
+
     private fun autoImportToLibrary(context: Context, mpkgFile: File, itemId: String, title: String): Boolean {
         return runCatching {
             val engine = com.wepwawet.engine.EngineLibrary.sceneLib(context)
@@ -961,6 +980,22 @@ object WorkshopDownloadJob {
             ) }
             return false
         }
+        // v0.8.18 (review B1): isPaired() also returns true for a REMEMBERED
+        // pairing (SharedPreferences) while the pairing service/server is
+        // stopped. The old flow ran the whole download → pack pipeline on the
+        // strength of that remembered name, then queueWallpaper() silently
+        // dropped the .mpkg (no live server) and the flow still reported
+        // success. Gate on a live server instead — a dead proxy must fail
+        // fast, before any bytes are downloaded.
+        if (PairingService.pairingServer == null) {
+            updateState(itemId) { it.copy(
+                errorMessage = "Pairing service is not running — open the " +
+                    "Pairing tab (or the pairing toggle in Settings) and " +
+                    "reconnect the phone first.",
+                endedAt = System.currentTimeMillis(),
+            ) }
+            return false
+        }
 
         val sendId = System.currentTimeMillis()
         val pkgFile = File(appContext.cacheDir, "${item.id}_${sendId}_send.pkg")
@@ -1308,7 +1343,33 @@ object WorkshopDownloadJob {
                     "file" to cacheMpkg.name,
                     "size" to cacheMpkg.length(),
                     "device" to deviceName)
-                PairingService.queueWallpaper(cacheMpkg, item.title)
+                // v0.8.18 (review B1): check the queue result — a false here
+                // means the pairing server went away mid-download. The old
+                // code queued blindly, reported "Queued … for transfer" as a
+                // SUCCESS and deleted the source .pkg — a silent drop.
+                val queued = PairingService.queueWallpaper(cacheMpkg, item.title)
+                if (!queued) {
+                    val err = "Pairing server stopped — the wallpaper was NOT sent " +
+                        "(the .mpkg was kept at ${cacheMpkg.name}; tap Send again " +
+                        "after reconnecting the phone)"
+                    WepWawetLogger.workshopWarn("WorkshopDownloadJob.send: queue REJECTED — server gone",
+                        "file" to cacheMpkg.name,
+                        "size" to cacheMpkg.length())
+                    updateState(itemId) { s -> s.copy(
+                        isRunning = false,
+                        status = err,
+                        errorMessage = err,
+                        endedAt = System.currentTimeMillis(),
+                        savedFilePath = cacheMpkg.absolutePath,
+                        savedFileSize = cacheMpkg.length(),
+                    ) }
+                    onDownloadFailed(item, err)
+                    // Keep cacheMpkg (the user can retry the send once the
+                    // phone reconnects) and still clean up the raw install
+                    // dir — the .mpkg is the artifact that matters now.
+                    runCatching { installDir.deleteRecursively() }
+                    return@launchSafely
+                }
 
                 // v0.7.0: Auto-open the Wallpaper Engine Android app so the user
                 // can see the wallpaper transfer happen. The WE app will display
@@ -1470,14 +1531,35 @@ object WorkshopDownloadJob {
                     statusMessage = "Queuing for transfer to phone…",
                 )
                 val deviceName = PairingService.pairedDeviceName ?: "phone"
-                PairingService.queueWallpaper(cacheMpkg, pendingItem.title)
-                PairingService.launchWallpaperEngineApp(appContext)
-                // v0.7.23 BUG WD-2: only delete the source video if the
-                // pairing server is running (queueWallpaper silently returns
-                // if pairingServer is null). Prevents silent data loss.
-                if (PairingService.pairingServer != null) {
-                    runCatching { videoFile.delete() }
+                // v0.8.18 (review B1): check the queue result — on a false
+                // (server gone mid-flow) report an honest FAILURE instead of
+                // "Queued …", and never delete the source video.
+                val queued = PairingService.queueWallpaper(cacheMpkg, pendingItem.title)
+                if (!queued) {
+                    val err = "Pairing server stopped — the video was NOT sent " +
+                        "(the .mpkg was kept at ${cacheMpkg.name})"
+                    WepWawetLogger.workshopWarn("WorkshopDownloadJob.continueVideoSend: queue REJECTED — server gone",
+                        "file" to cacheMpkg.name,
+                        "size" to cacheMpkg.length())
+                    updateState(itemId) { s -> s.copy(
+                        isRunning = false,
+                        status = err,
+                        errorMessage = err,
+                        endedAt = System.currentTimeMillis(),
+                        savedFilePath = cacheMpkg.absolutePath,
+                        savedFileSize = cacheMpkg.length(),
+                    ) }
+                    onDownloadFailed(pendingItem, err)
+                    // The source video survives (retryable), but the install
+                    // dir is no longer needed — the .mpkg carries the video.
+                    runCatching { installDir.deleteRecursively() }
+                    return@launchSafely
                 }
+                PairingService.launchWallpaperEngineApp(appContext)
+                // v0.7.23 BUG WD-2 / v0.8.18 (review B1): the source video
+                // is only deleted after queueWallpaper returned TRUE above —
+                // the file is provably in the transfer queue.
+                runCatching { videoFile.delete() }
                 // v0.7.4: clean up the install dir here too (the video path in
                 // launchSendToPhone returns early before the normal cleanup —
                 // this is the continuation of that flow, so it owns the cleanup).

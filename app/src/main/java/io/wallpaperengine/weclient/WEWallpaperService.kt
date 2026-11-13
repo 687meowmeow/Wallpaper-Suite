@@ -467,8 +467,15 @@ class WEWallpaperService : WallpaperService() {
             fun isActive(): Boolean = playlistActive && isValid
 
             fun getTimeOfDayWallpaper(): String {
-                val minutes = (Calendar.getInstance().get(Calendar.HOUR_OF_DAY) * 60) +
-                        Calendar.getInstance().get(Calendar.MINUTE)
+                // v0.8.18 (review B25): ONE Calendar instance — the old two
+                // getInstance() calls could straddle an hour boundary (the
+                // 5-second tick makes that possible at the top of any hour),
+                // producing a minute-of-day off by up to 60 minutes for one
+                // tick. Same single-instance pattern getDayOfWeekWallpaper
+                // below and SuitePlaylistStore.currentMinuteOfDay already use.
+                val cal = Calendar.getInstance()
+                val minutes = cal.get(Calendar.HOUR_OF_DAY) * 60 +
+                        cal.get(Calendar.MINUTE)
                 if (sortedPosition in 0 until timePlaylist.size) {
                     val current = timePlaylist[sortedPosition]
                     if (current.startTime > minutes ||

@@ -37,8 +37,14 @@ import kotlin.random.Random
 object NyanpasuSearch {
 
     private const val TAG = "NyanpasuSearch"
-    private const val USER_AGENT =
-        "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
+    // v0.8.18 (review B21): the OS version comes from the DEVICE now — the
+    // old hardcoded "Android 14" UA went stale the moment the app ran on
+    // any other release and made the client trivially fingerprintable as
+    // a bot. Same fix SteamLoginActivity received in v0.7.25 (audit M-A4);
+    // no longer `const` because Build.VERSION.RELEASE is runtime state.
+    private val USER_AGENT: String =
+        "Mozilla/5.0 (Linux; Android ${android.os.Build.VERSION.RELEASE}) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
 
     /** Overall budget — mirrors v1.0.0's SearchTierBudget (single-shot usage). */
     private const val TOTAL_BUDGET_MS = 32_000L

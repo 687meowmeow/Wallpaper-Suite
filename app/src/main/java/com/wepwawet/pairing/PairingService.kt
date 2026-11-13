@@ -260,25 +260,34 @@ class PairingService : Service() {
          * If no phone is paired yet, the file sits in the queue and is sent
          * as soon as pairing completes.
          *
+         * v0.8.18 (review B1): returns whether the file was actually accepted
+         * into the transfer queue. The old `Unit` return silently dropped the
+         * file when the pairing server was not running (a remembered pairing
+         * in SharedPreferences made [isPaired] true even with the service
+         * stopped) — callers then reported success and deleted their source
+         * files. Callers MUST check the result before deleting anything.
+         *
          * @param file the .mpkg file to send. Must be readable. Should be a stable
          *   path (not a temp file) because the queue holds a [File] reference, not
          *   the bytes — the file must still exist when the loop picks it up.
          * @param title human-readable wallpaper title, shown in the WE app's
          *   "Open wallpaper" dialog. Must be ≤ 256 chars.
+         * @return true if the file was queued for transfer; false if the pairing
+         *   server is not running or the file is missing/unreadable.
          */
-        fun queueWallpaper(file: File, title: String) {
+        fun queueWallpaper(file: File, title: String): Boolean {
             val server = pairingServer
             if (server == null) {
                 WepWawetLogger.proxyWarn("queueWallpaper called but pairing server not running",
                     "file" to file.name, "title" to title)
-                return
+                return false
             }
             if (!file.exists() || !file.canRead()) {
                 WepWawetLogger.proxyWarn("queueWallpaper file not readable",
                     "path" to file.absolutePath,
                     "exists" to file.exists(),
                     "readable" to file.canRead())
-                return
+                return false
             }
             WepWawetLogger.proxy("queueWallpaper",
                 "file" to file.name,
@@ -286,6 +295,7 @@ class PairingService : Service() {
                 "size" to file.length(),
                 "paired" to isPaired())
             server.sendWallpaper(file, title)
+            return true
         }
 
         /**

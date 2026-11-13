@@ -362,8 +362,11 @@ object EngineLibrary {
                 // Workshop imports are named "<itemId> - title.mpkg" — parse
                 // the leading id the same way the "Open workshop page"
                 // context action does.
-                val itemId = Regex("downloads/(\\d{6,}) - ").find(info.filePath)
-                    ?.groupValues?.get(1)
+                // v0.8.18 (review B14): the shared import-naming parser
+                // (was a second hand-copied regex — see
+                // WorkshopDownloadJob.workshopItemIdOf).
+                val itemId = com.wepwawet.pairing.WorkshopDownloadJob
+                    .workshopItemIdOf(info.filePath)
                 if (itemId != null) {
                     // 1. The cached scene .pkg (set by "Cache .pkg files").
                     val cachedPkg = File(File(context.cacheDir, "pkg_cache"), "$itemId.pkg")
@@ -376,9 +379,18 @@ object EngineLibrary {
                     // 2. Leftover cache temp files from pack/trim runs:
                     //    <id>_<sendId>_debug.pkg / _debug.mpkg / _send.mpkg /
                     //    <id>_trimmed.mp4, plus any interrupted install dir.
+                    //    v0.8.18 (review B4): match the ID SEGMENT exactly
+                    //    (the part before the first '_') — the old
+                    //    startsWith("$itemId") also matched every OTHER item
+                    //    whose id merely starts with the deleted one (e.g.
+                    //    123456 vs 1234567890), deleting their temp files and
+                    //    breaking an in-flight download for that other item.
+                    //    Same exact-segment rule the Clear Cache screen uses.
                     runCatching {
                         context.cacheDir.listFiles()?.forEach { f ->
-                            if (f.isFile && f.name.startsWith("$itemId")) {
+                            if (f.isFile &&
+                                f.name.substringBefore('_', "") == itemId
+                            ) {
                                 f.delete()
                             }
                         }

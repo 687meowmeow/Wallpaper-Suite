@@ -149,11 +149,32 @@ fun SettingsScreen(
     // WorkshopDownloader keeps the raw .pkg files it fetches via JavaSteam
     // in the app cache dir so subsequent send-to-phone / debug-download
     // calls can skip the Steam CDN fetch and reuse the cached .pkg.
-    var pkgCacheEnabled by remember { mutableStateOf(false) }
+    // v0.8.18 (review B13): read the PERSISTED value synchronously in the
+    // remember initializer (same as verboseLog/textureShrink above). The old
+    // hardcoded `false` rendered for the first frame and then jumped to the
+    // stored value when the LaunchedEffect below read the prefs — a visible
+    // "the app lost my setting" flash on every screen entry.
+    var pkgCacheEnabled by remember {
+        mutableStateOf(
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getBoolean(KEY_PKG_CACHE_ENABLED, false)
+        )
+    }
 
     // ---- Pagination settings (v0.7.0) ----
-    var paginationEnabled by remember { mutableStateOf(false) }
-    var pageSize by remember { mutableStateOf(30) }
+    // v0.8.18 (review B13): same synchronous-initial-read fix as above.
+    var paginationEnabled by remember {
+        mutableStateOf(
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getBoolean(KEY_PAGINATION_ENABLED, false)
+        )
+    }
+    var pageSize by remember {
+        mutableStateOf(
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getInt(KEY_PAGE_SIZE, 30)
+        )
+    }
 
     // ---- Wallpaper packing settings (v0.7.4 — parity G5/G9) ----
     // Texture shrink: 1 = full resolution (default, previous behavior),
@@ -393,16 +414,22 @@ fun SettingsScreen(
                     },
                     onPageSizeChange = { size ->
                         pageSize = size
+                    },
+                    // v0.8.18 (review B10): the page size persists + applies on
+                    // onValueChangeFinished — the old onValueChange fired a
+                    // SharedPreferences write (and a SteamApiService call) on
+                    // EVERY drag frame.
+                    onPageSizeChangeFinished = {
                         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                            .edit().putInt(KEY_PAGE_SIZE, size).apply()
+                            .edit().putInt(KEY_PAGE_SIZE, pageSize).apply()
                         // v0.7.4: apply the new page size to the RUNNING SteamApiService
                         // so subsequent browse/search queries actually use it. Before
                         // this, the slider's value was persisted but never read by
                         // anything — every query hardcoded 30.
-                        SteamApiService.setPageSize(size)
+                        SteamApiService.setPageSize(pageSize)
                         WepWawetLogger.appInfo(
                             "settings_page_size_changed",
-                            "page_size" to size,
+                            "page_size" to pageSize,
                         )
                     },
                     // v0.9.0: the pairing toggle moved INTO Others (was its own
@@ -432,12 +459,17 @@ fun SettingsScreen(
                     videoAlignment = videoAlignment,
                     onVideoAlignmentChange = { value ->
                         videoAlignment = value
+                    },
+                    // v0.8.18 (review B10): persistence + packer application
+                    // moved to onValueChangeFinished (was: a prefs write per
+                    // drag frame).
+                    onVideoAlignmentChangeFinished = {
                         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                            .edit().putInt(KEY_VIDEO_ALIGNMENT, value).apply()
-                        com.wepwawet.pairing.MpkgPacker.videoAlignmentPosition = value
+                            .edit().putInt(KEY_VIDEO_ALIGNMENT, videoAlignment).apply()
+                        com.wepwawet.pairing.MpkgPacker.videoAlignmentPosition = videoAlignment
                         WepWawetLogger.appInfo(
                             "settings_video_alignment_changed",
-                            "value" to value,
+                            "value" to videoAlignment,
                         )
                     },
                 )
@@ -729,6 +761,7 @@ private fun OthersCard(
     pageSize: Int,
     onPaginationChange: (Boolean) -> Unit,
     onPageSizeChange: (Int) -> Unit,
+    onPageSizeChangeFinished: () -> Unit,
     pairingEnabled: Boolean,
     onPairingEnabledChange: (Boolean) -> Unit,
 ) {
@@ -796,9 +829,12 @@ private fun OthersCard(
             if (paginationEnabled) {
                 Spacer(Modifier.height(12.dp))
                 Text("Page size: $pageSize")
+                // v0.8.18 (review B10): persist via onValueChangeFinished (the
+                // drag only updates memory — no per-frame SharedPreferences writes).
                 Slider(
                     value = pageSize.toFloat(),
                     onValueChange = { onPageSizeChange(it.toInt()) },
+                    onValueChangeFinished = onPageSizeChangeFinished,
                     valueRange = 10f..100f,
                     steps = 17, // 10, 15, 20, ..., 100 (19 stops → 17 intermediate steps)
                 )
@@ -836,6 +872,7 @@ private fun WallpaperPackingCard(
     onTextureShrinkChange: (Int) -> Unit,
     videoAlignment: Int,
     onVideoAlignmentChange: (Int) -> Unit,
+    onVideoAlignmentChangeFinished: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -876,9 +913,12 @@ private fun WallpaperPackingCard(
             )
             Spacer(Modifier.height(8.dp))
             Text("Alignment: $videoAlignment")
+            // v0.8.18 (review B10): persist via onValueChangeFinished (the
+            // drag only updates memory — no per-frame SharedPreferences writes).
             Slider(
                 value = videoAlignment.toFloat(),
                 onValueChange = { onVideoAlignmentChange(it.toInt()) },
+                onValueChangeFinished = onVideoAlignmentChangeFinished,
                 valueRange = 0f..100f,
             )
         }

@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -242,7 +243,13 @@ fun WepWawetNavHost() {
                                     Icon(
                                         tab.icon,
                                         contentDescription = tab.label,
-                                        modifier = Modifier.height(20.dp),
+                                        // v0.8.18 (review B11): size(), not
+                                        // height() — a fixed height lets the
+                                        // width float to the glyph's intrinsic
+                                        // aspect and non-square icons render
+                                        // squashed. Every other Icon in the
+                                        // app already uses .size(...).
+                                        modifier = Modifier.size(20.dp),
                                         tint = if (selected) MaterialTheme.colorScheme.onSecondaryContainer
                                         else MaterialTheme.colorScheme.onSurfaceVariant,
                                     )

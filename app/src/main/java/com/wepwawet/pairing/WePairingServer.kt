@@ -334,6 +334,13 @@ class WePairingServer {
 
     fun stop() {
         running = false
+        // v0.8.18 (review B27): drain the pending transfer queue with the
+        // session. Nothing consumes it after stop (the command loop is gone),
+        // and a stale entry would send later without a fresh user action if
+        // this server object were ever reused. PairingService constructs a
+        // fresh server per start today; this makes that guarantee explicit.
+        val dropped = pendingWallpapers.size
+        pendingWallpapers.clear()
         serverSocket?.close()
         currentClient?.close()
         currentClient = null
@@ -344,7 +351,8 @@ class WePairingServer {
         // until the next phone pairs and reports its own version.
         negotiatedMpkgVersion = 0
         WepWawetLogger.proxy("Pairing server stop requested",
-            "negotiated_mpkg_version_reset" to true)
+            "negotiated_mpkg_version_reset" to true,
+            "dropped_pending_transfers" to dropped)
     }
 
     /**

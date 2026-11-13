@@ -8,9 +8,14 @@ import kotlin.math.log10
  * System-audio FFT capture for audio-responsive wallpapers, ported 1:1 from
  * the official client (`io.wallpaperengine.weutil.AudioRecorder`).
  *
- * Uses the global output mix (session 0) Visualizer — no RECORD_AUDIO
- * permission required — and downsamples the FFT to the 64-band float array
- * the engine's `sendAudioData` expects.
+ * Captures from the global output mix (session 0). Capturing from the output
+ * mix STILL requires the android.permission.RECORD_AUDIO permission (per the
+ * Android Visualizer documentation — v0.8.18/review B18: the old comment
+ * wrongly claimed no permission was needed. The app declares it in the
+ * manifest and requests it at runtime, so behavior is unchanged; this
+ * comment must not invite anyone to remove the declaration). The captured
+ * FFT is downsampled to the 64-band float array the engine's `sendAudioData`
+ * expects.
  */
 class AudioRecorder : Visualizer.OnDataCaptureListener {
 

@@ -1738,9 +1738,15 @@ object MpkgPacker {
         }
         val out = outputFile.outputStream().buffered()
         try {
+            // v0.8.18 (review B9): validate the magic BEFORE writing anything.
+            // The old order wrote the header marker + the wrong-length magic
+            // bytes first and threw only afterwards, leaving a corrupt,
+            // truncated .mpkg on disk. pack() received this exact fix in
+            // v0.7.24 (H-M1); streamPack (the path every LARGE wallpaper
+            // takes) now matches it.
+            require(magic.length == 8) { "magic must be 8 bytes: '$magic'" }
             writeLeInt(out, HEADER_MARKER)
             out.write(magic.toByteArray(Charsets.US_ASCII))
-            if (magic.length != 8) error("magic must be 8 bytes: '$magic'")
             writeLeInt(out, finalEntries.size)
 
             var cursor = 0L
@@ -2438,12 +2444,24 @@ object MpkgPacker {
 
     /**
      * Compute the cache key: SHA-256 of source .tex bytes + CONVERTER_VERSION.
+     *
+     * v0.8.18 (review B2): the pack-time settings that change the CONVERTED
+     * bytes ([textureShrinkFactor] via maybeShrinkRgba, and
+     * [forceEtc2Compression] via pcForcesEtc2) are folded into the key too.
+     * They used to be missing, so a cache entry produced at shrink=1 was
+     * served for a later pack at shrink=2 — a silently stale, wrongly-sized
+     * texture that survived until CONVERTER_VERSION changed (which it cannot,
+     * for a runtime setting).
      */
     private fun texCacheKey(texData: ByteArray): String {
         val md = java.security.MessageDigest.getInstance("SHA-256")
         md.update(texData)
         // Append converter version to invalidate cache on code changes
         md.update(byteArrayOf(CONVERTER_VERSION.toByte()))
+        // Append the pack-time settings that alter the conversion output —
+        // different settings must never share a cache entry.
+        md.update(byteArrayOf(textureShrinkFactor.coerceIn(1, 8).toByte()))
+        md.update(byteArrayOf(if (forceEtc2Compression) 1 else 0))
         return md.digest().joinToString("") { "%02x".format(it) }
     }
 

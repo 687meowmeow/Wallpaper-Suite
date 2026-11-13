@@ -94,25 +94,34 @@ fun LogsScreen(onBack: () -> Unit) {
     }
 
     fun copyLogs() {
-        val formatter = DateTimeFormatter.ofPattern("HH:mm:ss.SSS")
-            .withZone(ZoneId.systemDefault())
-        val text = events.reversed().joinToString("\n") { entry ->
-            buildString {
-                append("[${formatter.format(entry.timestamp)}] ")
-                append("[${entry.domain.tag}] ${entry.level.name}: ${entry.message}")
-                if (entry.context.isNotEmpty()) {
-                    append(" ")
-                    append(entry.context.entries.joinToString(" ") { "${it.key}=${it.value ?: "null"}" })
-                }
-                if (entry.exceptionStackTrace != null) {
-                    append("\n")
-                    append(entry.exceptionStackTrace.take(500))
+        // v0.8.18 (review B24): the text build + clipboard write moved off
+        // the click thread — formatting up to 5,000 entries synchronously in
+        // the click handler was a visible freeze. Same pattern downloadLogs
+        // already uses (Dispatchers.IO for the build, main for the toast).
+        val snapshot = events.toList()
+        scope.launch(Dispatchers.IO) {
+            val formatter = DateTimeFormatter.ofPattern("HH:mm:ss.SSS")
+                .withZone(ZoneId.systemDefault())
+            val text = snapshot.reversed().joinToString("\n") { entry ->
+                buildString {
+                    append("[${formatter.format(entry.timestamp)}] ")
+                    append("[${entry.domain.tag}] ${entry.level.name}: ${entry.message}")
+                    if (entry.context.isNotEmpty()) {
+                        append(" ")
+                        append(entry.context.entries.joinToString(" ") { "${it.key}=${it.value ?: "null"}" })
+                    }
+                    if (entry.exceptionStackTrace != null) {
+                        append("\n")
+                        append(entry.exceptionStackTrace.take(500))
+                    }
                 }
             }
+            withContext(Dispatchers.Main) {
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("WallpaperSuite Logs", text))
+                Toast.makeText(context, "Copied ${snapshot.size} log entries", Toast.LENGTH_SHORT).show()
+            }
         }
-        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("WallpaperSuite Logs", text))
-        Toast.makeText(context, "Copied ${events.size} log entries", Toast.LENGTH_SHORT).show()
     }
 
     /**

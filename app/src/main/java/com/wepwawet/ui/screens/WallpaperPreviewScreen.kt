@@ -304,8 +304,20 @@ fun WallpaperPreviewScreen(
                     val bmp = ImageFolderAssets.decodeBitmapScaled(context, wallpaper.filePath, 4096)
                         ?: return@withContext false
                     val crop = com.wepwawet.nyanpasu.NyanpasuApplier.cropForScreen(context, bmp)
+                    // v0.8.18 (review B6): respect the Discover Home/Lock
+                    // tri-state instead of always writing both screens (see
+                    // the matching LibraryScreen fix for the rationale —
+                    // default both only when the user never chose).
+                    val screens = com.wepwawet.nyanpasu.NyanpasuPrefs.readScreens(context)
+                    val noPreference =
+                        screens.first == com.wepwawet.nyanpasu.NyanpasuPrefs.SCREEN_OFF &&
+                        screens.second == com.wepwawet.nyanpasu.NyanpasuPrefs.SCREEN_OFF
+                    val homeOn = noPreference ||
+                        com.wepwawet.nyanpasu.NyanpasuPrefs.homeRequired(screens.first)
+                    val lockOn = noPreference ||
+                        com.wepwawet.nyanpasu.NyanpasuPrefs.lockRequired(screens.second)
                     com.wepwawet.nyanpasu.NyanpasuApplier.apply(
-                        context, crop, homeOn = true, lockOn = true).ok
+                        context, crop, homeOn = homeOn, lockOn = lockOn).ok
                 }
                 applied = ok
                 WepWawetLogger.engine("Preview: image applied as system wallpaper",
@@ -320,12 +332,34 @@ fun WallpaperPreviewScreen(
                 // official: applying while a playlist exists but the service
                 // is down silently converts the apply into an add
                 playlistActiveWithoutService = false
-                withContext(Dispatchers.IO) {
+                val added = withContext(Dispatchers.IO) {
+                    val before = WeEnginePrefs.readPlaylist(context).wallpapers.size
                     addWallpaperToPlaylist(context, wallpaper, false)
+                    val after = WeEnginePrefs.readPlaylist(context).wallpapers.size
+                    after > before
                 }
+                // v0.8.18 (review B5): the apply→add conversion used to be
+                // completely silent — the tap appeared to do nothing. Say
+                // what actually happened.
+                android.widget.Toast.makeText(
+                    context,
+                    if (added) "Live wallpaper is off — added to the playlist instead"
+                    else "Playlist is full (day-of-week) — could not add",
+                    android.widget.Toast.LENGTH_SHORT).show()
+                WepWawetLogger.engine("Preview: apply converted to playlist add",
+                    "added" to added)
+                return@launch
             }
             val hotReloaded = WeEnginePrefs.callApplyWallpaper(context, wallpaper, forcePicker)
-            applied = true
+            // v0.8.18 (review B3): callApplyWallpaper returns false exactly
+            // when it had to open the system picker instead of hot-reloading.
+            // The old code marked `applied = true` unconditionally, so a user
+            // who CANCELLED the picker still saw the green "applied" check.
+            // Only mark applied when our component is really the active
+            // live wallpaper (hot reload, or already-active picker-free path);
+            // a picker flow stays unconfirmed until the user actually chooses
+            // WallpaperSuite (refreshAppliedState on the next resume settles it).
+            applied = hotReloaded || WeEnginePrefs.isOurLiveWallpaperActive(context)
             if (!hotReloaded) {
                 WepWawetLogger.engine("Preview: picker shown — user must finish choosing WallpaperSuite")
             } else {
@@ -817,19 +851,26 @@ fun WallpaperPreviewScreen(
                 }
             }
             // Drag handle: drag moves the guideline, tap toggles
-            // (official 15px click threshold, 300ms toggle animation).
+            // (300ms toggle animation).
+            // v0.8.18 (review B23): the tap-vs-drag threshold is
+            // density-converted now — the old raw 15px was a very small
+            // slop on high-density screens (deliberate taps exceeded it,
+            // so the drawer dragged instead of toggling) and loose on
+            // low-density ones. Every other gesture threshold in the app
+            // already converts dp→px.
+            val tapSlopPx = with(density) { 8.dp.toPx() }
             Surface(
                 color = MaterialTheme.colorScheme.primary,
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .size(width = 72.dp, height = 40.dp)
-                    .pointerInput(screenHpx, clampedMin, clampedMax) {
+                    .pointerInput(screenHpx, clampedMin, clampedMax, tapSlopPx) {
                         var totalDrag = 0f
                         detectVerticalDragGestures(
                             onDragStart = { totalDrag = 0f },
                             onDragEnd = {
-                                if (abs(totalDrag) < 15f) {
+                                if (abs(totalDrag) < tapSlopPx) {
                                     val target = if (drawerAnim.value < 0.9f) clampedMax else 0.5f
                                     scope.launch {
                                         drawerAnim.animateTo(target, tween(300))
@@ -1051,7 +1092,9 @@ fun WallpaperPreviewScreen(
                 }.getOrNull()
                 val resolvedId = workshopUrl?.let { url ->
                     Regex("[?&]id=(\\d+)").find(url)?.groupValues?.get(1)
-                } ?: Regex("^downloads/(\\d{6,}) - ").find(wallpaper.filePath)?.groupValues?.get(1)
+                // v0.8.18 (review B14): the shared import-naming parser
+                // (was a third hand-copied regex).
+                } ?: com.wepwawet.pairing.WorkshopDownloadJob.workshopItemIdOf(wallpaper.filePath)
                 workshopId = resolvedId
                 if (resolvedId == null) {
                     WepWawetLogger.engine(

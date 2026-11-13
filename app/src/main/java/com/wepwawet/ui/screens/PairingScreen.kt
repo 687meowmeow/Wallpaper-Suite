@@ -29,7 +29,7 @@ import androidx.compose.material3.Text
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -79,7 +79,12 @@ fun PairingScreen(
     // v0.8.1: only while the pairing toggle is ON — the screen itself is
     // only reachable through pairing-enabled UI, but the guard makes the
     // "nothing pairing-related runs while disabled" invariant airtight.
-    DisposableEffect(Unit) {
+    // v0.8.18 (review B16): LaunchedEffect, not DisposableEffect — the old
+    // DisposableEffect had an EMPTY onDispose, which read as a forgotten
+    // teardown. The start() is deliberately fire-and-forget (the proxy is
+    // meant to outlive the screen — see the comment above), so there is
+    // nothing to dispose and the effect-only construct says so.
+    LaunchedEffect(Unit) {
         WepWawetLogger.lifecycle("PairingScreen appear — ensure proxy running",
             "pin" to pin)
         if (PairingService.isPairingEnabled(context)) {
@@ -87,7 +92,6 @@ fun PairingScreen(
         } else {
             WepWawetLogger.lifecycle("PairingScreen appear — pairing disabled, service not started")
         }
-        onDispose { }
     }
 
     Scaffold(

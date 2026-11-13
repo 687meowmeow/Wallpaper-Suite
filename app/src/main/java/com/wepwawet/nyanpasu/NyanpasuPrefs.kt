@@ -25,7 +25,13 @@ object NyanpasuPrefs {
     private const val KEY_STYLE = "style_value"
     private const val KEY_R18 = "r18_mode"
     private const val KEY_SCHEDULE = "schedule_mode"
+    // v0.8.18 (review B20): recent URLs — ordered JSON array under
+    // KEY_RECENT_URLS; KEY_RECENT_URLS_SET is the legacy StringSet form,
+    // migrated on first read (see readRecentUrlsList).
     private const val KEY_RECENT_URLS = "recent_urls"
+    private const val KEY_RECENT_URLS_SET = "recent_urls_set"
+    /** Max remembered recent URLs (v1.0.0's cap). */
+    private const val RECENT_URLS_LIMIT = 10
     // v0.8.18: which booru sources Discover searches ("add the ability to
     // choose the booru sources for the discover page").
     private const val KEY_SOURCES = "booru_sources"
@@ -200,18 +206,52 @@ object NyanpasuPrefs {
      * Recent image URLs (dedup so Refresh doesn't repeat the same picture
      * back to back — v1.0.0's Tier dedup, kept as a soft preference, NOT a
      * hard gate: the ladder still falls through to untagged results).
+     *
+     * v0.8.18 (review B20): stored as an ORDERED JSON array, newest last.
+     * The old StringSet storage had unspecified iteration order, so the
+     * eviction (`remove(first())`) dropped an ARBITRARY member — not
+     * necessarily the oldest — and the dedup could forget the newest URL
+     * (the one the next Refresh most needs to avoid repeating). The
+     * StringSet is migrated to the ordered form on first read.
      */
     fun readRecentUrls(context: Context): Set<String> =
-        prefs(context).getStringSet(KEY_RECENT_URLS, emptySet()) ?: emptySet()
+        readRecentUrlsList(context).toSet()
 
-    fun pushRecentUrl(context: Context, url: String) {
-        val current = readRecentUrls(context).toMutableSet()
-        current.add(url)
-        // Keep the newest 10.
-        while (current.size > 10) {
-            current.remove(current.first())
+    /** The ordered recent-URL list (oldest first, newest last). */
+    fun readRecentUrlsList(context: Context): List<String> {
+        val p = prefs(context)
+        val raw = p.getString(KEY_RECENT_URLS, null)
+        if (raw != null) {
+            // New ordered form.
+            return try {
+                org.json.JSONArray(raw).let { arr ->
+                    List(arr.length()) { i -> arr.optString(i) }
+                        .filter { it.isNotEmpty() }
+                }
+            } catch (t: Throwable) {
+                emptyList()
+            }
         }
-        prefs(context).edit().putStringSet(KEY_RECENT_URLS, current).apply()
+        // v0.8.18: one-time migration from the legacy StringSet — the
+        // insertion order is lost, but every retained URL still dedups.
+        val legacy = p.getStringSet(KEY_RECENT_URLS_SET, null) ?: return emptyList()
+        val list = legacy.filter { it.isNotEmpty() }.sorted().take(RECENT_URLS_LIMIT)
+        p.edit()
+            .putString(KEY_RECENT_URLS, org.json.JSONArray(list).toString())
+            .remove(KEY_RECENT_URLS_SET)
+            .apply()
+        return list
+    }
+
+    /** Remember [url] as the most recent (dedup, newest-last, capped). */
+    fun pushRecentUrl(context: Context, url: String) {
+        val list = readRecentUrlsList(context).toMutableList()
+        list.remove(url)
+        list.add(url)
+        while (list.size > RECENT_URLS_LIMIT) list.removeAt(0)
+        prefs(context).edit()
+            .putString(KEY_RECENT_URLS, org.json.JSONArray(list).toString())
+            .apply()
     }
 
     // ── Preload queue (v0.8.16 — replaces the single v1.0.0 prefetch) ──

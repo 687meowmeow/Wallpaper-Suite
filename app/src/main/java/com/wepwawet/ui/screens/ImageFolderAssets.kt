@@ -3,11 +3,7 @@ package com.wepwawet.ui.screens
 import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
-import com.wepwawet.data.model.WorkshopItem
-import com.wepwawet.data.model.WallpaperType
-import com.wepwawet.engine.EngineLibrary
 import com.wepwawet.log.WepWawetLogger
-import io.wallpaperengine.weutil.WallpaperInfoSparse
 import java.io.File
 
 /**
@@ -472,6 +468,11 @@ object ImageFolderAssets {
      * with NOW, and the full uri→addedAt map is returned. Images that
      * were already known keep their original first-seen time, so the
      * one-time registration on update does not reshuffle them later.
+     *
+     * v0.8.18 (review B19): entries whose uri is NOT in [entries] are
+     * pruned in the same pass. The registry used to grow monotonically —
+     * deleted/renamed images and removed folders left dead `added|<uri>`
+     * entries in the prefs file forever.
      */
     fun registerAddedDates(context: Context, entries: List<ImageEntry>): Map<String, Long> {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -479,6 +480,7 @@ object ImageFolderAssets {
         val map = HashMap<String, Long>(entries.size)
         var registered = 0
         val editor by lazy { prefs.edit() }
+        val liveKeys = entries.mapTo(HashSet(entries.size)) { KEY_ADDED_PREFIX + it.uri }
         for (entry in entries) {
             val key = KEY_ADDED_PREFIX + entry.uri
             val existing = prefs.getLong(key, -1L)
@@ -490,112 +492,32 @@ object ImageFolderAssets {
                 registered++
             }
         }
-        if (registered > 0) {
+        // v0.8.18 (review B19): prune dead entries — registry keys for
+        // images that are no longer in any enumerated folder.
+        var pruned = 0
+        for (key in prefs.all.keys) {
+            if (key.startsWith(KEY_ADDED_PREFIX) && key !in liveKeys) {
+                editor.remove(key)
+                pruned++
+            }
+        }
+        if (registered > 0 || pruned > 0) {
             editor.apply()
-            WepWawetLogger.appInfo("ImageFolderAssets: added-dates registered",
-                "new" to registered)
+            WepWawetLogger.appInfo("ImageFolderAssets: added-dates registry updated",
+                "new" to registered,
+                "pruned" to pruned)
         }
         return map
     }
 
     // ── Pack + import ────────────────────────────────────────────────
-
-    /**
-     * Pack a SAF image into the engine library: copy to cache →
-     * packSceneWallpaper → import into filesDir/downloads → return the
-     * WallpaperInfoSparse for the caller to apply.
-     *
-     * IDEMPOTENT — the itemId is a stable hash of the image's document
-     * uri + last-modified, and the last import is remembered in prefs.
-     * Setting the same image again reuses (or overwrites) the SAME
-     * library entry instead of stacking duplicate .mpkg files.
-     */
-    fun packAndImportImage(context: Context, entry: ImageEntry): WallpaperInfoSparse? {
-        return try {
-            val title = entry.displayName.substringBeforeLast('.').take(40).ifEmpty { "image" }
-            val stableKey = (entry.uri + "|" + entry.lastModified).hashCode().toLong() and 0xFFFFFFFFL
-            val itemId = "img_$stableKey"
-
-            // Reuse path: the same image was imported before and its library
-            // file is still on disk — just hand back that entry.
-            val remembered = rememberedImport(context, entry)
-            if (remembered != null) {
-                val existing = File(context.filesDir, remembered)
-                if (existing.exists() && existing.length() > 0L) {
-                    WepWawetLogger.appInfo("ImageFolderAssets: reusing packed import",
-                        "file" to remembered)
-                    return WallpaperInfoSparse().apply {
-                        this.title = title
-                        this.filePath = remembered
-                        this.type = "Scene"
-                        this.lastModifiedDate = existing.lastModified()
-                    }
-                }
-            }
-
-            val cacheFile = File(context.cacheDir, "image_folder_${itemId}")
-            context.contentResolver.openInputStream(Uri.parse(entry.uri))?.use { input ->
-                cacheFile.outputStream().use { output -> input.copyTo(output) }
-            } ?: return null
-
-            val mpkgFile = File(context.cacheDir, "${itemId}_pack.mpkg")
-            val size = com.wepwawet.pairing.MpkgPacker.packSceneWallpaper(
-                item = com.wepwawet.data.model.WorkshopItemTyped(
-                    item = WorkshopItem(publishedfileid = itemId, title = title),
-                    type = WallpaperType.SCENE,
-                ),
-                imageFile = cacheFile,
-                outputFile = mpkgFile,
-            )
-            runCatching { cacheFile.delete() }
-            if (size <= 0L || !mpkgFile.exists()) {
-                WepWawetLogger.appWarn("ImageFolderAssets: pack failed",
-                    "entry" to entry.displayName)
-                return null
-            }
-
-            // Import into the library (same layout as workshop downloads).
-            // The stable itemId makes a re-import overwrite the same file.
-            val sanitized = title.replace(Regex("[^\\w \\-()]", RegexOption.IGNORE_CASE), "")
-                .trim().take(40).ifEmpty { "image" }
-            val target = File(context.filesDir, "downloads/$itemId - $sanitized.mpkg")
-            target.parentFile?.mkdirs()
-            mpkgFile.copyTo(target, overwrite = true)
-            runCatching { mpkgFile.delete() }
-            if (!EngineLibrary.sceneLib(context).isWallpaperVersionValid("downloads/${target.name}")) {
-                WepWawetLogger.appWarn("ImageFolderAssets: engine rejected the packed image",
-                    "file" to target.name)
-                target.delete()
-                return null
-            }
-            rememberImport(context, entry, "downloads/${target.name}")
-            WepWawetLogger.appInfo("ImageFolderAssets: image packed + imported",
-                "file" to target.name,
-                "size" to target.length())
-            WallpaperInfoSparse().apply {
-                this.title = title
-                this.filePath = "downloads/${target.name}"
-                this.type = "Scene"
-                this.lastModifiedDate = System.currentTimeMillis()
-            }
-        } catch (t: Throwable) {
-            WepWawetLogger.appError("ImageFolderAssets: packAndImport failed",
-                "exception" to t.javaClass.name,
-                "message" to (t.message ?: ""))
-            null
-        }
-    }
-
-    /** The prefs map key for an image's remembered import. */
-    private fun importKey(entry: ImageEntry): String =
-        (entry.uri + "|" + entry.lastModified).hashCode().toString(16)
-
-    private fun rememberedImport(context: Context, entry: ImageEntry): String? =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_IMPORTS + ":" + importKey(entry), null)
-
-    private fun rememberImport(context: Context, entry: ImageEntry, libraryPath: String) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putString(KEY_IMPORTS + ":" + importKey(entry), libraryPath).apply()
-    }
+    // v0.8.18 (review B26): packAndImportImage + its importKey /
+    // rememberedImport / rememberImport helpers were DELETED — dead code
+    // since v0.8.14 (folder images take the plain system-wallpaper path;
+    // "basic images shouldn't use the wallpaper engine renderer"). Zero
+    // callers existed at deletion time (verified by grep). The 90-line
+    // pipeline encoded stale assumptions about the .tex packer that no
+    // longer hold. KEY_IMPORTS stays declared above: any legacy
+    // "imported_images" prefs entries from old installs are simply never
+    // read again (harmless residue, like the legacy single-folder key).
 }

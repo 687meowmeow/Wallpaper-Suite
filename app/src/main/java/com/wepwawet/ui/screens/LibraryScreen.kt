@@ -106,6 +106,8 @@ import com.wepwawet.ui.components.SlimTopBarIcon
 import io.wallpaperengine.weclient.WeEnginePrefs
 import io.wallpaperengine.weutil.WallpaperInfoSparse
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -240,6 +242,28 @@ fun LibraryScreen(
     fun addedDateOf(w: WallpaperInfoSparse): Long =
         addedDatesDownloads[workshopItemIdOf(w.filePath)] ?: w.lastModifiedDate
 
+    /**
+     * v0.8.18 (review B12): cheap, synchronous refresh of every
+     * prefs-derived slice (pins, groups, group assignments, crop overrides,
+     * download dates). This is all a pin/group/rename mutation invalidates —
+     * the old single reload() hammer re-enumerated the engine library AND
+     * every folder's images (hundreds of content-resolver queries) for each
+     * of those one-tap actions, costing seconds with several folders.
+     */
+    fun refreshPrefs() {
+        scope.launch {
+            pinned = LibraryPrefs.readPinned(context)
+            groups = LibraryPrefs.readGroups(context)
+            groupOf = LibraryPrefs.readGroupOf(context)
+            // v0.8.16: edited images resolve to their cropped copies.
+            cropOverrides = withContext(Dispatchers.IO) {
+                ImageCropStore.read(context).mapValues { it.value.cropFilePath }
+            }
+            addedDatesDownloads = com.wepwawet.data.DownloadManager
+                .completedDownloads.value.associate { it.itemId to it.completedAt }
+        }
+    }
+
     fun reload() {
         scope.launch {
             loading = true
@@ -274,6 +298,24 @@ fun LibraryScreen(
         }
     }
 
+    /** The in-flight debounced full reload (see scheduleReload). */
+    var enumerateJob by remember { mutableStateOf<Job?>(null) }
+
+    /**
+     * v0.8.18 (review B12): debounced full re-enumeration for events that
+     * actually change disk contents (import, delete, folder add/remove).
+     * A 250 ms debounce coalesces bursts — e.g. a multi-file import fires
+     * one reload instead of one per file. Declared after reload() (Kotlin
+     * local functions must be declared before use at the call site).
+     */
+    fun scheduleReload() {
+        enumerateJob?.cancel()
+        enumerateJob = scope.launch {
+            delay(250)
+            reload()
+        }
+    }
+
     // v0.8.12: the folder picker — adds a folder (persistable read+write
     // grant kept so Discover's "Save to folder" can write into it later).
     val folderPicker = rememberLauncherForActivityResult(
@@ -285,7 +327,7 @@ fun LibraryScreen(
             activeFolder = uri.toString()
             WepWawetLogger.appInfo("LibraryScreen: folder picked",
                 "uri" to uri.toString().take(120))
-            reload()
+            scheduleReload()
         }
     }
 
@@ -305,7 +347,9 @@ fun LibraryScreen(
                     val (copied, failed) = withContext(Dispatchers.IO) {
                         ImageFolderAssets.importImagesToFolder(context, target, uris)
                     }
-                    reload()
+                    // v0.8.18 (review B12): debounced — the import wrote
+                    // new disk contents; the enumeration follows shortly.
+                    scheduleReload()
                     snackbar.showSnackbar(
                         if (failed == 0 && copied > 0)
                             "Added $copied image${if (copied == 1) "" else "s"} to folder"
@@ -389,8 +433,22 @@ fun LibraryScreen(
                             }
                         }
                     val crop = com.wepwawet.nyanpasu.NyanpasuApplier.cropForScreen(context, bmp)
+                    // v0.8.18 (review B6): the Discover tab's Home/Lock
+                    // tri-state is the app-wide model of which screens the
+                    // user wants this app to manage. The old unconditional
+                    // home+lock apply silently overwrote a lock screen the
+                    // user had excluded in Discover. Default to both only
+                    // when the user has never expressed a preference (both
+                    // off), matching NyanpasuPrefs' own legacy defaults.
+                    val screens = com.wepwawet.nyanpasu.NyanpasuPrefs.readScreens(context)
+                    val noPreference = screens.first == com.wepwawet.nyanpasu.NyanpasuPrefs.SCREEN_OFF &&
+                        screens.second == com.wepwawet.nyanpasu.NyanpasuPrefs.SCREEN_OFF
+                    val homeOn = noPreference ||
+                        com.wepwawet.nyanpasu.NyanpasuPrefs.homeRequired(screens.first)
+                    val lockOn = noPreference ||
+                        com.wepwawet.nyanpasu.NyanpasuPrefs.lockRequired(screens.second)
                     com.wepwawet.nyanpasu.NyanpasuApplier.apply(
-                        context, crop, homeOn = true, lockOn = true).ok
+                        context, crop, homeOn = homeOn, lockOn = lockOn).ok
                 }
                 snackbar.showSnackbar(
                     if (ok) "Wallpaper set — \"${entry.displayName.substringBeforeLast('.')}\""
@@ -431,7 +489,7 @@ fun LibraryScreen(
                 WepWawetLogger.appInfo("LibraryScreen: image renamed",
                     "from" to entry.displayName, "to" to target)
                 selectedImage = null
-                reload()
+                scheduleReload()
             }
             snackbar.showSnackbar(if (ok) "Renamed to $target" else "Rename failed")
         }
@@ -481,7 +539,7 @@ fun LibraryScreen(
             } else {
                 EngineLibrary.importMpkgStream(context, staged, displayName)
             }
-            reload()
+            scheduleReload()
             when (result) {
                 is EngineLibrary.ImportResult.Success ->
                     onOpenWallpaper(result.wallpaper)
@@ -531,7 +589,7 @@ fun LibraryScreen(
                         failure = "${result.name}: ${result.reason}"
                 }
             }
-            reload()
+            scheduleReload()
             if (failure != null) {
                 snackbar.showSnackbar("Import failed — $failure")
             } else if (firstImported != null) {
@@ -700,6 +758,8 @@ fun LibraryScreen(
                                             "exception" to t.javaClass.name)
                                     }
                                 } else {
+                                    // v0.8.18 (v19 round): the top-bar "+"
+                                    // opens the choose/create/import menu.
                                     plusMenuForImport = true
                                     showPlusMenu = true
                                 }
@@ -957,7 +1017,21 @@ fun LibraryScreen(
                         )
                         Spacer(Modifier.height(16.dp))
                         OutlinedButton(onClick = {
-                            try { folderPicker.launch(null) } catch (_: Throwable) {}
+                            // v0.8.18 (review B15): the old empty catch
+                            // swallowed picker-launch failures completely —
+                            // the button just did nothing on OEMs whose
+                            // folder picker is unavailable. Log it and tell
+                            // the user, like every other picker launch does.
+                            try {
+                                folderPicker.launch(null)
+                            } catch (t: Throwable) {
+                                WepWawetLogger.appWarn("LibraryScreen: folder picker failed to launch",
+                                    "exception" to t.javaClass.name,
+                                    "message" to (t.message ?: ""))
+                                scope.launch {
+                                    snackbar.showSnackbar("Couldn't open the folder picker")
+                                }
+                            }
                         }) {
                             Text("Add another folder")
                         }
@@ -1070,7 +1144,9 @@ fun LibraryScreen(
                         withContext(Dispatchers.IO) {
                             LibraryPrefs.setPinned(context, newPath, !isPinned)
                         }
-                        pinned = LibraryPrefs.readPinned(context)
+                        // v0.8.18 (review B12): prefs-only refresh — no full
+                        // re-enumeration for a pin toggle.
+                        refreshPrefs()
                         contextMenuFor = null
                     }
                 }
@@ -1144,7 +1220,9 @@ fun LibraryScreen(
                         withContext(Dispatchers.IO) {
                             LibraryPrefs.setPinned(context, entry.uri, !imagePinned)
                         }
-                        pinned = LibraryPrefs.readPinned(context)
+                        // v0.8.18 (review B12): prefs-only refresh — no full
+                        // re-enumeration for a pin toggle.
+                        refreshPrefs()
                         imageMenuFor = null
                     }
                 }
@@ -1253,7 +1331,7 @@ fun LibraryScreen(
                             snackbar.showSnackbar(if (ok) "Deleted" else "Delete failed (see logs)")
                             if (ok) WepWawetLogger.appInfo("LibraryScreen: image deleted",
                                 "file" to victim.displayName)
-                            reload()
+                            scheduleReload()
                         }
                     },
                 ) { Text("Delete", color = MaterialTheme.colorScheme.error) }
@@ -1319,7 +1397,7 @@ fun LibraryScreen(
                                     .removeEntryEverywhere(context, victim.filePath)
                             }
                             pendingDelete = null
-                            reload()
+                            scheduleReload()
                         }
                     }
                 ) { Text("Remove") }
@@ -1492,6 +1570,8 @@ fun LibraryScreen(
 
     // ===== Remove-folder dialog (long-press a folder chip) =====
     removeFolderTarget?.let { folder ->
+        // v0.8.18 (v19 round): the built-in Suite folder is retired, so
+        // every removable chip here is a plain user folder.
         AlertDialog(
             onDismissRequest = { removeFolderTarget = null },
             title = { Text("Remove folder?") },
@@ -1505,7 +1585,9 @@ fun LibraryScreen(
                         ImageFolderAssets.removeFolder(context, folder.treeUri)
                         if (activeFolder == folder.treeUri) activeFolder = null
                         removeFolderTarget = null
-                        reload()
+                        // v0.8.18 (review B12): debounced — the removal
+                        // changed disk-visible folder state.
+                        scheduleReload()
                     },
                 ) { Text("Remove") }
             },
@@ -1546,8 +1628,15 @@ fun LibraryScreen(
                                 ),
                                 allowMultiple = true))
                     } catch (t: Throwable) {
+                        // v0.8.18 (review B15): surface the failure — the
+                        // old empty-style catch left the menu silently
+                        // doing nothing on OEM picker failures.
                         WepWawetLogger.appWarn("LibraryScreen: import picker failed",
-                            "exception" to t.javaClass.name)
+                            "exception" to t.javaClass.name,
+                            "message" to (t.message ?: ""))
+                        scope.launch {
+                            snackbar.showSnackbar("Couldn't open the file picker")
+                        }
                     }
                 }
             } else null,
@@ -1565,7 +1654,8 @@ fun LibraryScreen(
                 activeFolder = dirUri
                 WepWawetLogger.appInfo("LibraryScreen: folder created",
                     "uri" to dirUri.takeLast(48))
-                reload()
+                // v0.8.18 (review B12): debounced reload (disk state changed).
+                scheduleReload()
             },
         )
     }
@@ -1876,9 +1966,14 @@ private fun libraryItemComparator(sortMethod: SortMethod): Comparator<LibraryIte
     }
 }
 
-/** "downloads/3767714202 - name.mpkg" → "3767714202" (workshop items only). */
+/**
+ * v0.8.18 (review B14): delegates to the ONE shared parser —
+ * WorkshopDownloadJob.workshopItemIdOf (the object that owns the import
+ * naming convention). The old private copy of the same regex could drift
+ * from the convention without anything noticing.
+ */
 private fun workshopItemIdOf(filePath: String): String? =
-    Regex("^downloads/(\\d{6,}) - ").find(filePath)?.groupValues?.get(1)
+    com.wepwawet.pairing.WorkshopDownloadJob.workshopItemIdOf(filePath)
 
 /** The official SortMethod enum with its display labels. */
 private enum class SortMethod(val label: String) {

@@ -766,7 +766,14 @@ private fun lockedCornerRect(
     return Rect(left, top, left + w, top + h)
 }
 
-/** Write the cropped JPEG + record it (and re-point playlists). */
+/**
+ * Write the cropped image + record it (and re-point playlists).
+ *
+ * v0.8.18 (review B17): the output format follows the SOURCE — a bitmap
+ * with transparency (PNG/WebP sources) is saved as PNG so transparent
+ * regions survive; everything else stays JPEG. The old unconditional JPEG
+ * turned every transparent pixel solid black.
+ */
 private suspend fun saveCrop(
     context: android.content.Context,
     imageUri: String,
@@ -784,11 +791,15 @@ private suspend fun saveCrop(
             val h = b - t
             if (w < 8 || h < 8) throw IllegalArgumentException("crop too small: ${w}x${h}")
             val cropped = Bitmap.createBitmap(bmp, l, t, w, h)
+            val hasAlpha = cropped.hasAlpha()
             val outFile = File(
                 ImageCropStore.cropDir(context),
-                "${abs(imageUri.hashCode())}.jpg")
+                "${abs(imageUri.hashCode())}.${if (hasAlpha) "png" else "jpg"}")
             java.io.FileOutputStream(outFile).use { out ->
-                cropped.compress(Bitmap.CompressFormat.JPEG, 92, out)
+                cropped.compress(
+                    if (hasAlpha) Bitmap.CompressFormat.PNG
+                    else Bitmap.CompressFormat.JPEG,
+                    92, out)
             }
             ImageCropStore.save(
                 context, imageUri,
@@ -801,6 +812,7 @@ private suspend fun saveCrop(
             }
             WepWawetLogger.appInfo("ImageEditor: crop saved",
                 "out" to "${w}x${h}",
+                "format" to (if (hasAlpha) "png" else "jpg"),
                 "file" to outFile.name)
         }.onFailure {
             WepWawetLogger.appWarn("ImageEditor: crop save failed",

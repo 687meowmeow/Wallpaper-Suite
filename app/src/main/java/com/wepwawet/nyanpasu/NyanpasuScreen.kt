@@ -232,6 +232,14 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
      * v0.8.16: background refill of the preload queue — keeps 3 images
      * downloaded at all times so Refresh swaps INSTANTLY. Single-flight
      * (a refill already running is never doubled up).
+     *
+     * v0.8.18 (review B8): the single-flight flag is a remembered
+     * AtomicBoolean, NOT a plain local `var`. The old local was recreated
+     * by every recomposition, so a recomposition while a refill was in
+     * flight (routine — the preview/status state changes during the loop)
+     * produced a fresh `refilling = false` closure and a SECOND concurrent
+     * refill loop could start (double booru requests, wasted bandwidth).
+     * `remember` shares one flag across all recompositions.
      */
     /**
      * The CURRENT search parameters, as a queue signature. v0.8.18 — THE
@@ -243,10 +251,9 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
     fun currentSignature() = NyanpasuPrefs.searchSignature(
         strictTags, softTags, styleValue, r18Mode, sources)
 
-    var refilling = false
+    val refilling = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
     fun refillQueue() {
-        if (refilling) return
-        refilling = true
+        if (!refilling.compareAndSet(false, true)) return
         scope.launch {
             try {
                 val signature = currentSignature()
@@ -276,7 +283,7 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
                         "depth" to NyanpasuPrefs.queueDepth(context, signature))
                 }
             } finally {
-                refilling = false
+                refilling.set(false)
             }
         }
     }
@@ -881,10 +888,15 @@ fun NyanpasuScreen(onBack: (() -> Unit)? = null) {
 
             // ===== Style =====
             Text("Style", style = MaterialTheme.typography.titleMedium)
+            // v0.8.18 (review B10): persistence moved to onValueChangeFinished —
+            // the old onValueChange write hit SharedPreferences on EVERY drag
+            // frame (dozens of disk writes + a log line per gesture). The
+            // drag itself now updates memory only, like PlaylistEditorScreen's
+            // interval slider and the engine FPS slider already do.
             Slider(
                 value = styleValue.toFloat(),
-                onValueChange = {
-                    styleValue = it.toInt()
+                onValueChange = { styleValue = it.toInt() },
+                onValueChangeFinished = {
                     NyanpasuPrefs.writeStyle(context, styleValue)
                 },
                 valueRange = 0f..100f,
@@ -1312,13 +1324,22 @@ private fun TagEditor(
 private fun HistoryThumb(entry: NyanpasuApplier.HistoryEntry) {
     // Light-weight decode: subsample to ~128 px for the strip.
     // No border (user request).
-    val bmp = remember(entry.file.absolutePath) {
-        val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = 16 }
-        android.graphics.BitmapFactory.decodeFile(entry.file.absolutePath, opts)
+    // v0.8.18 (review B22): the decode moved OFF the composition thread —
+    // the old `remember { decodeFile(...) }` ran BitmapFactory on the main
+    // thread during composition (composition-time IO). The thumbnail loads
+    // asynchronously now; the placeholder shows until it arrives.
+    var bmp by remember(entry.file.absolutePath) {
+        mutableStateOf<android.graphics.Bitmap?>(null)
+    }
+    LaunchedEffect(entry.file.absolutePath) {
+        bmp = withContext(Dispatchers.IO) {
+            val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = 16 }
+            android.graphics.BitmapFactory.decodeFile(entry.file.absolutePath, opts)
+        }
     }
     if (bmp != null) {
         Image(
-            bitmap = bmp.asImageBitmap(),
+            bitmap = bmp!!.asImageBitmap(),
             contentDescription = "Restore ${entry.timestamp}",
             contentScale = ContentScale.Crop,
             modifier = Modifier

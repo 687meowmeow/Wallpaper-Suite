@@ -898,16 +898,22 @@ fun VideoTrimScreen(
                                         // v0.7.23 BUG VT-2: check if cancelled after pack
                                         if (!isActive) return@withContext
                                         trimStatus = "Queuing for transfer…"
-                                        PairingService.queueWallpaper(mpkgFile, itemTitle)
+                                        // v0.8.18 (review B1): queueWallpaper
+                                        // returns whether the file was really
+                                        // queued — on a false the send FAILED
+                                        // (no live server), so surface it and
+                                        // keep the source video.
+                                        val queued = PairingService.queueWallpaper(mpkgFile, itemTitle)
+                                        if (!queued) {
+                                            trimStatus = "Send failed — pairing server not running. The .mpkg was kept; reconnect the phone and try again."
+                                            return@withContext
+                                        }
                                         PairingService.launchWallpaperEngineApp(context)
                                         runCatching { trimmedFile.delete() }
-                                        // v0.7.23 BUG VT-3: only delete source video if
-                                        // queueWallpaper succeeded (server is running).
-                                        // We can't check queueWallpaper's return, but we
-                                        // can check PairingService.isPaired().
-                                        if (PairingService.isPaired() || PairingService.pairingServer != null) {
-                                            runCatching { videoFile.delete() }
-                                        }
+                                        // v0.7.23 BUG VT-3 / v0.8.18 (review B1):
+                                        // the source video is only deleted after
+                                        // a confirmed queue — provably safe now.
+                                        runCatching { videoFile.delete() }
                                         runCatching { installDir.deleteRecursively() }
                                         com.wepwawet.pairing.WorkshopDownloadJob.onVideoConsumedByTrimScreen(itemId)
                                         WepWawetLogger.workshop("VideoTrimScreen: trim + send complete",
@@ -989,12 +995,19 @@ fun VideoTrimScreen(
                                         // v0.7.23 BUG VT-2: check if cancelled after pack
                                         if (!isActive) return@withContext
                                         trimStatus = "Queuing for transfer…"
-                                        PairingService.queueWallpaper(mpkgFile, itemTitle)
-                                        PairingService.launchWallpaperEngineApp(context)
-                                        // v0.7.23 BUG VT-3: only delete source video if paired.
-                                        if (PairingService.isPaired() || PairingService.pairingServer != null) {
-                                            runCatching { videoFile.delete() }
+                                        // v0.8.18 (review B1): check the queue result —
+                                        // a false means no live server; the send FAILED,
+                                        // so report it and keep the source video.
+                                        val queued = PairingService.queueWallpaper(mpkgFile, itemTitle)
+                                        if (!queued) {
+                                            trimStatus = "Send failed — pairing server not running. The .mpkg was kept; reconnect the phone and try again."
+                                            return@withContext
                                         }
+                                        PairingService.launchWallpaperEngineApp(context)
+                                        // v0.7.23 BUG VT-3 / v0.8.18 (review B1):
+                                        // only delete the source video after a confirmed
+                                        // queue.
+                                        runCatching { videoFile.delete() }
                                         runCatching { installDir.deleteRecursively() }
                                         com.wepwawet.pairing.WorkshopDownloadJob.onVideoConsumedByTrimScreen(itemId)
                                         success = true
