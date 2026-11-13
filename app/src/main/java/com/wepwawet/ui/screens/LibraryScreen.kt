@@ -9,11 +9,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
-import androidx.compose.ui.input.pointer.positionChangedIgnoreConsumed
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -43,6 +40,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BrokenImage
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
@@ -111,7 +109,6 @@ import com.wepwawet.ui.components.SlimTopBarIcon
 import io.wallpaperengine.weclient.WeEnginePrefs
 import io.wallpaperengine.weutil.WallpaperInfoSparse
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -234,9 +231,11 @@ fun LibraryScreen(
     // make one") and the shared create-folder flow.
     var showPlusMenu by remember { mutableStateOf(false) }
     var plusMenuForImport by remember { mutableStateOf(false) }
-    // v0.8.20: the "＋" dropdown's Make-a-group flow — a name dialog, then
-    // the group is created (empty groups ARE valid: wallpapers are assigned
-    // to a group from each wallpaper's own menu).
+    // v0.8.21: the "＋" chip's own dropdown (Make group / Add image
+    // folder); the folder dialog itself stays for the existing-or-create
+    // choice. Making a group is a name dialog — empty groups ARE valid
+    // (wallpapers are assigned from each wallpaper's own menu).
+    var showPlusDropdown by remember { mutableStateOf(false) }
     var showMakeGroup by remember { mutableStateOf(false) }
     var showCreateFolder by remember { mutableStateOf(false) }
     // The folder image whose fullscreen preview dialog is open.
@@ -938,97 +937,86 @@ fun LibraryScreen(
                             animatedActive = false
                             activeGroup = if (activeGroup == group) null else group
                         },
-                        // v0.8.20 (unified hold): ONE hold gesture, two
+                        // v0.8.21 (unified hold): ONE hold gesture, two
                         // outcomes — "you should be able to hold and a group
                         // chip and drag it and be able to hold and have the
-                        // option to delete it". A raw awaitEachGesture
-                        // watches the pointer after the long-press timeout:
-                        // dragging beyond the touch slop reorders the chip;
-                        // releasing WITHOUT dragging opens the rename/delete
-                        // menu. The old two-detector stack made hold-still
-                        // (menu) fight hold-drag (reorder).
+                        // option to delete it". detectDragGesturesAfterLongPress
+                        // fires onDragStart the MOMENT the long press is
+                        // detected (movement optional): keep holding and DRAG
+                        // to reorder the chip; hold STILL and release to open
+                        // the rename/delete menu; a quick TAP never reaches
+                        // this detector at all (the chip's own onClick filters
+                        // the group). The v0.8.20 hand-rolled awaitEachGesture
+                        // mixed the event clock (uptimeMillis) with the wall
+                        // clock (System.currentTimeMillis) — its timeout
+                        // computed as already-elapsed, so EVERY touch entered
+                        // "hold" mode instantly: taps opened the menu instead
+                        // of filtering, and its per-event step math never
+                        // crossed a chip width, so dragging did nothing.
                         modifier = Modifier
                             .pointerInput(group, groups.size) {
-                                awaitEachGesture {
-                                    val down = awaitFirstDown(requireUnconsumed = false)
-                                    var dragged = false
-                                    var released = false
-                                    // Wait past the long-press timeout...
-                                    val longPressTimeout = viewConfiguration.longPressTimeoutMillis
-                                    val slop = viewConfiguration.touchSlop
-                                    while (true) {
-                                        val remaining = (down.uptimeMillis + longPressTimeout) -
-                                            System.currentTimeMillis()
-                                        val event = withTimeoutOrNull(remaining.coerceAtLeast(0L)) {
-                                            awaitPointerEvent()
-                                        } ?: break // timeout elapsed — it's a HOLD
-                                        val change = event.changes.firstOrNull() ?: continue
-                                        if (change.changedToUpIgnoreConsumed()) {
-                                            released = true
-                                            break
-                                        }
-                                        // Moved before the timeout: a plain
-                                        // tap or a scroll — not ours. The
-                                        // chip's own onClick handles taps.
-                                        if (change.positionChangedIgnoreConsumed()) {
-                                            val dx = change.position.x - change.previousPosition.x
-                                            val dy = change.position.y - change.previousPosition.y
-                                            if (kotlin.math.hypot(dx, dy) > slop) {
-                                                return@awaitEachGesture
-                                            }
-                                        }
-                                    }
-                                    if (released) return@awaitEachGesture
-                                    // ── It's a HOLD. Drag = reorder,
-                                    // release-without-drag = the menu. ──
-                                    dragGroupName = group
-                                    dragGroupIndex = groups.indexOf(group)
-                                    while (true) {
-                                        val event = awaitPointerEvent()
-                                        val change = event.changes.firstOrNull() ?: continue
-                                        if (change.changedToUpIgnoreConsumed()) {
-                                            break
-                                        }
-                                        if (change.positionChangedIgnoreConsumed()) {
-                                            change.consume()
+                                var startIndex = -1
+                                var totalDragPx = 0f
+                                var dragged = false
+                                val menuSlop = viewConfiguration.touchSlop
+                                detectDragGesturesAfterLongPress(
+                                    onDragStart = {
+                                        // The long press just registered.
+                                        startIndex = groups.indexOf(group)
+                                        totalDragPx = 0f
+                                        dragged = false
+                                        dragGroupName = group
+                                        dragGroupIndex = startIndex
+                                    },
+                                    onDrag = { change, dragAmount ->
+                                        change.consume()
+                                        totalDragPx += dragAmount.x
+                                        if (kotlin.math.abs(totalDragPx) > menuSlop) {
                                             dragged = true
-                                            // Step across chips: one chip width
-                                            // per crossing (per-event delta).
-                                            val w = size.width.toFloat()
-                                            if (w > 0f && groups.size > 1) {
-                                                val dx = change.position.x -
-                                                    change.previousPosition.x
-                                                val cur = groups.indexOf(group)
-                                                val steps = (dx / w).toInt()
-                                                if (steps != 0 && cur >= 0) {
-                                                    val target =
-                                                        (cur + steps).coerceIn(0, groups.size - 1)
-                                                    if (target != cur) {
-                                                        val moved = groups.toMutableList()
-                                                        moved.removeAt(cur)
-                                                        moved.add(target, group)
-                                                        groups = moved
-                                                        dragGroupIndex = target
-                                                    }
-                                                }
+                                        }
+                                        // Total horizontal travel maps to the
+                                        // target slot: one chip width per
+                                        // crossing, measured from the START
+                                        // index (per-event stepping drifts and
+                                        // sticks).
+                                        val w = size.width.toFloat()
+                                        if (dragged && w > 0f && startIndex >= 0 &&
+                                            groups.size > 1
+                                        ) {
+                                            val target = (startIndex +
+                                                (totalDragPx / w).toInt())
+                                                .coerceIn(0, groups.size - 1)
+                                            val cur = groups.indexOf(group)
+                                            if (target != cur && cur >= 0) {
+                                                // Reorder live: remove + insert.
+                                                val moved = groups.toMutableList()
+                                                moved.removeAt(cur)
+                                                moved.add(target, group)
+                                                groups = moved
+                                                dragGroupIndex = target
                                             }
                                         }
-                                    }
-                                    // The hold ended.
-                                    dragGroupName = null
-                                    dragGroupIndex = -1
-                                    if (dragged) {
-                                        // Persist the new order.
-                                        LibraryPrefs.writeGroupsOrderPublic(context, groups)
-                                        WepWawetLogger.engineDebug(
-                                            "LibraryScreen: group order saved",
-                                            "groups" to groups.size)
-                                    } else {
-                                        // Hold WITHOUT dragging: the menu
-                                        // (rename / delete).
-                                        manageGroupName = group
-                                    }
-                                }
+                                    },
+                                    onDragEnd = {
+                                        dragGroupName = null
+                                        dragGroupIndex = -1
+                                        if (dragged) {
+                                            // Persist the full new order.
+                                            LibraryPrefs.writeGroupsOrderPublic(context, groups)
+                                            WepWawetLogger.engineDebug(
+                                                "LibraryScreen: group order saved",
+                                                "groups" to groups.size)
+                                        } else {
+                                            // Held STILL — the manage menu
+                                            // (rename / delete).
+                                            manageGroupName = group
+                                        }
+                                    },
+                                    onDragCancel = {
+                                        dragGroupName = null
+                                        dragGroupIndex = -1
+                                    },
+                                )
                             },
                         label = { Text("$group ($count)") },
                         leadingIcon = {
@@ -1080,26 +1068,44 @@ fun LibraryScreen(
                         )
                     },
                 )
-                // v0.8.20: ONE "＋" chip that drops down BOTH creation
-                // options ("create a single + button that drops down with a
-                // make group or add image folder") — it replaced the old
-                // "＋ Folder" chip; the dropdown offers making a GROUP or
-                // adding an image FOLDER.
-                FilterChip(
-                    selected = false,
-                    onClick = {
-                        plusMenuForImport = false
-                        showPlusMenu = true
-                    },
-                    label = { Text("＋") },
-                    leadingIcon = {
-                        Icon(
-                            Icons.Filled.Add,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
+                // v0.8.21: ONE plain "＋" chip ("the plus chip is + + which
+                // is stupid and takes up space" — the old chip rendered BOTH
+                // an Add icon and a "＋" label). It drops down a real
+                // Material menu with EXACTLY two options, no ellipses ("the
+                // menu that appears has ... at the end of every option"):
+                // Make group, or Add image folder. The folder option then
+                // asks existing-or-create (the FolderAddMenuDialog flow).
+                Box {
+                    FilterChip(
+                        selected = false,
+                        onClick = { showPlusDropdown = !showPlusDropdown },
+                        label = { Text("＋") },
+                    )
+                    DropdownMenu(
+                        expanded = showPlusDropdown,
+                        onDismissRequest = { showPlusDropdown = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Make group") },
+                            leadingIcon = { Icon(Icons.Filled.Folder, contentDescription = null) },
+                            onClick = {
+                                showPlusDropdown = false
+                                showMakeGroup = true
+                            },
                         )
-                    },
-                )
+                        DropdownMenuItem(
+                            text = { Text("Add image folder") },
+                            leadingIcon = {
+                                Icon(Icons.Filled.CreateNewFolder, contentDescription = null)
+                            },
+                            onClick = {
+                                showPlusDropdown = false
+                                plusMenuForImport = false
+                                showPlusMenu = true
+                            },
+                        )
+                    }
+                }
             }
 
             when {
@@ -1758,10 +1764,6 @@ fun LibraryScreen(
     if (showPlusMenu) {
         FolderAddMenuDialog(
             onDismiss = { showPlusMenu = false },
-            onMakeGroup = {
-                showPlusMenu = false
-                showMakeGroup = true
-            },
             onChooseExisting = {
                 showPlusMenu = false
                 try {

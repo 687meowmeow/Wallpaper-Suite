@@ -37,7 +37,17 @@ import java.util.UUID
  */
 object SuitePlaylistStore {
 
-    /** A wallpaper inside a playlist. [type] is "Scene"/"Video"/"" (informational). */
+    /**
+     * A wallpaper inside a playlist. [type] is "Scene"/"Video"/"" (informational).
+     *
+     * v0.8.21: a RANDOM SLOT is an entry whose [filepath] is a marker
+     * ([RandomPullEngine.isSlot]) — it pulls a FRESH image each time the
+     * rotation lands on it, using its OWN tag settings (null = inherit
+     * Discover's current value). Slots are ordinary list citizens: they
+     * move up/down, get removed, and can be time-ruled exactly like image
+     * entries ("you should be able to move the random slots position as
+     * if it was a wallpaper").
+     */
     // v0.8.16: `var` — renameFilepathEverywhere re-points entries at a
     // folder image's new crop file, and Gson rewrites fields by reflection
     // (same rationale as the Playlist fields above).
@@ -45,6 +55,12 @@ object SuitePlaylistStore {
         var filepath: String,
         var title: String,
         var type: String,
+        // ── Random-slot settings (only meaningful on slot entries) ──
+        var randomStrictTags: List<String>? = null,
+        var randomSoftTags: List<String>? = null,
+        var randomStyleValue: Int? = null,
+        var randomR18Mode: Int? = null,
+        var randomSources: List<String>? = null,
     )
 
     /**
@@ -77,26 +93,18 @@ object SuitePlaylistStore {
         var intervalMinutes: Int = 15,
         var entries: MutableList<Entry> = ArrayList(),
         var timeRules: MutableList<TimeRule> = ArrayList(),
-        // ── v0.8.19 (random-pull rework): the "Random" pull button no
-        // longer freezes ONE fetched image into the list. Instead, a
-        // dynamic RANDOM SLOT lives in the playlist: each time the
-        // rotation lands on it, a FRESH image is pulled through the SAME
-        // booru search Discover uses — with THIS playlist's OWN tag
-        // settings (strict/soft tags, style, content tier, sources), so
-        // two playlists can pull from completely different feeds.
-        // v0.8.20: MULTIPLE slots ("you should be able to add more than
-        // one random") — randomSlotCount is how many random slots the
-        // rotation has (0 = off). Each slot pulls its own fresh image
-        // (a slot in flight is marked used so two slots never repeat the
-        // same URL in one rotation). Defaults: null = inherit Discover's
-        // current settings.
+        // ── v0.8.19/20 LEGACY random-slot fields ──
+        // v0.8.21: random slots are ENTRIES now (unique markers + per-slot
+        // settings, moveable like wallpapers). These playlist-level fields
+        // are only READ to migrate old data — sanitized() folds them into
+        // slot entries and clears them.
         var randomSlotCount: Int = 0,
         var randomStrictTags: List<String>? = null,
         var randomSoftTags: List<String>? = null,
         var randomStyleValue: Int? = null,
         var randomR18Mode: Int? = null,
         var randomSources: List<String>? = null,
-        /** v0.8.19 legacy field (v0.8.20: migrated into randomSlotCount). */
+        /** v0.8.19 legacy boolean — read-only, folds into slot entries. */
         var randomPullEnabled: Boolean = false,
     )
 
@@ -157,31 +165,48 @@ object SuitePlaylistStore {
         }
     }
 
-    /** Drops playlists with a null/blank id or name; fills safe defaults. */
+    /**
+     * Drops playlists with a null/blank id or name; fills safe defaults;
+     * migrates the legacy random-slot fields into slot ENTRIES.
+     */
     private fun Playlist.sanitized(): Playlist? {
         if (id.isNullOrBlank() || name == null) return null
-        // v0.8.20 migration: the v0.8.19 boolean randomPullEnabled folds
-        // into randomSlotCount (0/1); an explicit count wins when present.
-        val slotCount = when {
+        // v0.8.21 migration: the v0.8.19/20 playlist-level random slot
+        // (boolean, then a count + shared tag settings) becomes random-slot
+        // ENTRIES — unique markers, per-slot settings, moveable like any
+        // wallpaper. One-time: the legacy fields are cleared afterwards so
+        // a later deliberate removal of every slot stays removed.
+        val legacyCount = when {
             randomSlotCount > 0 -> randomSlotCount
             randomPullEnabled -> 1
             else -> 0
         }
-        return Playlist(
+        val migrated = Playlist(
             id = id,
             name = name,
             orderMode = orderMode ?: ORDER_RANDOM,
             intervalMinutes = intervalMinutes,
             entries = (entries ?: emptyList()).toMutableList(),
             timeRules = (timeRules ?: emptyList()).toMutableList(),
-            randomSlotCount = slotCount,
-            randomStrictTags = randomStrictTags,
-            randomSoftTags = randomSoftTags,
-            randomStyleValue = randomStyleValue,
-            randomR18Mode = randomR18Mode,
-            randomSources = randomSources,
-            randomPullEnabled = randomPullEnabled ?: false,
         )
+        if (legacyCount > 0 && migrated.entries.none {
+                RandomPullEngine.isSlot(it.filepath)
+            }
+        ) {
+            repeat(legacyCount) {
+                migrated.entries.add(RandomPullEngine.newSlotEntry(
+                    strict = randomStrictTags,
+                    soft = randomSoftTags,
+                    style = randomStyleValue,
+                    r18 = randomR18Mode,
+                    sources = randomSources,
+                ))
+            }
+            WepWawetLogger.appInfo("SuitePlaylistStore: migrated random slots to entries",
+                "playlist" to (migrated.name ?: migrated.id),
+                "slots" to legacyCount)
+        }
+        return migrated
     }
 
     /** Reads the v0.8.11–13 R8-obfuscated layout via [org.json]. */

@@ -41,12 +41,12 @@ import android.net.Uri
 /**
  * v0.8.18: the "+ folder" MENU — "make the create folder button come up
  * with menu asking if you want to use an already existing or make one".
- * One place, three call sites: the Wallpapers "＋" chip, Discover's
- * Save-to-folder dialog, and the top-bar "+" when no folder is active
- * (which also offers the general import via [onImportOther]).
- * v0.8.20: "create a single + button that drops down with a make group
- * or add image folder" — [onMakeGroup] adds the group option (the
- * Wallpapers chip passes it; null hides it elsewhere).
+ * One place, three call sites: the "＋" chip's Add-image-folder option,
+ * Discover's Save-to-folder dialog, and the top-bar "+" when no folder is
+ * active (which also offers the general import via [onImportOther]).
+ * v0.8.21: no ellipses in the option labels ("the menu that appears has
+ * ... at the end of every option"), and the group option moved OUT to the
+ * "＋" chip's own dropdown in LibraryScreen.
  */
 @Composable
 fun FolderAddMenuDialog(
@@ -54,32 +54,20 @@ fun FolderAddMenuDialog(
     onChooseExisting: () -> Unit,
     onCreateNew: () -> Unit,
     onImportOther: (() -> Unit)? = null,
-    onMakeGroup: (() -> Unit)? = null,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Filled.CreateNewFolder, contentDescription = null) },
-        title = { Text("Add") },
+        title = { Text("Add image folder") },
         text = {
             Column {
-                if (onMakeGroup != null) {
-                    OutlinedButton(
-                        onClick = onMakeGroup,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Icon(Icons.Filled.Folder, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Make a group…")
-                    }
-                    Spacer(Modifier.padding(top = 8.dp))
-                }
                 OutlinedButton(
                     onClick = onChooseExisting,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Icon(Icons.Filled.FolderOpen, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("Add an image folder — existing…")
+                    Text("Use an existing folder")
                 }
                 Spacer(Modifier.padding(top = 8.dp))
                 OutlinedButton(
@@ -88,7 +76,7 @@ fun FolderAddMenuDialog(
                 ) {
                     Icon(Icons.Filled.CreateNewFolder, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("Add an image folder — create new…")
+                    Text("Create a new folder")
                 }
                 if (onImportOther != null) {
                     Spacer(Modifier.padding(top = 8.dp))
@@ -98,7 +86,7 @@ fun FolderAddMenuDialog(
                     ) {
                         Icon(Icons.Filled.Input, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
-                        Text("Import other files…")
+                        Text("Import other files")
                     }
                 }
             }

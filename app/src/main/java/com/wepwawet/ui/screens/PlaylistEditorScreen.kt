@@ -7,6 +7,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -113,12 +114,10 @@ fun PlaylistEditorScreen(
     val context = LocalContext.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     var showAddPicker by remember { mutableStateOf(false) }
-    // v0.8.19 (random-pull rework): the one-shot "pull a random image and
-    // freeze it into the list" button is GONE. In its place: a DYNAMIC
-    // RANDOM SLOT ("it adds a random wallpaper that is randomy every time
-    // it is ran") with the playlist's OWN tag settings ("it should also
-    // have its own individual tag settings and stuff just like the
-    // discover page"). See the Random slot section in the list below.
+    // v0.8.21: the random slot being edited in its OWN separate menu
+    // ("it should open a separate menu when editing the random") — the
+    // marker of the entry, null = closed.
+    var editingSlotMarker by remember { mutableStateOf<String?>(null) }
     var editingRuleIndex by remember { mutableStateOf<Int?>(null) } // -1 = new rule
     var libraryWallpapers by remember { mutableStateOf<List<WallpaperInfoSparse>>(emptyList()) }
 
@@ -156,10 +155,6 @@ fun PlaylistEditorScreen(
         // Re-read so the UI reflects the persisted object.
         playlist = SuitePlaylistStore.read(context, playlistId)
     }
-
-    // ── v0.8.19: the per-playlist random-slot settings (null = inherit
-    // Discover's current value). ──
-    var randomSettingsOpen by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = { SlimTopBar(title = current.name.ifEmpty { "Playlist" }, onBack = onBack) },
@@ -232,6 +227,10 @@ fun PlaylistEditorScreen(
             }
 
             // ── Entries ──
+            // v0.8.21: random slots are ENTRIES ("you should be able to
+            // move the random slots position as if it was a wallpaper") —
+            // they sit in the SAME list with the same move/remove arrows,
+            // and tapping one opens its OWN separate editor (below).
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -240,190 +239,21 @@ fun PlaylistEditorScreen(
                 ) {
                     Text("Wallpapers (${current.entries.size})",
                         style = MaterialTheme.typography.titleMedium)
-                    TextButton(onClick = { showAddPicker = true }) {
-                        Icon(Icons.Filled.Add, contentDescription = null)
-                        Spacer(Modifier.width(4.dp))
-                        Text("Add")
-                    }
-                }
-            }
-
-            // ── v0.8.19/20: the DYNAMIC RANDOM SLOTS ──
-            // "i want the current random system in the playlists to be
-            // replaced by instead of getting a random wallpaper once and
-            // adding it. it adds a random wallpaper that is randomy every
-            // time it is ran. it should also have its own individual tag
-            // settings and stuff just like the discover page." (v0.8.19)
-            // v0.8.20: "you should be able to add more than one random" —
-            // a stepper sets HOW MANY random slots the rotation has; each
-            // slot pulls its own fresh image when the rotation lands on it.
-            item {
-                Column {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Random slots", style = MaterialTheme.typography.titleMedium)
-                            Text(
-                                "Each slot pulls a FRESH image every time the rotation " +
-                                    "lands on it — never the same one twice.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        // The slot-count stepper: − / count / ＋.
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(
-                                onClick = {
-                                    save {
-                                        randomSlotCount =
-                                            (randomSlotCount - 1).coerceAtLeast(0)
-                                    }
-                                },
-                                enabled = current.randomSlotCount > 0,
-                            ) { Icon(Icons.Filled.Remove, contentDescription = "Fewer random slots") }
-                            Text(
-                                "${current.randomSlotCount}",
-                                style = MaterialTheme.typography.titleMedium,
-                                modifier = Modifier.padding(horizontal = 10.dp),
-                            )
-                            IconButton(
-                                onClick = {
-                                    save {
-                                        randomSlotCount =
-                                            (randomSlotCount + 1).coerceAtMost(9)
-                                    }
-                                },
-                                enabled = current.randomSlotCount < 9,
-                            ) { Icon(Icons.Filled.Add, contentDescription = "More random slots") }
-                        }
-                    }
-                    if (current.randomSlotCount > 0) {
-                        Spacer(Modifier.height(8.dp))
-                        TextButton(onClick = { randomSettingsOpen = !randomSettingsOpen }) {
-                            Icon(Icons.Filled.Tune, contentDescription = null)
+                    Row {
+                        TextButton(onClick = { showAddPicker = true }) {
+                            Icon(Icons.Filled.Add, contentDescription = null)
                             Spacer(Modifier.width(4.dp))
-                            Text(if (randomSettingsOpen) "Hide slot settings" else "Slot tag settings")
+                            Text("Add")
                         }
-                    }
-                }
-            }
-            if (current.randomSlotCount > 0 && randomSettingsOpen) {
-                // The slot's OWN tag settings — the same knobs as the
-                // Discover page. Blank/null = inherit Discover's value.
-                item {
-                    var strictLine by remember(current.id) {
-                        mutableStateOf(current.randomStrictTags?.joinToString(", ") ?: "")
-                    }
-                    var softLine by remember(current.id) {
-                        mutableStateOf(current.randomSoftTags?.joinToString(", ") ?: "")
-                    }
-                    Column {
-                        OutlinedTextField(
-                            value = strictLine,
-                            onValueChange = {
-                                strictLine = it
-                                save {
-                                    randomStrictTags = it.split(',')
-                                        .map { s -> s.trim() }
-                                        .filter { s -> s.isNotEmpty() }
-                                        .ifEmpty { null }
-                                }
-                            },
-                            singleLine = true,
-                            label = { Text("Strict tags (blank = Discover's)") },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = softLine,
-                            onValueChange = {
-                                softLine = it
-                                save {
-                                    randomSoftTags = it.split(',')
-                                        .map { s -> s.trim() }
-                                        .filter { s -> s.isNotEmpty() }
-                                        .ifEmpty { null }
-                                }
-                            },
-                            singleLine = true,
-                            label = { Text("Soft tags (blank = Discover's)") },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Text("Content tier (blank = Discover's)",
-                            style = MaterialTheme.typography.labelMedium)
-                        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                            SegmentedButton(
-                                selected = current.randomR18Mode == null,
-                                onClick = { save { randomR18Mode = null } },
-                                shape = SegmentedButtonDefaults.itemShape(0, 4),
-                            ) { Text("Auto") }
-                            SegmentedButton(
-                                selected = current.randomR18Mode == DiscoverPrefs.R18_PURE,
-                                onClick = { save { randomR18Mode = DiscoverPrefs.R18_PURE } },
-                                shape = SegmentedButtonDefaults.itemShape(1, 4),
-                            ) { Text("Pure") }
-                            SegmentedButton(
-                                selected = current.randomR18Mode == DiscoverPrefs.R18_MIX,
-                                onClick = { save { randomR18Mode = DiscoverPrefs.R18_MIX } },
-                                shape = SegmentedButtonDefaults.itemShape(2, 4),
-                            ) { Text("Mix") }
-                            SegmentedButton(
-                                selected = current.randomR18Mode == DiscoverPrefs.R18_NSFW,
-                                onClick = { save { randomR18Mode = DiscoverPrefs.R18_NSFW } },
-                                shape = SegmentedButtonDefaults.itemShape(3, 4),
-                            ) { Text("NSFW") }
-                        }
-                        Spacer(Modifier.height(12.dp))
-                        Text("Style: ${current.randomStyleValue ?: "(Discover's)"}",
-                            style = MaterialTheme.typography.labelMedium)
-                        var styleSlider by remember(current.id) {
-                            mutableStateOf((current.randomStyleValue
-                                ?: DiscoverPrefs.readStyle(context)).toFloat())
-                        }
-                        Slider(
-                            value = styleSlider,
-                            onValueChange = { styleSlider = it },
-                            onValueChangeFinished = {
-                                save { randomStyleValue = styleSlider.toInt() }
-                            },
-                            valueRange = 0f..100f,
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Text("Sources (blank = Discover's)",
-                            style = MaterialTheme.typography.labelMedium)
-                        // The playlist's own source picks; nothing ticked +
-                        // "inherit" ON = Discover's set. The first tick
-                        // switches to explicit.
-                        val slotSources = current.randomSources?.toSet()
-                        DiscoverPrefs.ALL_SOURCES.forEach { src ->
-                            val checked = slotSources?.contains(src) ?: false
-                            FilterChip(
-                                selected = checked,
-                                onClick = {
-                                    val base = current.randomSources?.toMutableSet()
-                                        ?: run {
-                                            // First explicit pick: start from
-                                            // Discover's current selection so
-                                            // one tap doesn't empty everything.
-                                            DiscoverPrefs.readSources(context)
-                                                .toMutableSet()
-                                        }
-                                    if (checked) base.remove(src) else base.add(src)
-                                    save { randomSources = base.sorted() }
-                                },
-                                label = { Text(DiscoverPrefs.sourceLabel(src)) },
-                                modifier = Modifier.padding(end = 4.dp),
-                            )
-                            Spacer(Modifier.height(4.dp))
-                        }
-                        if (current.randomSources != null) {
-                            TextButton(onClick = { save { randomSources = null } }) {
-                                Text("Back to Discover's sources")
+                        TextButton(onClick = {
+                            save {
+                                entries.add(
+                                    com.wepwawet.playlist.RandomPullEngine.newSlotEntry())
                             }
+                        }) {
+                            Icon(Icons.Filled.Casino, contentDescription = null)
+                            Spacer(Modifier.width(4.dp))
+                            Text("Add random")
                         }
                     }
                 }
@@ -432,7 +262,7 @@ fun PlaylistEditorScreen(
             if (current.entries.isEmpty()) {
                 item {
                     Text(
-                        "Add any mix of animated and static wallpapers.",
+                        "Add any mix of animated and static wallpapers and random slots.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -440,21 +270,45 @@ fun PlaylistEditorScreen(
             } else {
                 items(current.entries, key = { it.filepath }) { entry ->
                     val index = current.entries.indexOfFirst { it.filepath == entry.filepath }
+                    // v0.8.21: a random-slot entry renders as a Random row
+                    // with the SAME arrows/remover as image entries (moving
+                    // it moves its POSITION in the rotation), and tapping
+                    // it opens its own SEPARATE editor menu.
+                    val isRandom =
+                        com.wepwawet.playlist.RandomPullEngine.isSlot(entry.filepath)
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .let { m ->
+                                if (isRandom) {
+                                    m.clickable { editingSlotMarker = entry.filepath }
+                                } else m
+                            },
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (isRandom) {
+                                    Icon(
+                                        Icons.Filled.Casino,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                        tint = MaterialTheme.colorScheme.primary,
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                }
+                                Text(
+                                    entry.title.ifEmpty {
+                                        entry.filepath.substringAfterLast('/')
+                                    },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
                             Text(
-                                entry.title.ifEmpty {
-                                    entry.filepath.substringAfterLast('/')
-                                },
-                                style = MaterialTheme.typography.bodyMedium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Text(
-                                entry.type.ifEmpty { "wallpaper" },
+                                if (isRandom) "Random — fresh image each turn (tap to edit)"
+                                else entry.type.ifEmpty { "wallpaper" },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -829,11 +683,214 @@ fun PlaylistEditorScreen(
             },
         )
     }
+
+    // ── v0.8.21: the random slot's OWN separate editor menu ──
+    // ("it should open a separate menu when editing the random"). One
+    // Save commits the whole slot at once — the running rotation picks
+    // the change up immediately (upsert → service sync).
+    editingSlotMarker?.let { marker ->
+        val slot = current.entries.firstOrNull { it.filepath == marker }
+        if (slot == null) {
+            editingSlotMarker = null
+        } else {
+            SlotEditorDialog(
+                slot = slot,
+                onDismiss = { editingSlotMarker = null },
+                onSave = { strict, soft, style, r18, sources ->
+                    save {
+                        val i = entries.indexOfFirst { it.filepath == marker }
+                        if (i >= 0) {
+                            entries[i].randomStrictTags = strict
+                            entries[i].randomSoftTags = soft
+                            entries[i].randomStyleValue = style
+                            entries[i].randomR18Mode = r18
+                            entries[i].randomSources = sources
+                        }
+                    }
+                    WepWawetLogger.appInfo("PlaylistEditor: random slot saved",
+                        "slot" to marker.takeLast(18),
+                        "strict" to (strict?.size ?: 0),
+                        "soft" to (soft?.size ?: 0))
+                    editingSlotMarker = null
+                },
+            )
+        }
+    }
 }
 
 /** 870 → "14:30". */
 private fun formatMinute(minuteOfDay: Int): String =
     "%02d:%02d".format(minuteOfDay / 60, minuteOfDay % 60)
+
+/**
+ * v0.8.21: the SEPARATE random-slot editor ("it should open a separate
+ * menu when editing the random"). The same knobs the Discover page
+ * exposes — strict/soft tags, style, content tier, sources — where blank
+ * or Auto INHERITS Discover's current value. One Save commits the whole
+ * slot (the live rotation picks the change up immediately).
+ */
+@Composable
+private fun SlotEditorDialog(
+    slot: SuitePlaylistStore.Entry,
+    onDismiss: () -> Unit,
+    onSave: (
+        strict: List<String>?,
+        soft: List<String>?,
+        style: Int?,
+        r18: Int?,
+        sources: List<String>?,
+    ) -> Unit,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    // Draft state (keyed on the slot): typed values commit on Save.
+    var strictLine by remember(slot.filepath) {
+        mutableStateOf(slot.randomStrictTags?.joinToString(", ") ?: "")
+    }
+    var softLine by remember(slot.filepath) {
+        mutableStateOf(slot.randomSoftTags?.joinToString(", ") ?: "")
+    }
+    var styleAuto by remember(slot.filepath) {
+        mutableStateOf(slot.randomStyleValue == null)
+    }
+    var styleValue by remember(slot.filepath) {
+        mutableStateOf(
+            (slot.randomStyleValue ?: DiscoverPrefs.readStyle(context)).toFloat())
+    }
+    var r18 by remember(slot.filepath) { mutableStateOf(slot.randomR18Mode) }
+    var sources by remember(slot.filepath) {
+        mutableStateOf(slot.randomSources?.toSet())
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Filled.Casino, contentDescription = null) },
+        title = { Text("Edit random") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(
+                    androidx.compose.foundation.rememberScrollState()),
+            ) {
+                OutlinedTextField(
+                    value = strictLine,
+                    onValueChange = { strictLine = it },
+                    singleLine = true,
+                    label = { Text("Strict tags (blank = Discover's)") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = softLine,
+                    onValueChange = { softLine = it },
+                    singleLine = true,
+                    label = { Text("Soft tags (blank = Discover's)") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(12.dp))
+                Text("Content tier", style = MaterialTheme.typography.labelMedium)
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    SegmentedButton(
+                        selected = r18 == null,
+                        onClick = { r18 = null },
+                        shape = SegmentedButtonDefaults.itemShape(0, 4),
+                    ) { Text("Auto") }
+                    SegmentedButton(
+                        selected = r18 == DiscoverPrefs.R18_PURE,
+                        onClick = { r18 = DiscoverPrefs.R18_PURE },
+                        shape = SegmentedButtonDefaults.itemShape(1, 4),
+                    ) { Text("Pure") }
+                    SegmentedButton(
+                        selected = r18 == DiscoverPrefs.R18_MIX,
+                        onClick = { r18 = DiscoverPrefs.R18_MIX },
+                        shape = SegmentedButtonDefaults.itemShape(2, 4),
+                    ) { Text("Mix") }
+                    SegmentedButton(
+                        selected = r18 == DiscoverPrefs.R18_NSFW,
+                        onClick = { r18 = DiscoverPrefs.R18_NSFW },
+                        shape = SegmentedButtonDefaults.itemShape(3, 4),
+                    ) { Text("NSFW") }
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        if (styleAuto) "Style (Discover's)" else "Style ${styleValue.toInt()}",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            if (styleAuto) "Auto" else "Manual",
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                        Switch(
+                            checked = !styleAuto,
+                            onCheckedChange = { on -> styleAuto = !on },
+                        )
+                    }
+                }
+                Slider(
+                    value = styleValue,
+                    onValueChange = { styleValue = it },
+                    enabled = !styleAuto,
+                    valueRange = 0f..100f,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Sources" + if (sources == null) " (Discover's)" else "",
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                DiscoverPrefs.ALL_SOURCES.forEach { src ->
+                    val checked = sources?.contains(src) ?: false
+                    FilterChip(
+                        selected = checked,
+                        onClick = {
+                            val base = sources?.toMutableSet()
+                                ?: run {
+                                    // First explicit pick: start from Discover's
+                                    // current selection so one tap doesn't
+                                    // empty everything.
+                                    DiscoverPrefs.readSources(context).toMutableSet()
+                                }
+                            if (checked) base.remove(src) else base.add(src)
+                            sources = base.toSet()
+                        },
+                        label = { Text(DiscoverPrefs.sourceLabel(src)) },
+                        modifier = Modifier.padding(end = 4.dp),
+                    )
+                }
+                if (sources != null) {
+                    TextButton(onClick = { sources = null }) {
+                        Text("Back to Discover's sources")
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onSave(
+                        strictLine.split(',')
+                            .map { s -> s.trim() }
+                            .filter { s -> s.isNotEmpty() }
+                            .ifEmpty { null },
+                        softLine.split(',')
+                            .map { s -> s.trim() }
+                            .filter { s -> s.isNotEmpty() }
+                            .ifEmpty { null },
+                        if (styleAuto) null else styleValue.toInt(),
+                        r18,
+                        sources?.sorted(),
+                    )
+                },
+            ) { Text("Save") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
 
 /**
  * The time-rule editor: ONE Material3 [TimePicker] with a From/To

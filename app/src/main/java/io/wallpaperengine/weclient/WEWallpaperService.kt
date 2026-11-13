@@ -295,7 +295,10 @@ class WEWallpaperService : WallpaperService() {
                 // foregrounded — so nothing ever changed until the user
                 // left the app ("the random button in the playlist menu is
                 // not live. all buttons must be live"). The fingerprint
-                // covers every rotation-relevant field.
+                // covers every rotation-relevant field; the INTERVAL is
+                // synced by syncSuiteSettings but deliberately excluded —
+                // it only steers future ticks, and including it made every
+                // slider finish rotate the wallpaper.
                 val changed =
                     lastSyncedActiveId != prevActiveId || lastSyncedPlaylistFingerprint != prevFingerprint
                 if (changed && prevActiveId != null) {
@@ -337,14 +340,11 @@ class WEWallpaperService : WallpaperService() {
             fun syncSettings() {
                 val suiteActive =
                     com.wepwawet.playlist.SuitePlaylistStore.activePlaylist(this@WEWallpaperService)
-                // v0.8.20: a slot-only playlist (random slots, no entries)
-                // is a VALID suite playlist too — the old entries gate meant
-                // enabling the random slot on an empty playlist never
-                // activated the suite rotation at all ("the random button
-                // in the playlist menu is not live").
-                if (suiteActive != null &&
-                    (suiteActive.entries.isNotEmpty() || suiteActive.randomSlotCount > 0)
-                ) {
+                // v0.8.21: random slots ARE entries (unique markers), so
+                // a plain entries check covers slot-only playlists too (the
+                // old gate meant enabling the random slot on an empty
+                // playlist never activated the rotation at all).
+                if (suiteActive != null && suiteActive.entries.isNotEmpty()) {
                     lastSyncedActiveId = suiteActive.id
                     syncSuiteSettings(suiteActive)
                     return
@@ -412,29 +412,25 @@ class WEWallpaperService : WallpaperService() {
             private fun syncSuiteSettings(playlist: com.wepwawet.playlist.SuitePlaylistStore.Playlist) {
                 suiteMode = true
                 suitePlaylist = playlist
+                // v0.8.21: random slots ARE entries (unique markers) — the
+                // candidate list needs no synthetic extras any more.
                 suiteEntries = playlist.entries.map { it.filepath }
                 suiteOrderRandom =
                     playlist.orderMode == com.wepwawet.playlist.SuitePlaylistStore.ORDER_RANDOM
                 duration = playlist.intervalMinutes * 60000
-                // v0.8.19 (random-pull rework): the DYNAMIC random slot —
-                // a playlist with random slots pulls a FRESH image through
-                // its OWN tag settings every time the rotation lands on a
-                // slot. v0.8.20: MULTIPLE slots ("you should be able to
-                // add more than one random") — each slot pulls its own
-                // image (recent-URL dedup keeps two slots from repeating
-                // the same image).
-                suiteRandomSlots = playlist.randomSlotCount.coerceAtLeast(0)
                 suiteRandomPullInFlight = false
-                isValid = suiteEntries.isNotEmpty() || suiteRandomSlots > 0
-                // v0.8.20 (all buttons live): the fingerprint of every
-                // rotation-relevant field — any in-place edit changes it
-                // and syncSettingsAndApplyChanges applies immediately.
+                isValid = suiteEntries.isNotEmpty()
+                // v0.8.20/21 (all buttons live): the fingerprint of every
+                // rotation-relevant field — any in-place edit changes it and
+                // syncSettingsAndApplyChanges applies immediately. The
+                // interval is DELIBERATELY excluded: it only steers FUTURE
+                // ticks (synced above), and including it made every slider
+                // finish rotate the wallpaper. Slot settings are part of
+                // the fingerprint — editing a slot applies live too.
                 lastSyncedPlaylistFingerprint =
-                    "${playlist.id}|${playlist.orderMode}|${playlist.intervalMinutes}|" +
-                        "${suiteEntries.joinToString(",")}|${playlist.timeRules.size}|" +
-                        "${playlist.timeRules.joinToString(",") { "${it.startMinute}-${it.endMinute}:${it.entryFilePaths.size}" }}|" +
-                        "slots=${suiteRandomSlots}|tags=${playlist.randomStrictTags}|${playlist.randomSoftTags}|" +
-                        "${playlist.randomStyleValue}|${playlist.randomR18Mode}|${playlist.randomSources}"
+                    "${playlist.id}|${playlist.orderMode}|" +
+                        playlist.entries.joinToString(";") { it.toString() } + "|" +
+                        playlist.timeRules.joinToString(";") { it.toString() }
                 randomPool.clear()
                 fullSortedList.clear()
                 timePlaylist.clear()
@@ -447,30 +443,27 @@ class WEWallpaperService : WallpaperService() {
                     "order" to playlist.orderMode,
                     "interval_min" to playlist.intervalMinutes,
                     "time_rules" to playlist.timeRules.size,
-                    "random_slots" to suiteRandomSlots)
+                    "random_slots" to suiteEntries.count {
+                        com.wepwawet.playlist.RandomPullEngine.isSlot(it)
+                    })
             }
 
-            // ── v0.8.19/20: the dynamic random slot state ──
-            private var suiteRandomSlots: Int = 0
+            // ── v0.8.19/21: the dynamic random-slot state ──
             private var suiteRandomPullInFlight: Boolean = false
 
             /**
-             * v0.8.19/20: pick + apply the next wallpaper for the current
-             * step. The random slots (up to [suiteRandomSlots]) participate
-             * as synthetic candidates alongside the entries. Returns the
-             * picked file path, or "" when the pick is a RANDOM SLOT whose
-             * fresh image is still downloading — the caller then keeps the
-             * current wallpaper (the pull completes asynchronously and
-             * applies itself).
+             * v0.8.19/21: pick + apply the next wallpaper for the current
+             * step. Random-slot entries (unique markers) participate as
+             * ordinary candidates. Returns the picked file path, or "" when
+             * the pick is a RANDOM SLOT whose fresh image is still
+             * downloading — the caller then keeps the current wallpaper (the
+             * pull completes asynchronously and applies itself).
              */
             private fun suitePickNewAndMaybePull(): String {
                 val set = suiteSetForNow()
-                val slotCount = suiteRandomSlots
-                if (set.isEmpty() && slotCount <= 0) return ""
-                val candidates = ArrayList<String>(set.size + slotCount)
+                if (set.isEmpty()) return ""
+                val candidates = ArrayList<String>(set.size)
                 candidates.addAll(set)
-                val slotMarker = com.wepwawet.playlist.RandomPullEngine.SLOT_MARKER
-                repeat(slotCount) { candidates.add(slotMarker) }
                 if (candidates.size == 1) {
                     return applyCandidate(candidates[0])
                 }
@@ -491,22 +484,26 @@ class WEWallpaperService : WallpaperService() {
 
             /** Apply one candidate: a plain entry loads directly; a slot pulls. */
             private fun applyCandidate(candidate: String): String {
-                if (candidate != com.wepwawet.playlist.RandomPullEngine.SLOT_MARKER) {
+                if (!com.wepwawet.playlist.RandomPullEngine.isSlot(candidate)) {
                     return candidate
                 }
-                // A RANDOM SLOT: pull a fresh image NOW (single-flight —
-                // a pull already in flight keeps the current wallpaper).
+                // A RANDOM SLOT: pull a fresh image NOW through THIS slot's
+                // own settings (single-flight — a pull already in flight
+                // keeps the current wallpaper).
                 if (suiteRandomPullInFlight) return ""
                 val playlist = suitePlaylist ?: return ""
+                // Markers are unique, so the entry found is THE slot picked.
+                val slot = playlist.entries.firstOrNull { it.filepath == candidate }
+                    ?: return ""
                 val svc = this@WEWallpaperService
                 suiteRandomPullInFlight = true
                 WepWawetLogger.engine("Service: random slot — pulling a fresh image",
                     "playlist" to playlist.name,
-                    "slots" to suiteRandomSlots)
+                    "slot" to candidate.takeLast(18))
                 com.wepwawet.WepWawetApplication.appScope.launch {
                     try {
                         val path = com.wepwawet.playlist.RandomPullEngine
-                            .pull(svc, playlist)
+                            .pull(svc, playlist, slot)
                         if (path != null) {
                             android.os.Handler(android.os.Looper.getMainLooper()).post {
                                 WeEnginePrefs.storeString(
@@ -627,7 +624,7 @@ class WEWallpaperService : WallpaperService() {
                 if (suiteMode) {
                     val set = suiteSetForNow()
                     // v0.8.19: the dynamic random slot counts as a candidate.
-                    if (set.isEmpty() && suiteRandomSlots <= 0) return false
+                    if (set.isEmpty()) return false
                     // A window change (or playlist edit) that no longer
                     // contains the current wallpaper switches immediately.
                     // (A random-slot image IS a legit current wallpaper.)
@@ -636,7 +633,11 @@ class WEWallpaperService : WallpaperService() {
                     ) return true
                     // A single-entry window pins its wallpaper (the random
                     // slot alone keeps rotating — that's its purpose).
-                    if (set.size <= 1 && suiteRandomSlots <= 0) return false
+                    // A lone RANDOM SLOT keeps rotating — every landing
+                    // pulls a FRESH image, so re-picking it is never a no-op.
+                    if (set.size <= 1 &&
+                        set.none { com.wepwawet.playlist.RandomPullEngine.isSlot(it) }
+                    ) return false
                     return (System.currentTimeMillis() - lastChangeTime) > duration
                 }
                 val currentTime = System.currentTimeMillis()

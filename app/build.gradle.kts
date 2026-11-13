@@ -766,8 +766,57 @@ android {
         //     DiscoverScreen/DiscoverSearch/DiscoverPrefs/DiscoverApplier
         //     (Nyanpasu* names are gone from the repo); the legacy
         //     on-disk migrations keep old data readable.
-        versionCode = 138
-        versionName = "0.8.20-alpha"
+        // v0.8.21-alpha (regression round — every finding from the
+        // v0.8.20 device log fixed):
+        //   REFRESH CRASH: "you cant even refresh the wallpaper because
+        //     of your shitty code. the error is in the log" — the log
+        //     showed ClassCastException: HashSet cannot be cast to
+        //     String. ROOT CAUSE: the original clone (through v0.8.16)
+        //     stored recent_urls as a STRINGSET; every version since
+        //     read it with getString and crashed on devices carrying old
+        //     data (the preload's runCatching swallowed the same crash,
+        //     hence added=0 depth=0). readRecentUrlsList now reads via
+        //     prefs.all (no cast) and migrates both StringSet forms to
+        //     the ordered JSON array. Also: the v0.8.20 queue-meta key
+        //     rename (nyanpasu_q_* -> discover_q_*) orphaned the user's
+        //     existing queue — one-time migration added.
+        //   PREVIEW PAN/ZOOM: "you cant easily drag the image in the
+        //     discover menu and zooming is buggy. remove the zoom number
+        //     in the corner of it" — the pan state was a fraction of the
+        //     axis SLACK, so any drag on a no-slack axis exploded to the
+        //     ±1 clamp (snapped and stuck); pinch zoom ignored the
+        //     pinch center. Now: pan is in window pixels, follows the
+        //     finger 1:1, is clamped so the image always covers the
+        //     window, and pinch zooms about the centroid. The zoom badge
+        //     is removed.
+        //   GROUP HOLD: "you cant go into a group because its not a hold
+        //     to open the menu. you cant drag it either" — the v0.8.20
+        //     hand-rolled gesture mixed the event clock with the wall
+        //     clock, so EVERY touch entered hold mode instantly (taps
+        //     opened the menu instead of filtering) and its step math
+        //     never crossed a chip width (drag did nothing). Replaced
+        //     with the platform's detectDragGesturesAfterLongPress:
+        //     hold+drag reorders (total travel / chip width), hold-still
+        //     opens the rename/delete menu, tap filters.
+        //   "＋" CHIP: "the plus chip is + + which is stupid and takes up
+        //     space" — the chip rendered an Add icon AND a "＋" label;
+        //     now a single "＋" label, and its options dropped their
+        //     trailing ellipses ("the menu that appears has ... at the
+        //     end of every option").
+        //   RANDOM SLOTS AS ENTRIES: "you should be able to move the
+        //     random slots position as if it was a wallpaper ... it
+        //     should open a separate menu when editing the random" —
+        //     slots are ordinary list entries now (unique markers): the
+        //     same move/remove arrows as wallpapers, a per-slot Edit
+        //     random dialog (tags, style, tier, sources), and the
+        //     v0.8.19/20 stepper/toggle migrates into slot entries.
+        //   ALL BUTTONS LIVE: "some items in the playlist menu still
+        //     dont update live" — the change fingerprint now covers the
+        //     FULL entry list including every slot's settings, and the
+        //     interval is excluded (it steers future ticks; including it
+        //     rotated the wallpaper on every slider finish).
+        versionCode = 139
+        versionName = "0.8.21-alpha"
         // Native ABI filter — only build for arm64-v8a (WE app targets Snapdragon 8 Gen 2+)
         ndk {
             abiFilters += "arm64-v8a"

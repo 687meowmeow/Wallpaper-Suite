@@ -72,6 +72,7 @@ object DiscoverPrefs {
     private fun prefs(context: Context): SharedPreferences {
         val fresh = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (fresh.getBoolean("migrated_from_legacy", false) || fresh.all.isNotEmpty()) {
+            migrateLegacyQueueMeta(fresh)
             return fresh
         }
         // v0.8.19: one-time wholesale migration from the legacy prefs file.
@@ -92,7 +93,51 @@ object DiscoverPrefs {
         edit.putBoolean("migrated_from_legacy", true).apply()
         WepWawetLogger.appInfo("DiscoverPrefs: migrated legacy prefs",
             "keys" to legacy.all.size)
+        migrateLegacyQueueMeta(fresh)
         return fresh
+    }
+
+    /** One-shot latch for [migrateLegacyQueueMeta] (per process). */
+    private val queueMetaMigrated = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * v0.8.21: one-time migration of the v0.8.19 queue meta keys. v0.8.20
+     * renamed "nyanpasu_q_url/at/sig_N" to "discover_q_*" but never
+     * carried the VALUES over — the user's already-downloaded queue (the
+     * .img files under discover_queue_N.img) went invisible and refill
+     * started from zero. Copy each legacy meta triple whose target is
+     * empty, then remove the legacy keys.
+     */
+    private fun migrateLegacyQueueMeta(prefs: SharedPreferences) {
+        if (!queueMetaMigrated.compareAndSet(false, true)) return
+        var migrated = 0
+        // One .all snapshot (the check runs once per process anyway).
+        val all = prefs.all
+        val edit = prefs.edit()
+        for (s in 0 until QUEUE_SIZE) {
+            val oldUrl = all["nyanpasu_q_url_$s"] as? String
+            val oldAt = all["nyanpasu_q_at_$s"] as? Long
+            val oldSig = all["nyanpasu_q_sig_$s"] as? String
+            if (oldUrl.isNullOrBlank()) continue
+            val newUrlBlank = (all["discover_q_url_$s"] as? String).isNullOrBlank()
+            if (!newUrlBlank) {
+                // Target slot already holds newer data — drop the old meta.
+                edit.remove("nyanpasu_q_url_$s").remove("nyanpasu_q_at_$s")
+                    .remove("nyanpasu_q_sig_$s")
+                continue
+            }
+            edit.putString("discover_q_url_$s", oldUrl)
+            if (oldAt != null) edit.putLong("discover_q_at_$s", oldAt)
+            if (oldSig != null) edit.putString("discover_q_sig_$s", oldSig)
+            edit.remove("nyanpasu_q_url_$s").remove("nyanpasu_q_at_$s")
+                .remove("nyanpasu_q_sig_$s")
+            migrated++
+        }
+        if (migrated > 0) {
+            edit.apply()
+            WepWawetLogger.appInfo("DiscoverPrefs: migrated v0.8.19 queue meta",
+                "slots" to migrated)
+        }
     }
 
     fun readStrictTags(context: Context): List<String> =
@@ -250,17 +295,37 @@ object DiscoverPrefs {
     /** The ordered recent-URL list (oldest first, newest last). */
     fun readRecentUrlsList(context: Context): List<String> {
         val p = prefs(context)
-        val raw = p.getString(KEY_RECENT_URLS, null)
-        if (raw != null) {
-            // New ordered form.
+        // v0.8.21 CRITICAL FIX: NEVER call p.getString(KEY_RECENT_URLS) —
+        // the ORIGINAL clone (through v0.8.16) stored recent URLs as a
+        // STRINGSET under "recent_urls", and SharedPreferences.getString
+        // on a set throws ClassCastException ("java.util.HashSet cannot be
+        // cast to java.lang.String") — which killed every Discover refresh
+        // on devices with old data while the type looked clean on fresh
+        // installs. p.all returns values WITHOUT casts; dispatch on the
+        // runtime type instead.
+        val stored = p.all[KEY_RECENT_URLS]
+        if (stored is String) {
             return try {
-                org.json.JSONArray(raw).let { arr ->
+                org.json.JSONArray(stored).let { arr ->
                     List(arr.length()) { i -> arr.optString(i) }
                         .filter { it.isNotEmpty() }
                 }
             } catch (t: Throwable) {
                 emptyList()
             }
+        }
+        if (stored is Set<*>) {
+            // The pre-v0.8.18 StringSet form — migrate to the ordered
+            // JSON array (insertion order is lost; dedup is kept).
+            val list = stored.filterIsInstance<String>()
+                .filter { it.isNotEmpty() }.sorted().take(RECENT_URLS_LIMIT)
+            p.edit()
+                .putString(KEY_RECENT_URLS, org.json.JSONArray(list).toString())
+                .remove(KEY_RECENT_URLS_SET)
+                .apply()
+            WepWawetLogger.appInfo("DiscoverPrefs: migrated legacy StringSet recent_urls",
+                "urls" to list.size)
+            return list
         }
         // v0.8.18: one-time migration from the legacy StringSet — the
         // insertion order is lost, but every retained URL still dedups.

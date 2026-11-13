@@ -81,6 +81,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.layout.onSizeChanged
 import com.wepwawet.log.WepWawetLogger
 import com.wepwawet.ui.components.SlimTopBar
 import com.wepwawet.ui.screens.ImageFolderAssets
@@ -249,16 +250,61 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
     // exact on very wide screens by letterboxing instead).
     val fixedWindowWidth = (fixedWindowHeight * phoneAspect.coerceIn(0.4f, 2.5f))
 
-    // v0.8.19: the pan/zoom state of the preview window. zoom ≥ 1; pan
-    // fractions −1..1 of the available slack on each axis.
+    // v0.8.21 (pan/zoom rework): zoom ≥ 1 is a multiplier over the cover
+    // fit; panXPx/panYPx is the IMAGE CENTER's offset from the window
+    // center in WINDOW PIXELS, clamped so the image always covers the
+    // window. The old fraction-of-slack state exploded to ±1 whenever an
+    // axis had no slack (cover-fit at zoom 1) — one-finger drags snapped
+    // to an edge and stuck there instead of following the finger, and
+    // pinch zoom ignored the pinch center entirely ("you cant easily drag
+    // the image in the discover menu and zooming is buggy").
     var previewZoom by remember { mutableStateOf(1f) }
-    var previewPanX by remember { mutableStateOf(0f) }
-    var previewPanY by remember { mutableStateOf(0f) }
+    var previewPanXPx by remember { mutableStateOf(0f) }
+    var previewPanYPx by remember { mutableStateOf(0f) }
+    // The window's pixel size (clamp bounds + crop fractions need it).
+    var previewWindowSize by remember {
+        mutableStateOf(androidx.compose.ui.unit.IntSize.Zero)
+    }
+
+    /** The drawn image size as multipliers of the WINDOW size. */
+    fun previewMultipliers(bmp: android.graphics.Bitmap): Pair<Float, Float> {
+        val imgAspect = (bmp.width.toFloat() / bmp.height).coerceAtLeast(0.01f)
+        // The cover fit: the smaller scale that covers the window.
+        val cover = maxOf(1f, imgAspect / phoneAspect)
+        val dispW = cover * previewZoom
+        return dispW to (dispW * phoneAspect / imgAspect)
+    }
+
+    /** Clamp the pan so the image always covers the window. */
+    fun clampPreviewPan(bmp: android.graphics.Bitmap) {
+        val (dispW, dispH) = previewMultipliers(bmp)
+        val w = previewWindowSize.width.toFloat()
+        val h = previewWindowSize.height.toFloat()
+        if (w <= 0f || h <= 0f) return
+        val maxX = maxOf(0f, (dispW - 1f) * w / 2f)
+        val maxY = maxOf(0f, (dispH - 1f) * h / 2f)
+        previewPanXPx = previewPanXPx.coerceIn(-maxX, maxX)
+        previewPanYPx = previewPanYPx.coerceIn(-maxY, maxY)
+    }
+
+    /** The pan as cropVisibleWindow fractions (−1..1 of the axis slack). */
+    fun previewPanFraction(bmp: android.graphics.Bitmap): Pair<Float, Float> {
+        val (dispW, dispH) = previewMultipliers(bmp)
+        val w = previewWindowSize.width.toFloat()
+        val h = previewWindowSize.height.toFloat()
+        if (w <= 0f || h <= 0f) return 0f to 0f
+        val slackW = (dispW - 1f) * w
+        val slackH = (dispH - 1f) * h
+        val fx = if (slackW > 0f) (-2f * previewPanXPx / slackW).coerceIn(-1f, 1f) else 0f
+        val fy = if (slackH > 0f) (-2f * previewPanYPx / slackH).coerceIn(-1f, 1f) else 0f
+        return fx to fy
+    }
+
     /** Reset the window whenever a NEW image is shown. */
     fun resetPreviewWindow() {
         previewZoom = 1f
-        previewPanX = 0f
-        previewPanY = 0f
+        previewPanXPx = 0f
+        previewPanYPx = 0f
     }
 
     fun persistTags() = DiscoverPrefs.writeTags(context, strictTags, softTags)
@@ -448,8 +494,11 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                     if (homeOverride != null) {
                         DiscoverApplier.cropForScreen(context, bmp, matchScreenAspect = false)
                     } else {
+                        // v0.8.21: the pan state is in window pixels; hand
+                        // the crop its fraction form (see previewPanFraction).
+                        val (fx, fy) = previewPanFraction(bmp)
                         DiscoverApplier.cropVisibleWindow(
-                            context, bmp, phoneAspect, previewZoom, previewPanX, previewPanY)
+                            context, bmp, phoneAspect, previewZoom, fx, fy)
                     }
                 }
                 val lockCrop = lockBmp?.let {
@@ -457,8 +506,9 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                         if (lockOverride != null) {
                             DiscoverApplier.cropForScreen(context, it, matchScreenAspect = false)
                         } else {
+                            val (fx, fy) = previewPanFraction(it)
                             DiscoverApplier.cropVisibleWindow(
-                                context, it, phoneAspect, previewZoom, previewPanX, previewPanY)
+                                context, it, phoneAspect, previewZoom, fx, fy)
                         }
                     }
                 }
@@ -727,58 +777,62 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                 ) {
                 if (shownBmp != null) {
                     // The pan/zoomable image. The math here mirrors
-                    // DiscoverApplier.cropVisibleWindow EXACTLY, so what Set
+                    // DiscoverApplier.cropVisibleWindow EXACTLY (see
+                    // previewMultipliers / previewPanFraction), so what Set
                     // applies is exactly what this window shows.
                     //
                     // Units: dispW/dispH are multipliers of the WINDOW size
                     // (the image layer fills the Box, then scales). The
                     // aspect is preserved in PIXELS: drawn width =
                     // dispW·Wpx, drawn height = dispW·Wpx/imgAspect, so
-                    // scaleY = dispW·windowAspect/imgAspect — NOT
-                    // dispW/imgAspect (that would distort the image by the
-                    // window's aspect).
-                    val imgAspect = shownBmp.width.toFloat() / shownBmp.height
-                    // The scale (at zoom 1) that COVERS the window:
-                    //   tall image → dispW = 1 (full width; height covers);
-                    //   wide image → dispW = imgAspect/winAspect (height
-                    //   covers). Verified against cropVisibleWindow's math.
-                    val cover = maxOf(1f, imgAspect.coerceAtLeast(0.01f) / phoneAspect)
-                    val dispW = cover * previewZoom
-                    val dispH = dispW * phoneAspect / imgAspect.coerceAtLeast(0.01f)
-                    // Pan (fraction −1..1 of the slack per axis) → top-left
-                    // offset in window fractions.
-                    val slackW = maxOf(0f, dispW - 1f)
-                    val slackH = maxOf(0f, dispH - 1f)
-                    val offX = 0.5f - previewPanX * slackW / 2f - dispW / 2f
-                    val offY = 0.5f - previewPanY * slackH / 2f - dispH / 2f
+                    // scaleY = dispW·windowAspect/imgAspect.
+                    val (dispW, dispH) = previewMultipliers(shownBmp)
+                    // The image CENTER sits at window center + pan; the
+                    // top-left offset follows from the drawn size.
+                    val w = previewWindowSize.width
+                    val h = previewWindowSize.height
+                    val drawLeft = w / 2f + previewPanXPx - dispW * w / 2f
+                    val drawTop = h / 2f + previewPanYPx - dispH * h / 2f
                     androidx.compose.foundation.layout.Box(
                         modifier = Modifier
                             .fillMaxSize()
                             .clipToBounds()
-                            .pointerInput(Unit) {
-                                detectTransformGestures { _, pan, gestureZoom, _ ->
+                            .onSizeChanged { previewWindowSize = it }
+                            // Keyed on the bitmap: the gesture needs the
+                            // CURRENT image's aspect for its clamps (a
+                            // Unit-keyed pointerInput kept a stale closure
+                            // from the first image).
+                            .pointerInput(shownBmp) {
+                                detectTransformGestures { centroid, pan, gestureZoom, _ ->
+                                    val bmp = shownBmp
+                                        ?: return@detectTransformGestures
                                     if (gestureZoom != 1f) {
-                                        previewZoom =
-                                            (previewZoom * gestureZoom).coerceIn(1f, 6f)
+                                        val oldZoom = previewZoom
+                                        val newZoom =
+                                            (oldZoom * gestureZoom).coerceIn(1f, 6f)
+                                        // Zoom about the PINCH CENTROID: the
+                                        // image point under the fingers
+                                        // stays under them (panPx' =
+                                        // g·panPx + (1−g)·centroidRel).
+                                        val g = if (oldZoom > 0f) newZoom / oldZoom else 1f
+                                        if (g != 1f) {
+                                            val cw = size.width.toFloat()
+                                            val ch = size.height.toFloat()
+                                            val relX = centroid.x - cw / 2f
+                                            val relY = centroid.y - ch / 2f
+                                            previewPanXPx =
+                                                previewPanXPx * g + relX * (1f - g)
+                                            previewPanYPx =
+                                                previewPanYPx * g + relY * (1f - g)
+                                        }
+                                        previewZoom = newZoom
                                     }
                                     if (pan != Offset.Zero) {
-                                        // Pan px → window fractions.
-                                        val w = size.width.toFloat()
-                                        val h = size.height.toFloat()
-                                        if (w > 0f && h > 0f) {
-                                            // Drag moves the IMAGE with the
-                                            // finger; the pan fraction runs
-                                            // −1..1 of the axis slack.
-                                            val fw = pan.x / w
-                                            val fh = pan.y / h
-                                            previewPanX =
-                                                (previewPanX - fw / maxOf(slackW, 1e-6f) * 2f)
-                                                    .coerceIn(-1f, 1f)
-                                            previewPanY =
-                                                (previewPanY - fh / maxOf(slackH, 1e-6f) * 2f)
-                                                    .coerceIn(-1f, 1f)
-                                        }
+                                        // The image follows the finger 1:1.
+                                        previewPanXPx += pan.x
+                                        previewPanYPx += pan.y
                                     }
+                                    clampPreviewPan(bmp)
                                 }
                             },
                     ) {
@@ -793,8 +847,8 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                                 .graphicsLayer {
                                     scaleX = dispW
                                     scaleY = dispH
-                                    translationX = offX * size.width
-                                    translationY = offY * size.height
+                                    translationX = drawLeft
+                                    translationY = drawTop
                                 },
                         )
                     }
@@ -816,22 +870,10 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                                 .padding(horizontal = 10.dp, vertical = 4.dp),
                         )
                     }
-                    // v0.8.19: the zoom badge — shows the current zoom and
-                    // resets the window on tap (pan/zoom back to center).
-                    if (previewZoom > 1.001f || previewPanX != 0f || previewPanY != 0f) {
-                        Text(
-                            "%.1f× — tap to reset".format(previewZoom),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color.White,
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(top = 8.dp, end = 8.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(Color.Black.copy(alpha = 0.55f))
-                                .clickable { resetPreviewWindow() }
-                                .padding(horizontal = 10.dp, vertical = 4.dp),
-                        )
-                    }
+                    // v0.8.21: the zoom badge is GONE ("remove the zoom
+                    // number in the corner of it") — the window resets on
+                    // every new image, and pan/zoom is clamped so it can
+                    // never get lost anymore.
                 } else if (fetching) {
                     CircularProgressIndicator(modifier = Modifier.size(36.dp))
                 } else {
