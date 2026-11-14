@@ -72,6 +72,9 @@ object RuleEngine {
     /** Control flow result of a block/stack execution. */
     enum class Flow { CONTINUE, STOPPED }
 
+    /** v0.8.26: playlists already journaled as not-active this session. */
+    private val notedInactivePlaylists = HashSet<String>()
+
     // ══ Event dispatch ═════════════════════════════════════════════════
 
     /**
@@ -102,8 +105,16 @@ object RuleEngine {
                     WepWawetLogger.appDebug("$TAG: rule set skipped — playlist not active",
                         "playlist" to pr.playlistId.takeLast(6),
                         "rules" to pr.rules.size)
-                    RuleActivityLog.record(context, "skipped", pr.playlistId, "",
-                        "Rules of this playlist didn't run — it isn't the active playlist (event: $type)")
+                    // v0.8.26: journaled ONCE per playlist per session —
+                    // the per-event record flooded the journal (and two
+                    // playlists skipped by one event wrote two entries in
+                    // the same millisecond, the exact pair that crashed
+                    // the Activity screen's list keys).
+                    if (notedInactivePlaylists.add(pr.playlistId)) {
+                        RuleActivityLog.record(context, "skipped", pr.playlistId, "",
+                            "This playlist's rules don't run — it isn't the active playlist. " +
+                                "Set it active to let them fire.")
+                    }
                 }
                 continue
             }
@@ -492,7 +503,11 @@ object RuleEngine {
                 }
                 RuleModel.BLOCK_SHOW_SET -> {
                     val paths = b.paths.map { resolveRef(it, ctx) }.filter { it.isNotEmpty() }
-                    applyPick(context, ctx, b, paths, b.param2.ifEmpty { "home" })
+                    // v0.8.26: the target is param3 (same as every other
+                    // pick block) — param2 used to be read as the TARGET
+                    // here and as the pick MODE inside applyPick at the
+                    // same time.
+                    applyPick(context, ctx, b, paths, resolvedTarget(context, b.param3))
                     Flow.CONTINUE
                 }
                 RuleModel.BLOCK_PICK_GROUP, RuleModel.BLOCK_PICK_PLAYLIST, RuleModel.BLOCK_RANDOM -> {
@@ -719,6 +734,12 @@ object RuleEngine {
                 "type" to b.type,
                 "exception" to e.javaClass.simpleName,
                 "message" to (e.message ?: ""))
+            // v0.8.26: an honest result — a failed block used to leave
+            // "ran 1 block(s)" standing while the wallpaper never changed
+            // (the 0.8.25 screen-on crash read exactly like that).
+            ctx.lastPickOk = false
+            ctx.blockReason = "block " + b.type + " failed: " +
+                (e.message ?: e.javaClass.simpleName)
             Flow.CONTINUE
         }
     }
@@ -731,7 +752,6 @@ object RuleEngine {
         ctx: RunContext,
         b: RuleModel.Block,
     ): List<String> {
-        val pick = b.param2.ifEmpty { "random" }
         return when (b.type) {
             RuleModel.BLOCK_PICK_GROUP -> {
                 val group = resolveRef(b.param, ctx)
@@ -751,7 +771,11 @@ object RuleEngine {
                                 filepath = GroupBlocks.marker(group),
                                 title = group, type = "Group",
                                 groupRef = group,
-                                blockOrder = if (pick == "random") GroupBlocks.ORDER_RANDOM else GroupBlocks.ORDER_MANUAL,
+                                // v0.8.26: a group with no block entry
+                                // resolves in its natural order — the pick
+                                // is random unless a block entry says
+                                // otherwise (tapping the group sets it).
+                                blockOrder = GroupBlocks.ORDER_RANDOM,
                             ),
                         ).paths
                     }
@@ -773,8 +797,8 @@ object RuleEngine {
                 paths
             }
             RuleModel.BLOCK_RANDOM -> when (b.param.ifEmpty { "library" }) {
-                "group" -> candidatesFor(context, ctx, b.copy(type = RuleModel.BLOCK_PICK_GROUP, param2 = pick))
-                "playlist" -> candidatesFor(context, ctx, b.copy(type = RuleModel.BLOCK_PICK_PLAYLIST, param2 = pick))
+                "group" -> candidatesFor(context, ctx, b.copy(type = RuleModel.BLOCK_PICK_GROUP))
+                "playlist" -> candidatesFor(context, ctx, b.copy(type = RuleModel.BLOCK_PICK_PLAYLIST))
                 "discover" -> {
                     // The Discover source = Discover's own current settings.
                     val url = withContext(Dispatchers.IO) {
@@ -815,40 +839,13 @@ object RuleEngine {
                 }
             }
             else -> emptyList()
-        }.let { list ->
-            // Apply the pick MODE ordering. v0.8.25: "newest" sorts by the
-            // real modification time (file date, or the document's
-            // last_modified for content URIs) — the old filename-string
-            // sort ordered "IMG_9999" over "IMG_10000".
-            when (pick) {
-                "inOrder" -> list
-                "newest" -> list.sortedByDescending { mtimeOf(context, it) }
-                else -> list
-            }
         }
+        // v0.8.26: no pick-mode re-sorting — the candidate list arrives in
+        // the source's OWN order (the group's block order / the playlist's
+        // entry order), which is the single order source now.
     }
 
-    /** Best-effort mtime: file date, document last_modified, else 0. */
-    private fun mtimeOf(context: Context, path: String): Long = try {
-        if (path.startsWith("content://")) {
-            context.contentResolver.query(android.net.Uri.parse(path), null, null, null, null)
-                ?.use { c ->
-                    if (!c.moveToFirst()) return@use 0L
-                    for (name in listOf("last_modified", "lastModified", "last_modified_time")) {
-                        val i = c.getColumnIndex(name)
-                        if (i >= 0 && !c.isNull(i)) {
-                            val v = c.getLong(i)
-                            return@use if (v > 10_000_000_000L) v else v * 1000L
-                        }
-                    }
-                    0L
-                } ?: 0L
-        } else {
-            java.io.File(path).takeIf { it.exists() }?.lastModified() ?: 0L
-        }
-    } catch (e: Exception) {
-        0L
-    }
+
 
     /** Pick from [candidates] per the block's mode and apply. */
     private suspend fun applyPick(
@@ -866,10 +863,27 @@ object RuleEngine {
                 "block" to b.type)
             return
         }
+        // v0.8.26 (ONE ORDER SOURCE): the pick mode is DERIVED from the
+        // source's own configured order — the group's block order (set by
+        // tapping the group in the playlist) or the playlist's order mode.
+        // The per-block "How to pick" override is gone: it duplicated the
+        // group's Random setting (confusing), and for "show a set" the
+        // param2 slot collided with the TARGET ("home"/"lock").
         val mode = when (b.type) {
-            RuleModel.BLOCK_SHOW_SET, RuleModel.BLOCK_PICK_GROUP,
-            RuleModel.BLOCK_PICK_PLAYLIST, RuleModel.BLOCK_RANDOM,
-            -> b.param2.ifEmpty { "random" }
+            RuleModel.BLOCK_PICK_GROUP -> {
+                val group = resolveRef(b.param, ctx)
+                val playlist = SuitePlaylistStore.read(context, ctx.playlistId)
+                val entry = playlist?.entries?.firstOrNull {
+                    com.wepwawet.playlist.GroupBlocks.isGroupBlock(it.filepath) &&
+                        it.groupRef == group
+                }
+                val order = entry?.blockOrder ?: com.wepwawet.playlist.GroupBlocks.ORDER_RANDOM
+                if (order == com.wepwawet.playlist.GroupBlocks.ORDER_RANDOM) "random" else "inOrder"
+            }
+            RuleModel.BLOCK_PICK_PLAYLIST -> {
+                val pl = SuitePlaylistStore.read(context, b.param.ifEmpty { ctx.playlistId })
+                if (pl?.orderMode == SuitePlaylistStore.ORDER_ORDERED) "inOrder" else "random"
+            }
             else -> "random"
         }
         val current = WEWallpaperService.instance?.currentWallpaperFile()

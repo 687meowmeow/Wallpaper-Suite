@@ -28,6 +28,7 @@ object RuleActivityLog {
 
     /** kinds: "fired" | "skipped" | "applied" | "event" | "info" | "error" */
     data class Entry(
+        val seq: Long,
         val at: Long,
         val kind: String,
         val playlist: String,
@@ -37,11 +38,30 @@ object RuleActivityLog {
 
     private fun file(context: Context): File = File(context.filesDir, FILE)
 
+    /**
+     * v0.8.26 (THE ACTIVITY CRASH FIX): a monotonic per-file sequence
+     * stamp. The crash report: two entries recorded in the SAME
+     * millisecond (two playlists skipped by one event) produced identical
+     * LazyColumn keys and killed the screen. The seq makes every entry
+     * unique even when timestamps collide; it is derived from the store
+     * (max(seq) + 1) so it also survives process restarts.
+     */
+    private fun nextSeq(arr: JSONArray): Long {
+        var max = 0L
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val s = o.optLong("seq", 0L)
+            if (s > max) max = s
+        }
+        return max + 1
+    }
+
     @Synchronized
     fun record(context: Context, kind: String, playlist: String, rule: String, text: String) {
         try {
             val arr = readRaw(context)
             arr.put(JSONObject()
+                .put("seq", nextSeq(arr))
                 .put("at", System.currentTimeMillis())
                 .put("kind", kind)
                 .put("playlist", playlist)
@@ -64,6 +84,7 @@ object RuleActivityLog {
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
             out.add(Entry(
+                seq = o.optLong("seq", i.toLong()),
                 at = o.optLong("at", 0L),
                 kind = o.optString("kind", "info"),
                 playlist = o.optString("playlist", ""),

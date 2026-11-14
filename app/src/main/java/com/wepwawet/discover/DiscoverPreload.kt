@@ -59,6 +59,39 @@ object DiscoverPreload {
     /** Recent demand: every consumption +1; decays -1 per tick. */
     private val demand = AtomicInteger(0)
 
+    /**
+     * v0.8.26 (THE RETRY-STORM FIX): the 0.8.25 log wall — after the
+     * network died, every idle tick re-ran a 3-attempt fill, every 15
+     * seconds, forever (3 lanes × 8s of DoH timeouts each round, plus a
+     * WARN line per lane). A fill that appends NOTHING now backs off
+     * exponentially (1 → 2 → 4 → … → 15 min); kicks during a backoff are
+     * ignored. Any success, any consumption, or the network coming back
+     * resets it.
+     */
+    @Volatile
+    private var backoffUntilMs: Long = 0L
+    @Volatile
+    private var consecutiveEmptyFills: Int = 0
+
+    private fun noteFillResult(appended: Int) {
+        if (appended > 0) {
+            consecutiveEmptyFills = 0
+            backoffUntilMs = 0L
+        } else {
+            val n = ++consecutiveEmptyFills
+            val minutes = (1L shl (n - 1).coerceAtMost(4)).coerceAtMost(15L)
+            backoffUntilMs = System.currentTimeMillis() + minutes * 60_000L
+            WepWawetLogger.appWarn("$TAG: nothing appended — backing off",
+                "empty_fills" to n,
+                "minutes" to minutes)
+        }
+    }
+
+    private fun resetBackoff() {
+        consecutiveEmptyFills = 0
+        backoffUntilMs = 0L
+    }
+
     /** One in-flight guard for logs/tests. */
     fun isRunning(): Boolean = filling.get()
 
@@ -74,6 +107,7 @@ object DiscoverPreload {
 
     /** Call on EVERY image consumption (queue pop) — refill + scale up. */
     fun onConsumed(context: Context) {
+        resetBackoff()
         val d = demand.incrementAndGet()
         WepWawetLogger.appDebug("$TAG: consumed — demand $d, target ${currentTarget()}")
         kick(context)
@@ -81,6 +115,7 @@ object DiscoverPreload {
 
     /** Call on a manual refresh/search (demand without a queue pop). */
     fun onManualDemand(context: Context) {
+        resetBackoff()
         val d = demand.incrementAndGet()
         WepWawetLogger.appDebug("$TAG: manual demand — demand $d")
         kick(context)
@@ -111,6 +146,10 @@ object DiscoverPreload {
      */
     fun kick(context: Context) {
         if (!filling.compareAndSet(false, true)) return
+        if (System.currentTimeMillis() < backoffUntilMs) {
+            filling.set(false)
+            return
+        }
         ensureTicker(context)
         val appContext = context.applicationContext
         com.wepwawet.WepWawetApplication.appScope.launch {
@@ -177,12 +216,14 @@ object DiscoverPreload {
                 "target" to target,
                 "concurrency" to concurrency,
                 "attempts" to attempts)
+            noteFillResult(added)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
             WepWawetLogger.appWarn("$TAG: fill failed",
                 "exception" to e.javaClass.simpleName,
                 "message" to (e.message ?: ""))
+            noteFillResult(0)
         }
     }
 
@@ -210,8 +251,10 @@ object DiscoverPreload {
                 sources = sources,
             )
         } catch (e: Exception) {
+            // v0.8.26: message-first — the minified build rendered the
+            // class name as "b" (R8), hiding the actual reason.
             WepWawetLogger.appWarn("$TAG: lane search failed",
-                "exception" to e.javaClass.simpleName)
+                "message" to (e.message ?: e.javaClass.simpleName))
             null
         } ?: return@withContext false
         val bytes = try {
@@ -221,7 +264,7 @@ object DiscoverPreload {
             // tracker; the dedup handoff is dropped (id stays seen).
             DiscoverDedup.abandon(url)
             WepWawetLogger.appWarn("$TAG: lane download failed",
-                "exception" to e.javaClass.simpleName,
+                "message" to (e.message ?: e.javaClass.simpleName),
                 "url" to url.take(80))
             return@withContext false
         }
@@ -247,6 +290,7 @@ object DiscoverPreload {
                 object : ConnectivityManager.NetworkCallback() {
                     override fun onAvailable(network: android.net.Network) {
                         WepWawetLogger.appInfo("$TAG: network available — retrying preload")
+                        resetBackoff()
                         kick(appContext)
                     }
                 },

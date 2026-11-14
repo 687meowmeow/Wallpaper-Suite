@@ -16,8 +16,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -410,6 +412,19 @@ fun PlaylistEditorScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text("Changes when…", style = MaterialTheme.typography.titleMedium)
+                        // v0.8.26: the one-line reminder of the gate
+                        // (was journal spam before).
+                        Text(
+                            if (activeId == current.id)
+                                "Rules run while this playlist is ACTIVE."
+                            else
+                                "These rules won't run — this playlist isn't the active one.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (activeId == current.id)
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            else MaterialTheme.colorScheme.error,
+                            modifier = Modifier.weight(1f),
+                        )
                         TextButton(onClick = { showTriggerSheet = true }) {
                             Icon(Icons.Filled.Add, contentDescription = null)
                         }
@@ -1702,9 +1717,18 @@ private fun BlockEditorDialog(
         Surface(
             shape = RoundedCornerShape(22.dp),
             color = MaterialTheme.colorScheme.surface,
+            // v0.8.26 (THE OFF-SCREEN FIX): bounded FRACTIONS of the
+            // inset-adjusted window (97% wide, 92% tall), centered — the
+            // full-bleed fillMaxSize sheet ran under the status and
+            // navigation bars on edge-to-edge devices, so the header
+            // (and on short screens the Save row) sat off-screen.
+            // systemBarsPadding FIRST keeps the sheet clear of the bars;
+            // the fractions keep it a near-full-screen sheet with visible
+            // margins on every device.
             modifier = Modifier
-                .fillMaxSize()
-                .padding(8.dp),
+                .systemBarsPadding()
+                .fillMaxWidth(0.97f)
+                .fillMaxHeight(0.92f),
         ) {
             Column(
                 modifier = Modifier

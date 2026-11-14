@@ -43,6 +43,33 @@ object DiscoverDedup {
     private val pending = HashMap<String, String>()
     private var persisted: MutableList<String>? = null
 
+    // ── Test hooks (session state only; no Context needed) ──────────────
+
+    /** Unit tests: reset the session state (persisted list stays). */
+    @Synchronized
+    fun resetForTests() {
+        sessionIds.clear()
+        pending.clear()
+        shownIds.clear()
+        persisted = null
+    }
+
+    /** Unit tests: the session half of [reserve] (no persistence). */
+    @Synchronized
+    fun reserveForTest(url: String): Boolean {
+        val id = canonicalId(url)
+        if (id in sessionIds) return false
+        sessionIds.add(id)
+        pending[id] = url
+        return true
+    }
+
+    /** Marks a url presented to the user outside the queue. */
+    @Synchronized
+    fun markShownForTest(url: String) {
+        shownIds.add(canonicalId(url))
+    }
+
     // ── Canonical ids ───────────────────────────────────────────────────
 
     /** The pixiv filename: `<illustId>_p<page>[_<size>].<ext>`. */
@@ -148,6 +175,35 @@ object DiscoverDedup {
     @Synchronized
     fun abandon(url: String) {
         pending.remove(canonicalId(url))
+    }
+
+    /**
+     * v0.8.26 (THE QUEUE-POP FIX): the POP gate. The old pop called
+     * [claim] — but claim's pending handoff is consumed by the APPEND
+     * gate, and every queued image's id sits in [sessionIds] from its
+     * reserve, so EVERY pop found "a duplicate" and deleted the slot:
+     * the queue drained itself and Refresh always fell through to the
+     * network (the 0.8.25 log: all 8 slots deleted per tap, "no image
+     * found" with a full queue).
+     *
+     * The correct question at pop is "was this image already PRESENTED
+     * to the user this session?" — the reserve/append bookkeeping is
+     * search-side hygiene, not shown-ness. [shownIds] tracks exactly the
+     * presented images; a queued id not yet shown pops.
+     */
+    private val shownIds = HashSet<String>()
+
+    @Synchronized
+    fun claimShownFromQueue(url: String): Boolean {
+        val id = canonicalId(url)
+        if (id in shownIds) {
+            WepWawetLogger.appDebug("$TAG: pop skipped — already presented",
+                "id" to id,
+                "url" to url.takeLast(64))
+            return false
+        }
+        shownIds.add(id)
+        return true
     }
 
     @Synchronized

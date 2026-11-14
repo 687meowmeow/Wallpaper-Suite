@@ -419,11 +419,20 @@ object RuleTriggerHub {
      * The next interval boundary at or after [now], anchored to the
      * persisted last-fire (normalized forward — whole missed boundaries
      * collapse, so time offline never stacks catch-up fires and never
-     * shifts the grid). A never-fired interval starts counting NOW.
+     * shifts the grid).
+     *
+     * v0.8.26 (re-audit): a never-fired interval PERSISTS its anchor HERE
+     * (at arm time). Before, the anchor was only written when a wake
+     * fired — so the very first wake after a restart hit the
+     * "first schedule" branch, re-anchored to NOW and swallowed the fire
+     * it was armed for: "Every 1 min" fired at minute 2, not minute 1.
      */
     private fun intervalNextFire(context: Context, key: String, intervalMs: Long, now: Long): Long {
         var anchor = lastIntervalFire(context, key)
-        if (anchor <= 0L) return now + intervalMs
+        if (anchor <= 0L) {
+            anchor = now
+            rememberIntervalFire(context, key, anchor)
+        }
         while (anchor + intervalMs <= now) anchor += intervalMs
         return anchor + intervalMs
     }

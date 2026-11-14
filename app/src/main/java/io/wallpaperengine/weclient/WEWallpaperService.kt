@@ -94,8 +94,20 @@ class WEWallpaperService : WallpaperService() {
         get() = currentEngine != null
 
     fun requestWallpaperReload() {
-        currentEngine?.reloadActiveWallpaper()
-        currentEngine?.onWallpaperChangedExternally()
+        // v0.8.26 (THE SCREEN-ON-ROTATION FIX): posted to the MAIN looper.
+        // The rules engine calls this from a coroutine worker, and
+        // reloadActiveWallpaper() constructs the wallpaper VIEW
+        // (a GLSurfaceView subclass) — a View constructor on a thread
+        // with no Looper throws "Can't create handler …
+        // Looper.prepare()" and the rotation silently never happened:
+        // the rule fired, the pref was written, the screen kept the old
+        // image (six of these in the 0.8.25 crash log). The engine's own
+        // handler is a main-looper handler, so posting here lands the
+        // load on exactly the thread the engine's tick uses.
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            currentEngine?.reloadActiveWallpaper()
+            currentEngine?.onWallpaperChangedExternally()
+        }
     }
 
     fun requestWallpaperApplyGeneralProperties() {
@@ -1072,7 +1084,9 @@ class WEWallpaperService : WallpaperService() {
          * (the same reloadActiveWallpaper path playlistUpdate uses).
          */
         fun playlistReloadAfterExternalChange() {
-            reloadActiveWallpaper()
+            // v0.8.26: same View-thread rule as requestWallpaperReload —
+            // post the load; callers may be coroutine workers.
+            handler.post { reloadActiveWallpaper() }
         }
 
         fun reloadActiveWallpaper() {

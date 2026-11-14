@@ -460,8 +460,6 @@ fun WepWawetNavHost() {
                 // onResume, so server-side sorts kept HTML-scraping after
                 // saving until the app was backgrounded once).
                 onApiKeySaved = { key -> steamApi.apiKey = key },
-                // v0.8.25: the playlist activity view (fired/skipped + why).
-                onOpenActivity = { nav.navigate("ruleActivity") },
             )
         }
 

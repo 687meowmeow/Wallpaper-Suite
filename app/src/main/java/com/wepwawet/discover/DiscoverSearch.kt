@@ -107,6 +107,27 @@ object DiscoverSearch {
     class NoImageException(message: String) : Exception(message)
 
     /**
+     * v0.8.26: the last source failure of THIS search path — the
+     * no-image message carries it, so "No image found" now says whether
+     * it was a dead network (DNS/timeouts), rate limits, or just no
+     * matches (the 0.8.25 experience: an empty "no image found" while
+     * the log clearly knew why).
+     */
+    @Volatile
+    var lastSourceFailure: String = ""
+        private set
+
+    private fun noteSourceFailure(url: String, e: Exception) {
+        val kind = when (e) {
+            is java.net.UnknownHostException -> "DNS unresolvable"
+            is java.net.SocketTimeoutException -> "timeout"
+            is java.net.ConnectException -> "connection refused"
+            else -> e.javaClass.simpleName
+        }
+        lastSourceFailure = kind + " — " + hostOf(url)
+    }
+
+    /**
      * Search for ONE image URL that is not in `recentUrls`.
      * Throws [NoImageException] when the whole ladder fails (rare — the
      * untaged fallback tier exists exactly so this doesn't happen) or when
@@ -166,7 +187,13 @@ object DiscoverSearch {
                 return@withContext url
             }
         }
-        throw NoImageException("No image found across the tag ladder (attempted $attempts)")
+        val why = lastSourceFailure
+        lastSourceFailure = ""
+        throw NoImageException(
+            if (why.isNotEmpty())
+                "No image found (attempted $attempts; last source failure: $why — network or sources unreachable)"
+            else
+                "No image found (attempted $attempts; no source matched the tags — try different tags)")
     }
 
     /** The v1.0.0 tier ladder. Each tier returns null on miss. */
@@ -879,6 +906,7 @@ object DiscoverSearch {
                 }
             }
     } catch (e: Exception) {
+        noteSourceFailure(url, e)
         WepWawetLogger.appInfo("$TAG: source failed",
             "host" to url.take(60),
             "exception" to e.javaClass.simpleName)
@@ -920,6 +948,7 @@ object DiscoverSearch {
                 }
             }
     } catch (e: Exception) {
+        noteSourceFailure(url, e)
         WepWawetLogger.appInfo("$TAG: source failed",
             "host" to url.take(60),
             "exception" to e.javaClass.simpleName)

@@ -37,6 +37,9 @@ object DohDns : Dns {
             .build()
     }
 
+    private const val RESOLVER_COOLDOWN_MS = 60_000L
+    private const val NEG_TTL_MS = 60_000L
+
     /** By-IP HTTPS JSON DoH endpoints (no bootstrap DNS needed). */
     private val RESOLVERS = listOf(
         "https://1.1.1.1/dns-query?name=%s&type=A",
@@ -48,6 +51,41 @@ object DohDns : Dns {
     @Volatile
     private var dohOk = 0
 
+    // v0.8.26 (the retry-storm fix): the 0.8.25 log shows a network where
+    // system DNS drops the booru hosts AND both DoH endpoints time out —
+    // every lookup then burned 4s × resolvers, for host after host, on
+    // every search attempt (8 sources × the fill's 15-second retries).
+    // Three counter-measures: a per-resolver COOLDOWN after consecutive
+    // failures, STICKINESS to the resolver that last worked, and a short
+    // NEGATIVE cache so a host that failed all paths fails fast for a
+    // while instead of re-paying the timeouts.
+    private val resolverFailures = ConcurrentHashMap<String, Int>()
+    private val resolverCooldownUntil = ConcurrentHashMap<String, Long>()
+    private val resolverSuccessAt = ConcurrentHashMap<String, Long>()
+
+    @Volatile
+    private var lastGoodResolver: String? = null
+
+    private class Negative(val at: Long)
+    private val negativeCache = ConcurrentHashMap<String, Negative>()
+
+    private fun noteResolverFailure(template: String) {
+        val n = (resolverFailures[template] ?: 0) + 1
+        resolverFailures[template] = n
+        if (n >= 3) {
+            resolverCooldownUntil[template] = System.currentTimeMillis() + RESOLVER_COOLDOWN_MS
+            resolverFailures[template] = 0
+            WepWawetLogger.appWarn("$TAG: resolver cooling down",
+                "resolver" to template.substringBefore('?'),
+                "cooldown_ms" to RESOLVER_COOLDOWN_MS)
+        }
+    }
+
+    private fun noteResolverSuccess(template: String) {
+        resolverFailures[template] = 0
+        resolverSuccessAt[template] = System.currentTimeMillis()
+    }
+
     override fun lookup(hostname: String): List<InetAddress> {
         // Never DoH-resolve the DoH resolvers themselves (they're by-IP
         // anyway) or localhost.
@@ -55,6 +93,16 @@ object DohDns : Dns {
             return Dns.SYSTEM.lookup(hostname)
         }
         cache[hostname]?.let { return it }
+
+        // v0.8.26: the negative cache — a host that failed EVERY path
+        // fails fast for NEG_TTL_MS instead of re-paying 8s of DoH
+        // timeouts on every search attempt.
+        negativeCache[hostname]?.let {
+            if (System.currentTimeMillis() - it.at < NEG_TTL_MS) {
+                throw UnknownHostException("Failed to resolve '$hostname' (recently failed all paths)")
+            }
+            negativeCache.remove(hostname)
+        }
 
         // 1) system resolver first (fast path, no overhead when it works)
         val system = try {
@@ -67,8 +115,20 @@ object DohDns : Dns {
         }
 
         // 2) DoH fallback — the user's network is dropping these lookups.
+        // v0.8.26: try the LAST GOOD resolver first (stickiness), skip
+        // cooled-down resolvers, and record failures for the cooldown.
         dohUsed++
-        for (template in RESOLVERS) {
+        val now = System.currentTimeMillis()
+        val ordered = RESOLVERS.sortedWith(
+            compareByDescending<String> { it == lastGoodResolver }
+                .thenBy { resolverCooldownUntil[it] ?: 0L })
+        for (template in ordered) {
+            if ((resolverCooldownUntil[template] ?: 0L) > now) {
+                WepWawetLogger.appInfo("$TAG: resolver skipped — cooling down",
+                    "resolver" to template.substringBefore('?'),
+                    "host" to hostname)
+                continue
+            }
             val url = template.format(hostname)
             val answer = try {
                 val req = okhttp3.Request.Builder()
@@ -97,6 +157,7 @@ object DohDns : Dns {
                     }
                 }
             } catch (e: Exception) {
+                noteResolverFailure(template)
                 WepWawetLogger.appInfo("$TAG: DoH resolver failed",
                     "resolver" to url.substringBefore('?'),
                     "host" to hostname,
@@ -105,6 +166,8 @@ object DohDns : Dns {
             }
             if (!answer.isNullOrEmpty()) {
                 dohOk++
+                noteResolverSuccess(template)
+                lastGoodResolver = template
                 WepWawetLogger.appInfo("$TAG: resolved via DoH ✓",
                     "host" to hostname,
                     "resolver" to url.substringBefore('?'),
@@ -117,8 +180,7 @@ object DohDns : Dns {
             "host" to hostname,
             "doh_used" to dohUsed,
             "doh_ok" to dohOk)
-        // Cache the failure briefly? No — throw the original failure so
-        // OkHttp's normal error path (and our source ladder) applies.
+        negativeCache[hostname] = Negative(System.currentTimeMillis())
         throw UnknownHostException("Failed to resolve '$hostname' (system DNS and DoH)")
     }
 }

@@ -102,7 +102,10 @@ fun PlaylistActivityScreen(onBack: () -> Unit) {
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(entries, key = { "${it.at}_${it.rule}_${it.text}" }) { e ->
+                // v0.8.26 (crash fix): keys are the journal's unique
+                // sequence stamps — timestamps collide (two playlists
+                // skipped by one event, same millisecond).
+                items(entries, key = { it.seq }) { e ->
                     ActivityRow(e, names[e.playlist] ?: "")
                 }
             }

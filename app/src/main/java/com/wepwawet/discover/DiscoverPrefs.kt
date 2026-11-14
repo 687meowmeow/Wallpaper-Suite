@@ -473,11 +473,13 @@ object DiscoverPrefs {
                     .remove("discover_q_sig_$s").apply()
                 continue
             }
-            // v0.9.2 (the review): the THIRD check point — a slot whose
-            // image was already shown under another url variant (its id
-            // is seen and this url holds no pending reservation) is
-            // dropped and the NEXT slot is tried.
-            if (!DiscoverDedup.claim(url)) {
+            // v0.8.26 (THE QUEUE-POP FIX): the pop gate is SHOWN-based
+            // (claimShownFromQueue) — the old claim() consumed the
+            // reserve handoff at APPEND time, so every queued image was
+            // "a duplicate" here and the queue drained itself. A slot is
+            // skipped now only when the user was already presented this
+            // exact image this session (another path showed it).
+            if (!DiscoverDedup.claimShownFromQueue(url)) {
                 queueFile(context, s).delete()
                 p.edit().remove("discover_q_url_$s").remove("discover_q_at_$s")
                     .remove("discover_q_sig_$s").apply()

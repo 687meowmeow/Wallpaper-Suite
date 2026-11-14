@@ -344,19 +344,6 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
     fun persistTags() = DiscoverPrefs.writeTags(context, strictTags, softTags)
 
     /**
-     * v0.8.16: background refill of the preload queue — keeps 3 images
-     * downloaded at all times so Refresh swaps INSTANTLY. Single-flight
-     * (a refill already running is never doubled up).
-     *
-     * v0.8.18 (review B8): the single-flight flag is a remembered
-     * AtomicBoolean, NOT a plain local `var`. The old local was recreated
-     * by every recomposition, so a recomposition while a refill was in
-     * flight (routine — the preview/status state changes during the loop)
-     * produced a fresh `refilling = false` closure and a SECOND concurrent
-     * refill loop could start (double booru requests, wasted bandwidth).
-     * `remember` shares one flag across all recompositions.
-     */
-    /**
      * The CURRENT search parameters, as a queue signature. v0.8.18 — THE
      * TAGS FIX: the preload queue used to be parameter-blind, so changing
      * tags and tapping Refresh still popped an image preloaded under the
@@ -366,80 +353,16 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
     fun currentSignature() = DiscoverPrefs.searchSignature(
         strictTags, softTags, styleValue, r18Mode, sources)
 
-    val refilling = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
-    var consecutiveRefillFailures = 0
+    /**
+     * v0.8.26: the screen's own refill ladder is GONE — it duplicated the
+     * adaptive preloader (two ladders hammered the sources in parallel;
+     * the 0.8.25 log shows both failing independently on a dead network).
+     * ONE path owns refills: DiscoverPreload (bounded, health-aware,
+     * demand-adaptive, backed off on failure). The screen only pops and
+     * falls back to a single inline search.
+     */
     fun refillQueue() {
-        if (!refilling.compareAndSet(false, true)) return
-        // v0.9.2 (the review): the app scope, NOT the screen's
-        // rememberCoroutineScope — leaving the Discover tab cancelled the
-        // refill mid-download (LeftCompositionCancellationException in the
-        // log) and lost the queue work.
-        com.wepwawet.WepWawetApplication.appScope.launch {
-            try {
-                val signature = currentSignature()
-                // v0.8.19: the queue target comes from the prefs
-                // constant (8 — see DiscoverPrefs.QUEUE_SIZE).
-                // v0.9.2: a hard attempt bound (failed downloads and
-                // dedup skips continue instead of breaking).
-                var attempts = 0
-                while (DiscoverPrefs.queueDepth(context, signature) <
-                    DiscoverPrefs.QUEUE_TARGET && attempts++ < 24) {
-                    // v0.9.1: the refill excludes BOTH the recents AND the
-                    // URLs already sitting in the queue — a random draw can
-                    // repeat inside one refill loop, and duplicates in the
-                    // queue meant Refresh showed the same image repeatedly.
-                    val excluded = DiscoverPrefs.readRecentUrls(context) +
-                        DiscoverPrefs.readQueuedUrls(context)
-                    val nextUrl = withContext(Dispatchers.IO) {
-                        runCatching {
-                            DiscoverSearch.searchOne(
-                                context = context,
-                                strictTags = strictTags,
-                                softTags = softTags,
-                                styleValue = styleValue,
-                                r18Mode = r18Mode,
-                                recentUrls = excluded,
-                                sources = sources,
-                            )
-                        }
-                            .onFailure {
-                                WepWawetLogger.appWarn("DiscoverScreen: refillQueue — the preload search failed",
-                                    "exception" to it.javaClass.simpleName,
-                                    "message" to (it.message ?: ""))
-                            }
-                        .getOrNull()
-                    } ?: break
-                    val nextBytes = withContext(Dispatchers.IO) {
-                        runCatching { DiscoverSearch.downloadImage(nextUrl) }
-                            .onFailure {
-                                WepWawetLogger.appWarn("DiscoverScreen: refillQueue — the preload download failed",
-                                    "exception" to it.javaClass.simpleName,
-                                    "message" to (it.message ?: ""))
-                            }
-                            .getOrNull()
-                    }
-                    // v0.9.2: a failed download no longer kills the refill —
-                    // the URL/host is marked in the session health tracker
-                    // and the next candidate is fetched.
-                    if (nextBytes == null || nextBytes.size <= 1024) {
-                        consecutiveRefillFailures++
-                        if (consecutiveRefillFailures >= 6) break
-                        continue
-                    }
-                    consecutiveRefillFailures = 0
-                    val appended = withContext(Dispatchers.IO) {
-                        DiscoverPrefs.appendQueuedImage(context, nextUrl, nextBytes, signature)
-                    }
-                    if (!appended) continue
-                    WepWawetLogger.appInfo("DiscoverScreen: preloaded image queued",
-                        "bytes" to nextBytes.size,
-                        "id" to DiscoverDedup.canonicalId(nextUrl),
-                        "depth" to DiscoverPrefs.queueDepth(context, signature))
-                }
-            } finally {
-                refilling.set(false)
-            }
-        }
+        DiscoverPreload.kick(context)
     }
 
     /**

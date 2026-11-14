@@ -50,6 +50,7 @@ object DiscoverSearchScore {
 object DiscoverSourceHealthTestAccess {
     fun reset() {
         DiscoverSourceHealth.resetForTests()
+        DiscoverDedupTestAccess.reset()
     }
 
     fun record(url: String, success: Boolean, elapsedMs: Long) {
@@ -58,4 +59,19 @@ object DiscoverSourceHealthTestAccess {
     }
 
     fun rank(urls: List<String>): List<String> = DiscoverSourceHealth.rank(urls)
+}
+
+/** Test access to DiscoverDedup's session lifecycle (object with state). */
+object DiscoverDedupTestAccess {
+    fun reset() {
+        DiscoverDedup.resetForTests()
+    }
+
+    fun reserve(url: String): Boolean = DiscoverDedup.reserveForTest(url)
+
+    fun claim(url: String): Boolean = DiscoverDedup.claim(url)
+
+    fun claimShownFromQueue(url: String): Boolean = DiscoverDedup.claimShownFromQueue(url)
+
+    fun markShown(url: String) = DiscoverDedup.markShownForTest(url)
 }

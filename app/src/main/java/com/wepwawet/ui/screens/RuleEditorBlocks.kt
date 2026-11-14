@@ -778,12 +778,6 @@ private fun targetLabel(block: RuleModel.Block): String = when (block.param3) {
     else -> block.param3
 }
 
-private fun pickModeLabel(block: RuleModel.Block): String = when (block.param2) {
-    "inOrder" -> "In order"
-    "newest" -> "Newest"
-    "avoidRecent" -> "Avoid the most recently shown"
-    else -> "Random"
-}
 
 private fun sourceLabel(v: String): String = when (v) {
     "group" -> "A group"
@@ -976,11 +970,7 @@ internal fun BlockCard(
                 }
             },
             close)
-        "pickmode" -> ChoiceDialog("How to pick",
-            listOf("Random", "In order", "Newest", "Avoid the most recently shown"),
-            pickModeLabel(block),
-            { idx -> onEdit { it.param2 = listOf("random", "inOrder", "newest", "avoidRecent")[idx] } },
-            close)
+
         "group" -> {
             val groups = LibraryPrefs.readGroups(context)
             ChoiceDialog("Group",
@@ -1250,19 +1240,22 @@ internal fun BlockCard(
                             SettingRow("Wallpaper", displayPath(block.param)) { field = "wallpaper" }
                             targetSetting()
                         }
+                        // v0.8.26 (ONE ORDER SOURCE): the "How to pick"
+                        // rows are GONE — a group picks in ITS OWN order
+                        // (set by tapping the group in the playlist), a
+                        // playlist in its order mode, "random from…" stays
+                        // random, and a set picks randomly. No duplicate
+                        // order controls in the Do section.
                         RuleModel.BLOCK_SHOW_SET -> {
-                            SettingRow("Set", "${block.paths.size} wallpapers") { field = "set" }
-                            SettingRow("How to pick", pickModeLabel(block)) { field = "pickmode" }
+                            SettingRow("Set", "${block.paths.size} wallpapers (random pick)") { field = "set" }
                             targetSetting()
                         }
                         RuleModel.BLOCK_PICK_GROUP -> {
                             SettingRow("Group", block.param.ifEmpty { "(pick a group)" }) { field = "group" }
-                            SettingRow("How to pick", pickModeLabel(block)) { field = "pickmode" }
                             targetSetting()
                         }
                         RuleModel.BLOCK_PICK_PLAYLIST -> {
                             SettingRow("Playlist", playlistNameOf(context, block.param)) { field = "playlist" }
-                            SettingRow("How to pick", pickModeLabel(block)) { field = "pickmode" }
                             targetSetting()
                         }
                         RuleModel.BLOCK_RANDOM -> {
@@ -1273,7 +1266,6 @@ internal fun BlockCard(
                             if (block.param == "playlist") {
                                 SettingRow("Playlist", playlistNameOf(context, block.param3)) { field = "playlist3" }
                             }
-                            SettingRow("How to pick", pickModeLabel(block)) { field = "pickmode" }
                             targetSetting()
                         }
                         RuleModel.BLOCK_PULL_DISCOVER, RuleModel.BLOCK_NEXT,
@@ -1402,7 +1394,7 @@ internal fun blockSummary(
 ): String = when (b.type) {
     RuleModel.BLOCK_LIMIT -> "Only use ${b.paths.size} wallpapers while this is active"
     RuleModel.BLOCK_SHOW -> "Show ${displayPath(b.param)} on the ${targetLabel(b).lowercase()}"
-    RuleModel.BLOCK_SHOW_SET -> "Show one of ${b.paths.size} wallpapers (${pickModeLabel(b).lowercase()})"
+    RuleModel.BLOCK_SHOW_SET -> "Show one of ${b.paths.size} wallpapers (random)"
     RuleModel.BLOCK_PICK_GROUP -> "Pick from the group \"${b.param.ifEmpty { "…" }}\""
     RuleModel.BLOCK_PICK_PLAYLIST -> "Pick from ${playlistNameOf(context, b.param)}"
     RuleModel.BLOCK_RANDOM -> "Random from ${sourceLabel(b.param).lowercase()}"

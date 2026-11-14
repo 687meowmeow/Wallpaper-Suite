@@ -51,6 +51,34 @@ class DiscoverSearchLogicTest {
         assertEquals(DiscoverDedup.canonicalId(a), DiscoverDedup.canonicalId(b))
     }
 
+    // ── The queue lifecycle (THE 0.8.25 POP BUG regression) ────────────
+
+    @Test
+    fun `a queued image pops — reserve and append do not make it a duplicate`() {
+        DiscoverDedupTestAccess.reset()
+        val url = "https://i.pixiv.re/img-master/img/2020/01/01/00/00/00/12345678_p0_master1200.jpg"
+        // The search path: found → reserved (session id + pending handoff).
+        DiscoverDedupTestAccess.reserve(url)
+        // The append path: the handoff is consumed by the append gate.
+        org.junit.Assert.assertTrue(DiscoverDedupTestAccess.claim(url))
+        // THE POP: must still succeed — the old code found the id in the
+        // session set and deleted the slot ("queue pop skipped a
+        // duplicate"), draining every queue in 0.8.25.
+        org.junit.Assert.assertTrue(DiscoverDedupTestAccess.claimShownFromQueue(url))
+        // A SECOND presentation of the same image IS a duplicate.
+        org.junit.Assert.assertFalse(DiscoverDedupTestAccess.claimShownFromQueue(url))
+    }
+
+    @Test
+    fun `an image shown through another path is skipped at pop`() {
+        DiscoverDedupTestAccess.reset()
+        val url = "https://safebooru.org/images/3928/aaaabbbbccccddddeeee000011112222.jpg"
+        DiscoverDedupTestAccess.reserve(url)
+        DiscoverDedupTestAccess.claim(url)          // queued
+        DiscoverDedupTestAccess.markShown(url)       // also shown inline meanwhile
+        org.junit.Assert.assertFalse(DiscoverDedupTestAccess.claimShownFromQueue(url))
+    }
+
     // ── Host-health ranking ─────────────────────────────────────────────
 
     @Test
