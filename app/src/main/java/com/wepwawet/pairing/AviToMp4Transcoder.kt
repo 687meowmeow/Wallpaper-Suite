@@ -249,7 +249,7 @@ object AviToMp4Transcoder {
         }
         // v0.7.24 (H-V1): finish() false → no valid MP4 was produced.
         if (!encoder.finish()) {
-            runCatching { outputFile.delete() }
+            runCatching { outputFile.delete() }.onFailure { WepWawetLogger.appWarn("AviToMp4Transcoder: outputFile — best-effort call failed", "exception" to it.javaClass.simpleName) }
             return false
         }
         return true
@@ -396,7 +396,7 @@ object AviToMp4Transcoder {
 
         val finished = if (ok) encoder.finish() else false.also { encoder.release() }
         if (!ok || !finished) {
-            runCatching { outputFile.delete() }
+            runCatching { outputFile.delete() }.onFailure { WepWawetLogger.appWarn("AviToMp4Transcoder: outputFile — best-effort call failed", "exception" to it.javaClass.simpleName) }
             return false
         }
         WepWawetLogger.proxy("$TAG: compressed transcode SUCCESS",

@@ -178,7 +178,7 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                     android.graphics.BitmapFactory.decodeFile(it.file.absolutePath)
                 }
                     .onFailure {
-                        WepWawetLogger.appWarn("DiscoverScreen: swallowed failure at line 179",
+                        WepWawetLogger.appWarn("DiscoverScreen: imageForSaving — decoding the newest history entry failed",
                             "exception" to it.javaClass.simpleName,
                             "message" to (it.message ?: ""))
                     }
@@ -390,21 +390,21 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                             )
                         }
                             .onFailure {
-                                WepWawetLogger.appWarn("DiscoverScreen: swallowed failure at line 385",
+                                WepWawetLogger.appWarn("DiscoverScreen: refillQueue — the preload search failed",
                                     "exception" to it.javaClass.simpleName,
                                     "message" to (it.message ?: ""))
                             }
                         .getOrNull()
                     } ?: break
                     val nextBytes = withContext(Dispatchers.IO) {
-                        runCatching { DiscoverSearch.downloadImage(nextUrl) }
+                        runCatching { DiscoverSearch.downloadImage(nextUrl) }.onFailure { WepWawetLogger.appWarn("DiscoverScreen: DiscoverSearch — best-effort call failed", "exception" to it.javaClass.simpleName) }
                         .onFailure {
                             WepWawetLogger.appWarn("DiscoverScreen: queue prefetch download failed",
                                 "exception" to it.javaClass.simpleName,
                                 "message" to (it.message ?: ""))
                         }
                             .onFailure {
-                                WepWawetLogger.appWarn("DiscoverScreen: swallowed failure at line 388",
+                                WepWawetLogger.appWarn("DiscoverScreen: refillQueue — the preload download failed",
                                     "exception" to it.javaClass.simpleName,
                                     "message" to (it.message ?: ""))
                             }
@@ -688,7 +688,7 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                 val result = DiscoverApplier.applyScreens(context, crop, homeState, lockState, null)
                 if (result.ok) {
                     // Pop the restored entry off the ring.
-                    runCatching { entry.file.delete() }
+                    runCatching { entry.file.delete() }.onFailure { WepWawetLogger.appWarn("DiscoverScreen: entry — best-effort call failed", "exception" to it.javaClass.simpleName) }
                     history = DiscoverApplier.readHistory(context)
                     previewBitmap = bmp
                     previewIsFresh = false
@@ -705,53 +705,6 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
         }
     }
 
-    /** Cycle a screen's tri-state Off → Pink → Blue → Off. */
-    fun cycleScreen(isHome: Boolean) {
-        val (h, l) = screens
-        val wasDual = DiscoverPrefs.isDualMode(h, l)
-        val newPair = if (isHome) ((h + 1) % 3) to l else h to ((l + 1) % 3)
-        screens = newPair
-        DiscoverPrefs.writeScreens(context, newPair.first, newPair.second)
-        WepWawetLogger.appInfo("DiscoverScreen: screen toggled",
-            "which" to if (isHome) "home" else "lock",
-            "home_state" to newPair.first,
-            "lock_state" to newPair.second,
-            "mode" to when {
-                DiscoverPrefs.isDualMode(newPair.first, newPair.second) -> "dual"
-                DiscoverPrefs.isSyncMode(newPair.first, newPair.second) -> "sync"
-                else -> "single"
-            })
-        // Entering dual mode with a home image but no lock image → fetch
-        // the lock complement in the background (1.0's complement work).
-        val nowDual = DiscoverPrefs.isDualMode(newPair.first, newPair.second)
-        if (nowDual && !wasDual && previewBitmap != null && previewLockBitmap == null && !fetching) {
-            scope.launch {
-                try {
-                    val lockUrl = withContext(Dispatchers.IO) {
-                        DiscoverSearch.searchOne(
-                            context = context,
-                            strictTags = strictTags,
-                            softTags = softTags,
-                            styleValue = styleValue,
-                            r18Mode = r18Mode,
-                            recentUrls = DiscoverPrefs.readRecentUrls(context),
-                            sources = sources,
-                        )
-                    }
-                    val lockBytes = withContext(Dispatchers.IO) { DiscoverSearch.downloadImage(lockUrl) }
-                    DiscoverPrefs.pushRecentUrl(context, lockUrl)
-                    previewLockBitmap = withContext(Dispatchers.IO) {
-                        DiscoverApplier.decode(lockBytes, DiscoverApplier.maxDecodeDimension(context))
-                    }
-                    WepWawetLogger.appInfo("DiscoverScreen: dual complement fetched",
-                        "url" to lockUrl.take(100))
-                } catch (e: Exception) {
-                    WepWawetLogger.appInfo("DiscoverScreen: dual complement failed (non-fatal)",
-                        "exception" to e.javaClass.simpleName)
-                }
-            }
-        }
-    }
 
     // v0.8.16: the schedule pref/worker are RETIRED — auto refresh is the
     // playlist system's job now (see the Auto refresh card). The legacy
@@ -774,7 +727,7 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                         android.graphics.BitmapFactory.decodeFile(newest.file.absolutePath)
                     }
                         .onFailure {
-                            WepWawetLogger.appWarn("DiscoverScreen: swallowed failure at line 743",
+                            WepWawetLogger.appWarn("DiscoverScreen: startup cleanup — removing the legacy Discover playlist failed",
                                 "exception" to it.javaClass.simpleName,
                                 "message" to (it.message ?: ""))
                         }
@@ -793,14 +746,14 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
             runCatching {
                 com.wepwawet.playlist.SuitePlaylistStore
                     .removeDiscoverPlaylistIfPresent(context)
-            }
+            }.onFailure { WepWawetLogger.appWarn("DiscoverScreen: block — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
         }
         runCatching {
             val wm = androidx.work.WorkManager.getInstance(context)
             wm.cancelUniqueWork("nyanpasu_periodic_ticker")
             wm.cancelUniqueWork("nyanpasu_apply_once")
             wm.cancelUniqueWork("nyanpasu_daily_chain")
-        }
+        }.onFailure { WepWawetLogger.appWarn("DiscoverScreen: block — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
     }
 
     Scaffold(
@@ -917,6 +870,13 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                             modifier = Modifier
                                 .fillMaxSize()
                                 .graphicsLayer {
+                                    // v0.9.0: origin pinned to the top-left —
+                                    // with the default CENTER origin the
+                                    // scale folded into the translation, so
+                                    // the window showed an OFF-CENTER slice
+                                    // on open and drags could expose blank
+                                    // space behind the image.
+                                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
                                     scaleX = dispW
                                     scaleY = dispH
                                     translationX = drawLeft
@@ -960,7 +920,10 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                 }
             }
 
-            // ===== Tools row (v1.0.0: Undo / Home / Lock — all LABELED) =====
+            // ===== Tools row =====
+            // v0.9.0 redesign: the Home/Lock tri-state toggles MOVED to the
+            // top of the app (UniversalScreenToggles in WepWawetNavHost) —
+            // one shared spot that governs every apply in the app.
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -971,25 +934,7 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                     Spacer(Modifier.width(6.dp))
                     Text("Undo")
                 }
-                TriStateButton(
-                    label = "Home",
-                    state = homeState,
-                    onCycle = { cycleScreen(isHome = true) },
-                    modifier = Modifier.weight(1f),
-                )
-                TriStateButton(
-                    label = "Lock",
-                    state = lockState,
-                    onCycle = { cycleScreen(isHome = false) },
-                    modifier = Modifier.weight(1f),
-                )
             }
-            Text(
-                "Home and Lock cycle Off → Pink → Blue. Same color = one image " +
-                    "for both screens; different colors = separate images.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
 
             // ===== Set / Refresh (v0.8.15: SEPARATE actions) =====
             // Refresh only fetches a new image into the preview; Set commits
@@ -1490,46 +1435,6 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
     }
 }
 
-/** Nyanpasu 1.0's brand colors for the tri-state buttons. */
-private val PinkState = Color(0xFFFF80AB)
-private val BlueState = Color(0xFF64B5F6)
-
-/**
- * v1.0.0's tri-state Home/Lock button: gray (off) → pink → blue, pill
- * shaped, white check glyph when active.
- */
-@Composable
-private fun TriStateButton(
-    label: String,
-    state: Int,
-    onCycle: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val container = when (state) {
-        DiscoverPrefs.SCREEN_PINK -> PinkState
-        DiscoverPrefs.SCREEN_BLUE -> BlueState
-        else -> MaterialTheme.colorScheme.surfaceVariant
-    }
-    val content = if (state > DiscoverPrefs.SCREEN_OFF) Color.White
-    else MaterialTheme.colorScheme.onSurfaceVariant
-    Button(
-        onClick = onCycle,
-        modifier = modifier,
-        shape = RoundedCornerShape(24.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = container,
-            contentColor = content,
-        ),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(
-            horizontal = 16.dp, vertical = 10.dp),
-    ) {
-        Text(label, style = MaterialTheme.typography.labelLarge)
-        if (state > DiscoverPrefs.SCREEN_OFF) {
-            Spacer(Modifier.width(6.dp))
-            Text("✓", style = MaterialTheme.typography.labelLarge)
-        }
-    }
-}
 
 /**
  * v1.0.0's tag chips: a wrapping FlowRow. Tap = flip strict (filled) ↔

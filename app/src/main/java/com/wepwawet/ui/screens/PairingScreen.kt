@@ -88,7 +88,7 @@ fun PairingScreen(
         WepWawetLogger.lifecycle("PairingScreen appear — ensure proxy running",
             "pin" to pin)
         if (PairingService.isPairingEnabled(context)) {
-            runCatching { PairingService.start(context, pin) }
+            runCatching { PairingService.start(context, pin) }.onFailure { WepWawetLogger.appWarn("PairingScreen: PairingService — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 .onFailure {
                     WepWawetLogger.appWarn("PairingScreen: service start failed",
                         "exception" to it.javaClass.simpleName,
@@ -193,7 +193,7 @@ fun PairingScreen(
                             pin = pinToSave
                             // v0.8.1: restart only while the pairing toggle is ON.
                             if (PairingService.isPairingEnabled(context)) {
-                                runCatching { PairingService.start(context, pinToSave) }
+                                runCatching { PairingService.start(context, pinToSave) }.onFailure { WepWawetLogger.appWarn("PairingScreen: PairingService — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 .onFailure {
                     WepWawetLogger.appWarn("PairingScreen: service start failed",
                         "exception" to it.javaClass.simpleName,

@@ -43,6 +43,38 @@ object DiscoverPreload {
         }
     }
 
+    /**
+     * v0.9.0: RETRY WHEN THE NETWORK ARRIVES. The app-start kick can race
+     * connectivity (cold boot, airplane mode just off) — every source
+     * fails, the loop logs its exit, and the queue stays empty until the
+     * user manually Refreshes. This registers ONE NetworkCallback that
+     * kicks the preload again the moment a network becomes available (and
+     * on every subsequent regaining — single-flight guards the overlap).
+     */
+    fun ensureNetworkRetry(context: Context) {
+        val appContext = context.applicationContext
+        val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE)
+            as? ConnectivityManager ?: return
+        try {
+            cm.registerNetworkCallback(
+                android.net.NetworkRequest.Builder()
+                    .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build(),
+                object : ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: android.net.Network) {
+                        WepWawetLogger.appInfo("$TAG: network available — retrying preload")
+                        kick(appContext)
+                    }
+                },
+            )
+            WepWawetLogger.appInfo("$TAG: network retry armed")
+        } catch (e: Exception) {
+            WepWawetLogger.appWarn("$TAG: network retry registration failed",
+                "exception" to e.javaClass.name,
+                "message" to (e.message ?: ""))
+        }
+    }
+
     private suspend fun refill(context: Context) {
         try {
             val strict = DiscoverPrefs.readStrictTags(context)
@@ -73,9 +105,17 @@ object DiscoverPreload {
                             "exception" to it.javaClass.name,
                             "message" to (it.message ?: ""))
                     }.getOrNull()
+                } ?: run {
+                    // v0.9.0: the first silent exit, LOGGED — the search
+                    // returned nothing (a failed tier ladder, e.g. no
+                    // source reachable on this network).
+                    WepWawetLogger.appWarn("$TAG: preload loop stopping — search returned nothing",
+                        "added_so_far" to added,
+                        "depth" to DiscoverPrefs.queueDepth(context, signature))
+                    null
                 } ?: break
                 val bytes = withContext(Dispatchers.IO) {
-                    runCatching { DiscoverSearch.downloadImage(url) }
+                    runCatching { DiscoverSearch.downloadImage(url) }.onFailure { WepWawetLogger.appWarn("DiscoverPreload: DiscoverSearch — best-effort call failed", "exception" to it.javaClass.simpleName) }
                         .onFailure {
                             WepWawetLogger.appWarn("$TAG: preload download failed",
                                 "exception" to it.javaClass.name,
@@ -83,7 +123,14 @@ object DiscoverPreload {
                         }
                         .getOrNull()
                 }
-                if (bytes == null || bytes.size <= 1024) break
+                if (bytes == null || bytes.size <= 1024) {
+                    // v0.9.0: the second silent exit, LOGGED — the download
+                    // failed or came back too small to be a real image.
+                    WepWawetLogger.appWarn("$TAG: preload loop stopping — download failed or image too small",
+                        "bytes" to (bytes?.size ?: 0),
+                        "url" to url.take(100))
+                    break
+                }
                 withContext(Dispatchers.IO) {
                     DiscoverPrefs.appendQueuedImage(context, url, bytes, signature)
                 }

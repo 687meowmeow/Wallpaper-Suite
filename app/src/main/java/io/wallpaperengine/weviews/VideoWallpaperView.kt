@@ -321,7 +321,8 @@ class VideoWallpaperView(context: Context) :
         if (isPaused) return@Runnable
         WepWawetLogger.engineWarn("VideoView: watchdog fired — video stopped producing frames, reloading",
             "file" to currentFile)
-        loadWallpaper(currentFile!!)
+        val watchdogFile = currentFile ?: return@Runnable
+        loadWallpaper(watchdogFile)
     }
 
     init {
@@ -392,9 +393,12 @@ class VideoWallpaperView(context: Context) :
                     }
                 }
                 if (isLoaded && parallaxOffset != null) {
-                    parallaxOffset!!.x = lastSentRawParallax.x
-                    parallaxOffset!!.y = lastSentRawParallax.y
-                    updateParallaxOffsets()
+                    val offsets = parallaxOffset
+                    if (offsets != null) {
+                        offsets.x = lastSentRawParallax.x
+                        offsets.y = lastSentRawParallax.y
+                        updateParallaxOffsets()
+                    }
                 }
             }
         } else {
@@ -543,7 +547,7 @@ class VideoWallpaperView(context: Context) :
             lastNanoTime = now
             val smoothing = min(0.25f, deltaMs) * parallaxSpeedFactor
             val hasMaxDistance = parallaxMaxDistance > 0.0f
-            val raw = parallaxOffset!!
+            val raw = parallaxOffset ?: return
             var delta = PointF(raw.x, raw.y)
             delta.offset(-parallaxOffsetSmoothed.x, -parallaxOffsetSmoothed.y)
             delta.x *= smoothing
@@ -756,7 +760,7 @@ class VideoWallpaperView(context: Context) :
         }
         WepWawetLogger.engine("VideoView: drawable chosen",
             "mime" to (if (type.isEmpty()) "(package)" else type),
-            "drawable" to wallpaperView!!.javaClass.simpleName,
+            "drawable" to (wallpaperView?.javaClass?.simpleName ?: "(none)"),
             "local_player" to isLocalPlayer)
         wallpaperView?.load(file)
 

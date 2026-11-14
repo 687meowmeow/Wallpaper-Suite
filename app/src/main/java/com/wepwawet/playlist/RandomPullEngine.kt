@@ -183,7 +183,7 @@ object RandomPullEngine {
             .apply()
         // Delete the PREVIOUS slot file (keep only the current one).
         if (previous != null && previous != path) {
-            runCatching { File(previous).delete() }
+            runCatching { File(previous).delete() }.onFailure { WepWawetLogger.appWarn("RandomPullEngine: File(previous) — best-effort call failed", "exception" to it.javaClass.simpleName) }
         }
     }
 }

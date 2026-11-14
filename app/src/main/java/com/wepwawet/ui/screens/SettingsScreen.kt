@@ -1062,7 +1062,15 @@ private fun CacheCard(context: Context) {
                                     .filter { it.isDirectory && it != root }
                                     .toList()
                                     .asReversed()
-                                    .forEach { dir -> runCatching { dir.delete() } }
+                                    .forEach { dir ->
+                                        runCatching { dir.delete() }
+                                            .onFailure {
+                                                WepWawetLogger.appWarn(
+                                                    "SettingsScreen: clearCache — sweeping an emptied directory failed",
+                                                    "dir" to dir.name,
+                                                    "exception" to it.javaClass.simpleName)
+                                            }
+                                    }
                             }
                             cleared = !cleared
                             clearReport = "Freed ${formatCacheSize(deletedBytes)} ($deletedFiles files)"

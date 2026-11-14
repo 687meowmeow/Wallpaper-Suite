@@ -114,7 +114,7 @@ class WepWawetApplication : Application(), Configuration.Provider, ImageLoaderFa
                         com.wepwawet.log.WepWawetLogger.appError(
                             "Uncaught exception in appScope",
                             exception = t)
-                    }
+                    }.onFailure { WepWawetLogger.appWarn("WepWawetApplication: onCreate — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
                 }
         )
 
@@ -196,7 +196,7 @@ class WepWawetApplication : Application(), Configuration.Provider, ImageLoaderFa
         // The persistent rule-button notification (when one is pinned).
         runCatching {
             com.wepwawet.rules.RuleEngine.buildRuleButtonNotification(this)
-        }
+        }.onFailure { WepWawetLogger.appWarn("WepWawetApplication: block — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
 
         // v0.8.19: kick the Discover preload queue ON APP START ("have
         // them preload on app start") — background, quiet, single-flight;
@@ -204,6 +204,14 @@ class WepWawetApplication : Application(), Configuration.Provider, ImageLoaderFa
         // image instead of hitting the network.
         runCatching {
             com.wepwawet.discover.DiscoverPreload.kick(this)
+            // v0.9.0: retry the preload when the network arrives — the
+            // app-start kick races connectivity on cold boots.
+            runCatching {
+                com.wepwawet.discover.DiscoverPreload.ensureNetworkRetry(this)
+            }.onFailure { t ->
+                WepWawetLogger.appWarn("WepWawetApplication: network retry arm failed",
+                    "exception" to t.javaClass.name)
+            }
         }.onFailure { t ->
             Log.e(TAG, "DiscoverPreload.kick failed", t)
         }
@@ -219,7 +227,7 @@ class WepWawetApplication : Application(), Configuration.Provider, ImageLoaderFa
                     "android_version" to Build.VERSION.SDK_INT.toString(),
                     "abi" to (Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown"),
                 )
-            }
+            }.onFailure { WepWawetLogger.appWarn("WepWawetApplication: block — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
         } else {
             // Logger failed — write directly to logcat as a last resort
             Log.i(TAG, "onCreate complete (logger failed — logcat only): " +

@@ -90,7 +90,7 @@ object DohDns : Dns {
                         for (i in 0 until answers.length()) {
                             val a = answers.optJSONObject(i) ?: continue
                             if (a.optInt("type") == 1) { // A record
-                                runCatching { addrs.add(InetAddress.getByName(a.optString("data"))) }
+                                runCatching { addrs.add(InetAddress.getByName(a.optString("data"))) }.onFailure { WepWawetLogger.appWarn("DohDns: addrs — best-effort call failed", "exception" to it.javaClass.simpleName) }
                             }
                         }
                         addrs

@@ -12,6 +12,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -25,8 +32,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Casino
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FilterAlt
+import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlaylistAdd
@@ -39,11 +49,16 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -142,6 +157,11 @@ internal fun ChoiceDialog(
 }
 
 /** A number dialog: − value + (taps only). */
+/**
+ * v0.9.0 redesign: FREE-TYPED number dialog — type any value; [min] is
+ * enforced (the interval trigger's minimum is 1 minute), there is NO
+ * maximum (the old 5..24*60 slider cap on "Every N minutes" is gone).
+ */
 @Composable
 internal fun NumberDialog(
     title: String,
@@ -151,27 +171,42 @@ internal fun NumberDialog(
     onChange: (Int) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    var v by remember { mutableStateOf(value.coerceIn(min, max)) }
+    var v by remember { mutableStateOf(value.coerceAtLeast(min).toString()) }
+    val parsed = v.trim().toIntOrNull()
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                TextButton(onClick = { v = (v - 1).coerceAtLeast(min) }) { Text("−") }
-                Text(
-                    v.toString(),
-                    style = MaterialTheme.typography.headlineSmall,
-                    modifier = Modifier.padding(horizontal = 20.dp),
+            Column {
+                OutlinedTextField(
+                    value = v,
+                    onValueChange = { raw ->
+                        v = raw.filter { it.isDigit() || it == '-' }.take(9)
+                    },
+                    singleLine = true,
+                    label = { Text("Number (at least $min)") },
+                    modifier = Modifier.fillMaxWidth(),
                 )
-                TextButton(onClick = { v = (v + 1).coerceAtMost(max) }) { Text("＋") }
+                if (parsed != null && parsed < min) {
+                    Text(
+                        "The minimum is $min.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = { onChange(v); onDismiss() }) { Text("Set") }
+            TextButton(
+                onClick = {
+                    val n = parsed ?: return@TextButton
+                    if (n >= min) {
+                        onChange(n)
+                        onDismiss()
+                    }
+                },
+                enabled = parsed != null && parsed >= min,
+            ) { Text("Set") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
@@ -362,6 +397,71 @@ internal fun TriggerTypeSheet(
     }
 }
 
+/**
+ * v0.9.0 redesign: the interval trigger's editor — a free-typed number
+ * plus a unit (minutes / hours / days). No presets, no maximum, minimum
+ * 1 minute.
+ */
+@Composable
+internal fun IntervalDialog(
+    minutes: Int,
+    onDismiss: () -> Unit,
+    onChange: (Int) -> Unit,
+) {
+    var unit by remember { mutableStateOf("min") }
+    var v by remember { mutableStateOf("1") }
+    val parsed = v.trim().toIntOrNull()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Every…") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = v,
+                    onValueChange = { raw -> v = raw.filter { it.isDigit() }.take(9) },
+                    singleLine = true,
+                    label = { Text("Number (at least 1)") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    SegmentedButton(
+                        selected = unit == "min",
+                        onClick = { unit = "min" },
+                        shape = SegmentedButtonDefaults.itemShape(0, 3),
+                    ) { Text("Minutes") }
+                    SegmentedButton(
+                        selected = unit == "hours",
+                        onClick = { unit = "hours" },
+                        shape = SegmentedButtonDefaults.itemShape(1, 3),
+                    ) { Text("Hours") }
+                    SegmentedButton(
+                        selected = unit == "days",
+                        onClick = { unit = "days" },
+                        shape = SegmentedButtonDefaults.itemShape(2, 3),
+                    ) { Text("Days") }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val n = parsed ?: return@TextButton
+                    if (n < 1) return@TextButton
+                    onChange(when (unit) {
+                        "hours" -> n * 60
+                        "days" -> n * 60 * 24
+                        else -> n
+                    })
+                    onDismiss()
+                },
+                enabled = parsed != null && parsed >= 1,
+            ) { Text("Set") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
 /** A trigger's own editor — the params its type needs, with taps only. */
 @Composable
 internal fun TriggerEditorDialog(
@@ -384,11 +484,21 @@ internal fun TriggerEditorDialog(
             listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun", "Any day")
                 .getOrElse(t.dayOfWeek) { "Any day" },
             { idx -> t = t.copy(dayOfWeek = if (idx == 7) -1 else idx) }, close)
-        "interval" -> NumberDialog("Every N minutes", t.intervalMinutes, 5, 24 * 60, { t = t.copy(intervalMinutes = it) }, close)
+        // v0.9.0 redesign: free-typed number plus a unit — no presets, no
+        // maximum, minimum 1 minute.
+        "interval" -> IntervalDialog(t.intervalMinutes, close) { minutes ->
+            t = t.copy(intervalMinutes = minutes)
+        }
         "battery" -> NumberDialog("Battery level (%)", t.batteryLevel, 1, 100, { t = t.copy(batteryLevel = it) }, close)
         "ssid" -> TextDialog("Wi-Fi network", "Network name (blank = any network)", t.networkSsid, onDismiss = close, onChange = { t = t.copy(networkSsid = it) })
         "device" -> TextDialog("Bluetooth device", "Device name (blank = any device)", t.deviceName, onDismiss = close, onChange = { t = t.copy(deviceName = it) })
-        "date" -> TextDialog("Date", "YYYY-MM-DD (or blank for today)", t.dateEpochDay.let { d -> if (d > 0) java.time.LocalDate.ofEpochDay(d).toString() else "" }, onDismiss = close, onChange = { s -> t = t.copy(dateEpochDay = runCatching { java.time.LocalDate.parse(s).toEpochDay() }.getOrDefault(0L)) })
+        "date" -> TextDialog("Date", "YYYY-MM-DD (or blank for today)", t.dateEpochDay.let { d -> if (d > 0) java.time.LocalDate.ofEpochDay(d).toString() else "" }, onDismiss = close, onChange = { s -> t = t.copy(dateEpochDay = runCatching { java.time.LocalDate.parse(s).toEpochDay() }
+                .onFailure {
+                    WepWawetLogger.appWarn("RuleEditorBlocks: parseDate — the typed date did not parse",
+                        "input" to s.take(20),
+                        "exception" to it.javaClass.simpleName)
+                }
+                .getOrDefault(0L)) })
     }
 
     AlertDialog(
@@ -437,13 +547,14 @@ internal fun TriggerEditorDialog(
 
 internal val BLOCK_CATEGORIES: List<Pair<String, List<Pair<String, String>>>> = listOf(
     "Wallpaper" to listOf(
+        RuleModel.BLOCK_NEXT to "Next wallpaper",
         RuleModel.BLOCK_SHOW to "Show a wallpaper",
         RuleModel.BLOCK_SHOW_SET to "Show one from a set",
-        RuleModel.BLOCK_PICK_GROUP to "Pick from a group",
-        RuleModel.BLOCK_PICK_PLAYLIST to "Pick from a playlist",
         RuleModel.BLOCK_RANDOM to "Random wallpaper",
+        RuleModel.BLOCK_PICK_GROUP to "Random from a group",
+        RuleModel.BLOCK_LIMIT to "Only use these wallpapers while…",
+        RuleModel.BLOCK_PICK_PLAYLIST to "Pick from a playlist",
         RuleModel.BLOCK_PULL_DISCOVER to "Pull a fresh Discover image",
-        RuleModel.BLOCK_NEXT to "Go to next",
         RuleModel.BLOCK_PREV to "Go to previous",
         RuleModel.BLOCK_SHUFFLE to "Shuffle",
     ),
@@ -468,13 +579,15 @@ internal val BLOCK_CATEGORIES: List<Pair<String, List<Pair<String, String>>>> = 
         RuleModel.BLOCK_STOP to "Stop",
         RuleModel.BLOCK_RUN_RULE to "Run another rule",
     ),
+    "Values" to listOf(
+        RuleModel.BLOCK_SET_VALUE to "Set a named value",
+        RuleModel.BLOCK_ADD_VALUE to "Add to a named value",
+        RuleModel.BLOCK_CLEAR_VALUE to "Clear a named value",
+    ),
     "Utility" to listOf(
         RuleModel.BLOCK_NOTIFY to "Show a notification",
         RuleModel.BLOCK_DISCOVER_REFRESH to "Trigger a Discover refresh",
         RuleModel.BLOCK_WORKSHOP_DOWNLOAD to "Start a Workshop download",
-        RuleModel.BLOCK_SET_VALUE to "Set a named value",
-        RuleModel.BLOCK_ADD_VALUE to "Add to a named value",
-        RuleModel.BLOCK_CLEAR_VALUE to "Clear a named value",
         RuleModel.BLOCK_SAVE_TO_FOLDER to "Save the last pick to a group folder",
         RuleModel.BLOCK_ADD_TO_PLAYLIST to "Add the last pick to a playlist",
     ),
@@ -515,21 +628,78 @@ internal fun BlockTypeSheet(
                         modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
                     )
                     for ((type, label) in matching) {
-                        Text(
-                            label,
-                            style = MaterialTheme.typography.bodyLarge,
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(8.dp))
                                 .clickable { onPick(type) }
-                                .padding(vertical = 12.dp, horizontal = 4.dp),
-                        )
+                                .padding(vertical = 8.dp, horizontal = 4.dp),
+                        ) {
+                            Icon(
+                                blockIcon(type),
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp),
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    blockName(type),
+                                    style = MaterialTheme.typography.bodyLarge,
+                                )
+                                Text(
+                                    label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
                     }
                 }
                 Spacer(Modifier.height(32.dp))
             }
         }
     }
+}
+
+/** The SHORT name of a block type (the sheet rows show icon + name + the
+ *  category label as the description). */
+internal fun blockName(type: String): String = when (type) {
+    RuleModel.BLOCK_SHOW -> "Show wallpaper"
+    RuleModel.BLOCK_SHOW_SET -> "Show from set"
+    RuleModel.BLOCK_PICK_GROUP -> "Random from group"
+    RuleModel.BLOCK_PICK_PLAYLIST -> "From playlist"
+    RuleModel.BLOCK_RANDOM -> "Random wallpaper"
+    RuleModel.BLOCK_PULL_DISCOVER -> "Discover pull"
+    RuleModel.BLOCK_NEXT -> "Next wallpaper"
+    RuleModel.BLOCK_PREV -> "Previous"
+    RuleModel.BLOCK_SHUFFLE -> "Shuffle"
+    RuleModel.BLOCK_LIMIT -> "Limit"
+    RuleModel.BLOCK_PAUSE_ROTATION -> "Pause rotation"
+    RuleModel.BLOCK_RESUME_ROTATION -> "Resume rotation"
+    RuleModel.BLOCK_RESTART_PLAYLIST -> "Restart playlist"
+    RuleModel.BLOCK_HOLD_CURRENT -> "Hold current"
+    RuleModel.BLOCK_SWITCH_PLAYLIST -> "Switch playlist"
+    RuleModel.BLOCK_SET_FPS -> "Set FPS"
+    RuleModel.BLOCK_AUDIO_MUTE -> "Audio mute"
+    RuleModel.BLOCK_RENDERER_PAUSE -> "Renderer pause"
+    RuleModel.BLOCK_APPLY_PRESET -> "Apply preset"
+    RuleModel.BLOCK_IF -> "If"
+    RuleModel.BLOCK_CHOOSE -> "Choose"
+    RuleModel.BLOCK_REPEAT -> "Repeat"
+    RuleModel.BLOCK_WAIT -> "Wait"
+    RuleModel.BLOCK_STOP -> "Stop"
+    RuleModel.BLOCK_RUN_RULE -> "Run rule"
+    RuleModel.BLOCK_NOTIFY -> "Notify"
+    RuleModel.BLOCK_DISCOVER_REFRESH -> "Discover refresh"
+    RuleModel.BLOCK_WORKSHOP_DOWNLOAD -> "Workshop download"
+    RuleModel.BLOCK_SET_VALUE -> "Set value"
+    RuleModel.BLOCK_ADD_VALUE -> "Add to value"
+    RuleModel.BLOCK_CLEAR_VALUE -> "Clear value"
+    RuleModel.BLOCK_SAVE_TO_FOLDER -> "Save to folder"
+    RuleModel.BLOCK_ADD_TO_PLAYLIST -> "Add to playlist"
+    else -> type
 }
 
 /** Fresh sensible defaults for a new block of [type]. */
@@ -547,15 +717,19 @@ internal fun newBlock(type: String): RuleModel.Block = when (type) {
     RuleModel.BLOCK_HOLD_CURRENT -> RuleModel.Block(type = type, num = 60)
     RuleModel.BLOCK_SET_FPS -> RuleModel.Block(type = type, num = 30)
     RuleModel.BLOCK_RANDOM -> RuleModel.Block(type = type, param = "library",
-        param2 = "random", param3 = "home")
+        param2 = "random", param3 = "")
     RuleModel.BLOCK_PICK_GROUP, RuleModel.BLOCK_SHOW_SET ->
-        RuleModel.Block(type = type, param2 = "random", param3 = "home")
-    RuleModel.BLOCK_SHOW -> RuleModel.Block(type = type, param = "", param2 = "home")
+        RuleModel.Block(type = type, param2 = "random", param3 = "")
+    RuleModel.BLOCK_SHOW -> RuleModel.Block(type = type, param = "", param3 = "")
+    // v0.9.0 redesign: the Limit scope — starts with no wallpapers; the
+    // editor's picker (requireNonEmpty) refuses to save an empty scope.
+    RuleModel.BLOCK_LIMIT -> RuleModel.Block(type = type, paths = ArrayList())
     else -> RuleModel.Block(type = type)
 }
 
 @Composable
 private fun blockIcon(type: String): ImageVector = when (type) {
+    RuleModel.BLOCK_LIMIT -> Icons.Filled.FilterAlt
     in listOf(RuleModel.BLOCK_SHOW, RuleModel.BLOCK_SHOW_SET, RuleModel.BLOCK_PICK_GROUP,
         RuleModel.BLOCK_PICK_PLAYLIST, RuleModel.BLOCK_RANDOM, RuleModel.BLOCK_PULL_DISCOVER,
         RuleModel.BLOCK_NEXT, RuleModel.BLOCK_PREV, RuleModel.BLOCK_SHUFFLE) ->
@@ -575,14 +749,13 @@ private fun blockIcon(type: String): ImageVector = when (type) {
 
 // ── Label helpers (the card's fields) ─────────────────────────────────
 
-private fun targetLabel(block: RuleModel.Block): String {
-    val v = if (block.type == RuleModel.BLOCK_SHOW) block.param2 else block.param2
-    return when (v.ifEmpty { "home" }) {
-        "lock" -> "Lock screen"
-        "both" -> "Both (same image)"
-        "bothDifferent" -> "Both (different images)"
-        else -> "Home screen"
-    }
+private fun targetLabel(block: RuleModel.Block): String = when (block.param3) {
+    "" -> "Follow the app toggles"
+    "home" -> "Home screen"
+    "lock" -> "Lock screen"
+    "both" -> "Both (same image)"
+    "bothDifferent" -> "Both (different images)"
+    else -> block.param3
 }
 
 private fun pickModeLabel(block: RuleModel.Block): String = when (block.param2) {
@@ -643,6 +816,7 @@ private fun valueChips(rule: RuleModel.Rule): List<Pair<String, String>> {
 
 /** A short plain name for a value-producing block (the chip label). */
 private fun blockSummaryPlain(b: RuleModel.Block): String = when (b.type) {
+    RuleModel.BLOCK_LIMIT -> "only ${b.paths.size} wallpapers"
     RuleModel.BLOCK_SHOW -> displayPath(b.param)
     RuleModel.BLOCK_SHOW_SET -> "from a set of ${b.paths.size}"
     RuleModel.BLOCK_PICK_GROUP -> "from ${b.param.ifEmpty { "a group" }}"
@@ -763,10 +937,24 @@ internal fun BlockCard(
 
     // ── The field dialogs ──
     when (field) {
+        // v0.9.0 redesign: the target lives in param3 (the old dialog
+        // wrote param2, clobbering the pick mode), and the DEFAULT is
+        // "follow the app toggles" (the universal Home/Lock system).
         "target" -> ChoiceDialog("Apply to",
-            listOf("Home screen", "Lock screen", "Both (same image)", "Both (different images)"),
+            listOf(
+                "Follow the app toggles (default)",
+                "Home screen",
+                "Lock screen",
+                "Both (same image)",
+                "Both (different images)",
+            ),
             targetLabel(block),
-            { idx -> onEdit { it.param2 = listOf("home", "lock", "both", "bothDifferent")[idx] } },
+            { idx ->
+                onEdit {
+                    it.param3 = listOf(
+                        "", "home", "lock", "both", "bothDifferent")[idx]
+                }
+            },
             close)
         "pickmode" -> ChoiceDialog("How to pick",
             listOf("Random", "In order", "Newest", "Avoid the most recently shown"),
@@ -837,11 +1025,23 @@ internal fun BlockCard(
             multi = false, initial = setOf(block.param),
             chips = valueChips(rule),
             onDismiss = close,
+            playlistId = rulePlaylistId(rule, context),
             onPicked = { paths -> onEdit { it.param = paths.firstOrNull() ?: it.param } })
         "set" -> WallpaperPickerDialog(
             multi = true, initial = block.paths.toSet(),
             chips = valueChips(rule),
             onDismiss = close,
+            playlistId = rulePlaylistId(rule, context),
+            onPicked = { paths -> onEdit { it.paths = paths.toMutableList() } })
+        // v0.9.0 redesign: the LIMIT scope's wallpaper set — a dense grid
+        // with the playlist's own wallpapers first; a scope can never be
+        // saved with zero wallpapers.
+        "limit" -> WallpaperPickerDialog(
+            multi = true, initial = block.paths.toSet(),
+            chips = emptyList(),
+            onDismiss = close,
+            playlistId = rulePlaylistId(rule, context),
+            requireNonEmpty = true,
             onPicked = { paths -> onEdit { it.paths = paths.toMutableList() } })
         "title" -> TextDialog("Notification title", "Title", block.param,
             onChange = { v -> onEdit { b -> b.param = v } }, onDismiss = close)
@@ -881,34 +1081,33 @@ internal fun BlockCard(
         }
     }
 
+    // v0.9.0 redesign: the ⋮ menu (Duplicate / Disable / Delete) replaced
+    // the swipe-right delete and long-press duplicate; the drag handle
+    // (long-press-drag) reorders — one row height per crossing.
+    var menuOpen by remember(block.id) { mutableStateOf(false) }
+    var dragCrossings by remember(block.id) { mutableStateOf(0) }
+    val liveMove by androidx.compose.runtime.rememberUpdatedState(onMove)
+    val density = androidx.compose.ui.platform.LocalDensity.current
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .pointerInput(block.id) {
-                // Long-press + drag = duplicate (a hold gesture, like the
-                // library's group chips).
+                val rowH = with(density) { 64.dp.toPx() }
                 detectDragGesturesAfterLongPress(
-                    onDragStart = { swipeX = 0f },
+                    onDragStart = { dragCrossings = 0 },
                     onDrag = { change, drag ->
-                        swipeX = (swipeX + drag.x).coerceAtLeast(0f)
-                        if (swipeX > 150.dp.toPx()) {
-                            swipeX = 0f
-                            onDuplicate()
+                        change.consume()
+                        val target = (drag.position.y / rowH).toInt()
+                        // One onMove(±1) per crossing keeps the parent's
+                        // clamp in charge; the live move updates the list
+                        // and the card's position follows.
+                        while (target > dragCrossings) {
+                            liveMove(+1); dragCrossings++
                         }
-                        change.consume()
-                    },
-                )
-            }
-            .pointerInput(block.id) {
-                // Short swipe right = delete.
-                detectHorizontalDragGestures(
-                    onDragEnd = {
-                        if (swipeX > 160.dp.toPx()) onDelete()
-                        swipeX = 0f
-                    },
-                    onHorizontalDrag = { change, drag ->
-                        swipeX = (swipeX + drag).coerceAtLeast(0f)
-                        change.consume()
+                        while (target < dragCrossings) {
+                            liveMove(-1); dragCrossings--
+                        }
                     },
                 )
             },
@@ -922,11 +1121,20 @@ internal fun BlockCard(
         Column(Modifier.padding(vertical = 6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
+                    Icons.Filled.DragHandle,
+                    contentDescription = "Drag to reorder",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .padding(start = 6.dp)
+                        .size(18.dp),
+                )
+                Icon(
                     blockIcon(block.type), null,
                     Modifier
-                        .padding(start = 10.dp)
+                        .padding(start = 8.dp)
                         .size(18.dp),
-                    tint = MaterialTheme.colorScheme.primary,
+                    tint = if (block.disabled) MaterialTheme.colorScheme.onSurfaceVariant
+                    else MaterialTheme.colorScheme.primary,
                 )
                 Text(
                     blockSummary(context, rule, block),
@@ -949,17 +1157,39 @@ internal fun BlockCard(
                         )
                     }
                 }
-                IconButton(onClick = { onMove(-1) }) {
-                    Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Move up")
-                }
-                IconButton(onClick = { onMove(+1) }) {
-                    Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Move down")
-                }
-                IconButton(onClick = onDuplicate) {
-                    Icon(Icons.Filled.ContentCopy, contentDescription = "Duplicate")
-                }
-                IconButton(onClick = onDelete) {
-                    Icon(Icons.Filled.Delete, contentDescription = "Delete")
+                Box {
+                    IconButton(onClick = { menuOpen = true }) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "More")
+                    }
+                    DropdownMenu(
+                        expanded = menuOpen,
+                        onDismissRequest = { menuOpen = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Duplicate") },
+                            leadingIcon = { Icon(Icons.Filled.ContentCopy, null) },
+                            onClick = { menuOpen = false; onDuplicate() },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(if (block.disabled) "Enable" else "Disable") },
+                            leadingIcon = {
+                                Icon(
+                                    if (block.disabled) Icons.Filled.PlayArrow
+                                    else Icons.Filled.Block,
+                                    null,
+                                )
+                            },
+                            onClick = {
+                                menuOpen = false
+                                onEdit { it.disabled = !it.disabled }
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete") },
+                            leadingIcon = { Icon(Icons.Filled.Delete, null) },
+                            onClick = { menuOpen = false; onDelete() },
+                        )
+                    }
                 }
             }
 
@@ -969,6 +1199,11 @@ internal fun BlockCard(
                 }
                 Column(Modifier.padding(bottom = 4.dp)) {
                     when (block.type) {
+                        RuleModel.BLOCK_LIMIT -> {
+                            SettingRow("Wallpapers", "${block.paths.size} chosen") {
+                                field = "limit"
+                            }
+                        }
                         RuleModel.BLOCK_SHOW -> {
                             SettingRow("Wallpaper", displayPath(block.param)) { field = "wallpaper" }
                             targetSetting()
@@ -1123,6 +1358,7 @@ internal fun blockSummary(
     rule: RuleModel.Rule,
     b: RuleModel.Block,
 ): String = when (b.type) {
+    RuleModel.BLOCK_LIMIT -> "Only use ${b.paths.size} wallpapers while this is active"
     RuleModel.BLOCK_SHOW -> "Show ${displayPath(b.param)} on the ${targetLabel(b).lowercase()}"
     RuleModel.BLOCK_SHOW_SET -> "Show one of ${b.paths.size} wallpapers (${pickModeLabel(b).lowercase()})"
     RuleModel.BLOCK_PICK_GROUP -> "Pick from the group \"${b.param.ifEmpty { "…" }}\""
@@ -1493,12 +1729,16 @@ internal fun PresetPickerDialog(
     )
 }
 
-// ══ The wallpaper picker (list + value chips) ═══════════════════════════
+// ══ The wallpaper picker (dense grid + group chips + value chips) ══════
 
 /**
- * Pick one or many wallpapers: the library's wallpapers + this playlist's
- * entries, searchable, with the VALUE CHIPS ("@last" / earlier blocks)
- * insertable.
+ * v0.9.0 redesign: the wallpaper picker is a DENSE THUMBNAIL GRID (reusing
+ * [PlaylistPickThumb]) with group chips, like the playlist Add picker — the
+ * playlist's OWN wallpapers come first, then the library + folder images.
+ * The VALUE CHIPS ("@last" / earlier blocks) stay insertable. With
+ * [requireNonEmpty] (the Limit scope), the confirm button stays disabled
+ * until at least one wallpaper is chosen — a scope cannot be saved with
+ * zero wallpapers.
  */
 @Composable
 internal fun WallpaperPickerDialog(
@@ -1507,35 +1747,105 @@ internal fun WallpaperPickerDialog(
     chips: List<Pair<String, String>>,
     onDismiss: () -> Unit,
     onPicked: (List<String>) -> Unit,
+    playlistId: String = "",
+    requireNonEmpty: Boolean = false,
 ) {
     val context = LocalContext.current
-    var items by remember {
-        mutableStateOf<List<Pair<String, String>>>(emptyList())
-    }
     var loaded by remember { mutableStateOf(false) }
     var search by remember { mutableStateOf("") }
+    var group by remember { mutableStateOf<String?>(null) }
     var selected by remember { mutableStateOf(initial.filter { it.isNotEmpty() }.toMutableSet()) }
 
+    // The playlist's own entries (resolved, in order), then everything
+    // addable: engine wallpapers + folder images (through their crops).
+    var ownItems by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+    var libraryItems by remember {
+        mutableStateOf<List<Triple<String, String, Boolean>>>(emptyList())
+    }
+    val groups = remember { LibraryPrefs.readGroups(context) }
+    val groupOf = remember { LibraryPrefs.readGroupOf(context) }
+    val groupFolders = remember { LibraryPrefs.readGroupFolders(context) }
+
     LaunchedEffect(Unit) {
-        val list = withContext(Dispatchers.IO) {
-            val walls = com.wepwawet.engine.EngineLibrary.enumerateWallpapers(context)
-                .map { it.filePath to it.title.ifEmpty { it.filePath.substringAfterLast('/') } }
-            walls
+        withContext(Dispatchers.IO) {
+            // The playlist's own wallpapers (title from its entries).
+            val own = ArrayList<Pair<String, String>>()
+            if (playlistId.isNotEmpty()) {
+                val playlist = com.wepwawet.playlist.SuitePlaylistStore.read(context, playlistId)
+                if (playlist != null) {
+                    for (e in playlist.entries) {
+                        if (com.wepwawet.playlist.GroupBlocks.isGroupBlock(e.filepath)) {
+                            for (p in com.wepwawet.playlist.GroupBlocks
+                                .resolve(context, e).paths) {
+                                own.add(p to p.substringAfterLast('/'))
+                            }
+                        } else if (!com.wepwawet.playlist.RandomPullEngine
+                                .isSlot(e.filepath)) {
+                            own.add(e.filepath to
+                                e.title.ifEmpty { e.filepath.substringAfterLast('/') })
+                        }
+                    }
+                }
+            }
+            ownItems = own.distinctBy { it.first }
+
+            val cropMap = com.wepwawet.ui.screens.ImageCropStore.read(context)
+            val walls = com.wepwawet.engine.EngineLibrary.enumerateWallpapers(context).map {
+                Triple(it.filePath,
+                    it.title.ifEmpty { it.filePath.substringAfterLast('/') },
+                    it.isLocal || it.filePath.startsWith("content://"))
+            }
+            val folderImages = com.wepwawet.ui.screens.ImageFolderAssets
+                .readFolders(context).flatMap { folder ->
+                    com.wepwawet.ui.screens.ImageFolderAssets
+                        .enumerateFolderImages(context, folder.treeUri)
+                        .map { folder.treeUri to it }
+                }
+                .map { (treeUri, e) ->
+                    val resolved = cropMap[e.uri]?.cropFilePath ?: e.uri
+                    Triple(resolved,
+                        e.displayName.substringBeforeLast('.'),
+                        !resolved.startsWith("/"))
+                }
+            libraryItems = (walls + folderImages).distinctBy { it.first }
         }
-        items = list
         loaded = true
     }
 
-    AlertDialog(
+    val ownSet = remember(ownItems) { ownItems.map { it.first }.toHashSet() }
+    val visibleLibrary = remember(libraryItems, search, group, groupFolders) {
+        val q = search.trim().lowercase()
+        val link = group?.let { groupFolders[it] }
+        libraryItems.filter { (path, title, _) ->
+            (group == null || groupOf[path] == group) &&
+                (q.isEmpty() || title.lowercase().contains(q))
+        }
+    }
+
+    Dialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (multi) "Pick wallpapers" else "Pick a wallpaper") },
-        text = {
-            Column {
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            shape = MaterialTheme.shapes.extraLarge,
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 6.dp,
+            modifier = Modifier
+                .fillMaxWidth(0.96f)
+                .heightIn(max = 640.dp),
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Text(
+                    if (multi) "Pick wallpapers" else "Pick a wallpaper",
+                    style = MaterialTheme.typography.titleLarge,
+                )
+                Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = search,
                     onValueChange = { search = it },
                     singleLine = true,
                     label = { Text("Search") },
+                    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                     modifier = Modifier.fillMaxWidth(),
                 )
                 if (chips.isNotEmpty()) {
@@ -1561,61 +1871,156 @@ internal fun WallpaperPickerDialog(
                         }
                     }
                 }
-                Spacer(Modifier.height(6.dp))
+                if (groups.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                    ) {
+                        FilterChip(
+                            selected = group == null,
+                            onClick = { group = null },
+                            label = { Text("All") },
+                        )
+                        for (g in groups) {
+                            FilterChip(
+                                selected = group == g,
+                                onClick = { group = if (group == g) null else g },
+                                label = { Text(g) },
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
                 if (!loaded) {
                     androidx.compose.material3.LinearProgressIndicator(
                         Modifier.fillMaxWidth())
                 } else {
-                    val q = search.trim().lowercase()
-                    Column(
-                        Modifier
+                    LazyVerticalGrid(
+                        columns = androidx.compose.foundation.lazy.grid.GridCells.Fixed(4),
+                        modifier = Modifier
                             .fillMaxWidth()
-                            .height(320.dp)
-                            .verticalScroll(rememberScrollState()),
+                            .weight(1f, fill = false)
+                            .heightIn(max = 380.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        val visible = items.filter {
-                            q.isEmpty() || it.second.lowercase().contains(q)
-                        }
-                        for ((path, title) in visible) {
-                            val checked = path in selected
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable {
-                                        if (multi) {
-                                            selected = if (checked)
-                                                (selected - path).toMutableSet()
-                                            else (selected + path).toMutableSet()
-                                        } else {
-                                            onPicked(listOf(path))
-                                        }
-                                    }
-                                    .padding(vertical = 10.dp, horizontal = 4.dp),
-                            ) {
+                        // The playlist's own wallpapers come FIRST.
+                        if (ownItems.isNotEmpty()) {
+                            item(key = "own-header", span = { androidx.compose.foundation.lazy.grid.GridItemSpan(4) }) {
                                 Text(
-                                    (if (checked) "✓ " else "") + title,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f),
+                                    "This playlist",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
                                 )
+                            }
+                            gridItems(ownItems, key = { "own-" + it.first }) { (path, title) ->
+                                WallpaperGridCell(path, title, path in selected, multi) {
+                                    if (multi) {
+                                        selected = if (path in selected)
+                                            (selected - path).toMutableSet()
+                                        else (selected + path).toMutableSet()
+                                    } else {
+                                        onPicked(listOf(path))
+                                    }
+                                }
+                            }
+                            item(key = "lib-header", span = { androidx.compose.foundation.lazy.grid.GridItemSpan(4) }) {
+                                Text(
+                                    "Library",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
+                        gridItems(visibleLibrary, key = { it.first }) { (path, title, isUri) ->
+                            WallpaperGridCell(path, title, path in selected, multi) {
+                                if (multi) {
+                                    selected = if (path in selected)
+                                        (selected - path).toMutableSet()
+                                    else (selected + path).toMutableSet()
+                                } else {
+                                    onPicked(listOf(path))
+                                }
                             }
                         }
                     }
                 }
-            }
-        },
-        confirmButton = {
-            if (multi) {
-                TextButton(onClick = { onPicked(selected.toList()) }) {
-                    Text("Set ${selected.size}")
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.align(Alignment.End),
+                ) {
+                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                    if (multi) {
+                        TextButton(
+                            onClick = { onPicked(selected.toList()) },
+                            enabled = !requireNonEmpty || selected.isNotEmpty(),
+                        ) { Text("Set ${selected.size}") }
+                    }
                 }
-            } else {
-                TextButton(onClick = onDismiss) { Text("Cancel") }
             }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
+        }
+    }
+}
+
+/** One dense cell of the wallpaper picker grid. */
+@Composable
+private fun WallpaperGridCell(
+    path: String,
+    title: String,
+    checked: Boolean,
+    multi: Boolean,
+    onClick: () -> Unit,
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .then(
+                if (checked)
+                    Modifier.border(
+                        2.dp,
+                        MaterialTheme.colorScheme.primary,
+                        RoundedCornerShape(10.dp),
+                    )
+                else Modifier
+            )
+            .clickable(onClick = onClick)
+            .padding(4.dp),
+    ) {
+        Box {
+            PlaylistPickThumb(
+                filepath = path,
+                isContentUri = !path.startsWith("/"),
+                size = 0.dp,
+            )
+            if (checked && multi) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(4.dp)
+                        .size(20.dp)
+                        .background(MaterialTheme.colorScheme.primary, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Filled.Check,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
+            }
+        }
+        Text(
+            title,
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+    }
 }

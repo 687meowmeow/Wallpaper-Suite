@@ -449,7 +449,7 @@ object MpkgPacker {
             // OOM when a .pkg has many large .tex files (e.g., 310 entries × 2MB avg = 620MB,
             // exceeding the 512MB heap). After conversion, each .tex is ~4-8x smaller
             // (ETC2+LZ4), so the converted results fit comfortably in memory.
-            val (vfsEntries, dataSectionStart) = vfsData!!
+            val (vfsEntries, dataSectionStart) = vfsData
             WepWawetLogger.proxy("MpkgPacker.packFromPkg: streaming mode (large .pkg)",
                 "pkg_size" to pkgFile.length(),
                 "vfs_entries" to vfsEntries.size,
@@ -571,7 +571,7 @@ object MpkgPacker {
                 runCatching {
                     val bytes = file.readBytes()
                     if (bytes.isNotEmpty()) layered.add(rel to bytes)
-                }
+                }.onFailure { WepWawetLogger.appWarn("MpkgPacker: block — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
             }
             for ((path, bytes) in layered) {
                 val existing = entries.indexOfFirst { it.first.equals(path, true) }
@@ -704,7 +704,7 @@ object MpkgPacker {
         // each iteration, allowing GC to reclaim between iterations.
         val texSource: Sequence<Pair<String, ByteArray>> = if (vfsData != null) {
             // Streaming mode: lazily load each .tex from .pkg one at a time
-            val (vfsEntries, dataSectionStart) = vfsData!!
+            val (vfsEntries, dataSectionStart) = vfsData
             val texVfsEntries = vfsEntries.filter { it.path.endsWith(".tex") }
             WepWawetLogger.proxy("MpkgPacker.packFromPkg: streaming .tex entries (lazy, one at a time)",
                 "tex_count" to texVfsEntries.size)
@@ -919,7 +919,7 @@ object MpkgPacker {
             data class PendingVideo(val name: String, val vfs: PkgReader.VfsEntry?)
             val pendingVideos = mutableListOf<PendingVideo>()
             if (vfsData != null) {
-                val (vfsEntriesForVideo, _) = vfsData!!
+                val (vfsEntriesForVideo, _) = vfsData
                 for (vfs in vfsEntriesForVideo) {
                     if (videoExtensions.any { vfs.path.endsWith(it, ignoreCase = true) }) {
                         pendingVideos.add(PendingVideo(vfs.path, vfs))
@@ -958,7 +958,7 @@ object MpkgPacker {
                                 "cap" to MAX_IN_PKG_VIDEO_BYTES)
                             null
                         } else {
-                            val (_, dataStart) = vfsData!!
+                            val (_, dataStart) = vfsData
                             java.io.FileOutputStream(tempSource).use { fos ->
                                 PkgReader.streamEntryData(pkgFile, dataStart,
                                     pending.vfs.offset, pending.vfs.size.toLong(), fos)
@@ -1121,7 +1121,7 @@ object MpkgPacker {
         if (vfsData != null) {
             // Streaming pack — writes modified entries from memory, streams
             // unmodified entries directly from .pkg to .mpkg (no OOM)
-            val (vfsEntries, dataSectionStart) = vfsData!!
+            val (vfsEntries, dataSectionStart) = vfsData
             // v0.7.4 (G2): drop in-pkg video entries that were replaced by
             // a transcoded .mp4 — the .mp4 was added as a standalone entry.
             val effectiveVfsEntries = if (inPkgDroppedVfsPaths.isEmpty()) vfsEntries
@@ -1459,7 +1459,7 @@ object MpkgPacker {
                     else -> VideoTranscoder.transcodeToMp4H264(videoFile, transcoded)
                 }
                 if (!ok || !transcoded.exists() || transcoded.length() == 0L) {
-                    runCatching { transcoded.delete() }
+                    runCatching { transcoded.delete() }.onFailure { WepWawetLogger.appWarn("MpkgPacker: transcoded — best-effort call failed", "exception" to it.javaClass.simpleName) }
                     WepWawetLogger.proxyError("MpkgPacker.packVideoWallpaper: transcode FAILED",
                         "container" to VideoContainerSniffer.label(container),
                         "video_file" to videoFile.name,
@@ -1645,7 +1645,7 @@ object MpkgPacker {
             // v0.7.4 (G2): if the source was transcoded to a temp MP4, remove
             // it now — the .mpkg is complete and the original is left intact.
             if (effectiveVideoFile !== videoFile) {
-                runCatching { effectiveVideoFile.delete() }
+                runCatching { effectiveVideoFile.delete() }.onFailure { WepWawetLogger.appWarn("MpkgPacker: effectiveVideoFile — best-effort call failed", "exception" to it.javaClass.simpleName) }
             }
         }
 
@@ -3106,6 +3106,11 @@ object MpkgPacker {
                             "the ETC2 re-encode will ship that solid color",
                         "name" to name, "color" to hex(corners[0]))
                 }
+            }.onFailure {
+                WepWawetLogger.proxyWarn(
+                    "MpkgPacker: pixelSample — the diagnostic pixel sampling failed",
+                    "exception" to it.javaClass.simpleName,
+                    "message" to (it.message ?: ""))
             }
             val pixelBuffer = java.nio.ByteBuffer.allocateDirect(w * h * 4)
                 .order(java.nio.ByteOrder.nativeOrder())
@@ -3962,7 +3967,7 @@ object MpkgPacker {
                     android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
             }
                 .onFailure {
-                    WepWawetLogger.appWarn("MpkgPacker: swallowed failure at line 3961",
+                    WepWawetLogger.appWarn("MpkgPacker: extractMetadata (video duration) failed",
                         "exception" to it.javaClass.simpleName,
                         "message" to (it.message ?: ""))
                 }
@@ -3977,7 +3982,7 @@ object MpkgPacker {
             for (timeUs in candidates) {
                 bitmap = runCatching { retriever.getFrameAtTime(timeUs) }
                     .onFailure {
-                        WepWawetLogger.appWarn("MpkgPacker: swallowed failure at line 3970",
+                        WepWawetLogger.appWarn("MpkgPacker: getFrameAtTime (thumbnail extraction) failed",
                             "exception" to it.javaClass.simpleName,
                             "message" to (it.message ?: ""))
                     }
@@ -4014,7 +4019,7 @@ object MpkgPacker {
                 "message" to (e.message ?: ""))
             return null
         } finally {
-            runCatching { retriever.release() }
+            runCatching { retriever.release() }.onFailure { WepWawetLogger.appWarn("MpkgPacker: retriever — best-effort call failed", "exception" to it.javaClass.simpleName) }
         }
     }
 

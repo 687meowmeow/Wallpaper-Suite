@@ -96,6 +96,12 @@ object SuiteRulesStore {
             "mode" to pr.mode)
         // The trigger hub re-aggregates its registrations on change.
         RuleTriggerHub.onRulesChanged(context)
+        // v0.9.0 redesign: editing a rule never rotates the wallpaper —
+        // but a scope change CAN change which wallpapers are allowed, so
+        // the service re-checks the scopes (it only switches if the
+        // current wallpaper just left the allowed set).
+        io.wallpaperengine.weclient.WEWallpaperService.instance
+            ?.requestScopeReevaluation()
     }
 
     fun deletePlaylistRules(context: Context, playlistId: String) {

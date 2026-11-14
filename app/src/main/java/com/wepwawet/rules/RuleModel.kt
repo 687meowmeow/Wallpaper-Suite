@@ -107,6 +107,11 @@ object RuleModel {
     const val BLOCK_NEXT = "nextWallpaper"
     const val BLOCK_PREV = "prevWallpaper"
     const val BLOCK_SHUFFLE = "shuffleWallpaper"
+    // Scope ("Only use these wallpapers while…") — a rule containing one is
+    // a SCOPE: while its condition holds, the rotation may only pick from
+    // the block's paths. Evaluated continuously by the service, never
+    // "run" like a normal action.
+    const val BLOCK_LIMIT = "limitScope"
     // Playlist
     const val BLOCK_PAUSE_ROTATION = "pauseRotation"
     const val BLOCK_RESUME_ROTATION = "resumeRotation"
@@ -195,6 +200,9 @@ object RuleModel {
         var children: MutableList<Block> = ArrayList(),
         var options: MutableList<BlockOption> = ArrayList(),
         var collapsed: Boolean = false,
+        /** v0.9.0 redesign: the ⋮ menu's Disable — a disabled block is
+         *  kept but skipped by the engine. */
+        var disabled: Boolean = false,
     )
 
     data class BlockOption(
@@ -325,6 +333,7 @@ object RuleModel {
             o.put("options", arr)
         }
         if (b.collapsed) o.put("collapsed", true)
+        if (b.disabled) o.put("disabled", true)
         return o
     }
 
@@ -354,6 +363,7 @@ object RuleModel {
             }
         },
         collapsed = o.optBoolean("collapsed", false),
+        disabled = o.optBoolean("disabled", false),
     )
 
     fun blocksToJson(blocks: List<Block>): JSONArray {

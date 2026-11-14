@@ -308,7 +308,7 @@ class WePairingServer {
                         WepWawetLogger.proxyWarn("Connection rejected — too many live connections",
                             "live" to liveConnections.get(),
                             "max" to MAX_CONCURRENT_CONNECTIONS)
-                        runCatching { client.close() }
+                        runCatching { client.close() }.onFailure { WepWawetLogger.appWarn("WePairingServer: client — best-effort call failed", "exception" to it.javaClass.simpleName) }
                         continue
                     }
                     thread(start = true, name = "wep-pairing-conn", isDaemon = true) {
@@ -562,8 +562,11 @@ class WePairingServer {
                 // TcpClient.connector$lambda$2 line 541:
                 //   Cipher.getInstance("RSA/ECB/OAEPPadding")
                 // NOT PKCS1Padding — using the wrong padding = pairing failure!
+                val keyPair = rsaKeyPair
+                    ?: throw IllegalStateException(
+                        "rsaKeyPair not generated before the handshake decrypt")
                 val rsaCipher = Cipher.getInstance("RSA/ECB/OAEPPadding")
-                rsaCipher.init(Cipher.DECRYPT_MODE, rsaKeyPair!!.private)
+                rsaCipher.init(Cipher.DECRYPT_MODE, keyPair.private)
                 val deviceUUIDBytes = rsaCipher.doFinal(encDeviceUUID)
                 val ivBytes = rsaCipher.doFinal(encIv)
                 val aesKeyBytes = rsaCipher.doFinal(encAesKey)
@@ -699,7 +702,7 @@ class WePairingServer {
                     WepWawetLogger.proxyWarn("Pairing: closing older currentClient before assigning new one",
                         "older_remote" to (older.remoteSocketAddress?.toString() ?: "unknown"),
                         "new_remote" to (client.remoteSocketAddress.toString()))
-                    runCatching { older.close() }
+                    runCatching { older.close() }.onFailure { WepWawetLogger.appWarn("WePairingServer: older — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 }
                 currentClient = client
                 // v0.7.24 (H-P5): was `soTimeout = 0` (block forever). With no
@@ -1309,7 +1312,7 @@ class WePairingServer {
                             gson.fromJson(commandJson, DownloadInfo::class.java).command
                         }
                             .onFailure {
-                                WepWawetLogger.appWarn("WePairingServer: swallowed failure at line 1310",
+                                WepWawetLogger.appWarn("WePairingServer: parseDownloadCommand (command field) failed",
                                     "exception" to it.javaClass.simpleName,
                                     "message" to (it.message ?: ""))
                             }
@@ -1332,7 +1335,7 @@ class WePairingServer {
                                     gson.fromJson(commandJson, DownloadInfo::class.java).size
                                 }
                                     .onFailure {
-                                        WepWawetLogger.appWarn("WePairingServer: swallowed failure at line 1327",
+                                        WepWawetLogger.appWarn("WePairingServer: parseDownloadCommand (transmissionContinue size) failed",
                                             "exception" to it.javaClass.simpleName,
                                             "message" to (it.message ?: ""))
                                     }

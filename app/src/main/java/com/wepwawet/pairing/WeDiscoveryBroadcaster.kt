@@ -92,8 +92,8 @@ class WeDiscoveryBroadcaster(private val context: Context) {
     fun stop() {
         running = false
         broadcastThread?.interrupt()
-        runCatching { multicastSocket?.close() }
-        runCatching { multicastLock?.let { if (it.isHeld) it.release() } }
+        runCatching { multicastSocket?.close() }.onFailure { WepWawetLogger.appWarn("WeDiscoveryBroadcaster: multicastSocket — best-effort call failed", "exception" to it.javaClass.simpleName) }
+        runCatching { multicastLock?.let { if (it.isHeld) it.release() } }.onFailure { WepWawetLogger.appWarn("WeDiscoveryBroadcaster: multicastLock — best-effort call failed", "exception" to it.javaClass.simpleName) }
         multicastSocket = null
         multicastLock = null
         WepWawetLogger.proxy("Discovery broadcaster stopped")
@@ -204,9 +204,9 @@ class WeDiscoveryBroadcaster(private val context: Context) {
             //
             // stop() may have already closed + nulled multicastSocket;
             // runCatching handles that gracefully (no-op on null/closed).
-            runCatching { multicastSocket?.close() }
+            runCatching { multicastSocket?.close() }.onFailure { WepWawetLogger.appWarn("WeDiscoveryBroadcaster: multicastSocket — best-effort call failed", "exception" to it.javaClass.simpleName) }
             multicastSocket = null
-            runCatching { multicastLock?.let { if (it.isHeld) it.release() } }
+            runCatching { multicastLock?.let { if (it.isHeld) it.release() } }.onFailure { WepWawetLogger.appWarn("WeDiscoveryBroadcaster: multicastLock — best-effort call failed", "exception" to it.javaClass.simpleName) }
             // v0.7.24 (H-P7 BUG FIX): the loop's catch never reset `running`,
             // so after any exception (e.g. a bind failure) isRunning kept
             // returning true and PairingService's smart-restart NEVER

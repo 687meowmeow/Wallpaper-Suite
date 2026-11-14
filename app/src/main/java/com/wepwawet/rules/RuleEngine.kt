@@ -118,6 +118,11 @@ object RuleEngine {
                     "fired" to firedThisPlaylist.toString())
             }
         }
+        // v0.9.0 redesign: a condition EVENT (charger, Wi-Fi, battery…)
+        // can flip a Limit scope on or off — hand the ACTIVE playlist's
+        // service a scope re-check. This never rotates on its own; it only
+        // switches when the current wallpaper left the allowed set.
+        WEWallpaperService.instance?.requestScopeReevaluation()
     }
 
     /** Fire ONE rule by hand (the editor's play button, the QS tile). */
@@ -400,6 +405,8 @@ object RuleEngine {
         depth: Int,
     ): Flow {
         for (b in blocks) {
+            // v0.9.0 redesign: a disabled block (the ⋮ menu) is skipped.
+            if (b.disabled) continue
             // The highlight window: brief, so a manual run shows the flow.
             ctx.highlights[b.id] = System.currentTimeMillis() + 1400
             ctx.onHighlight?.invoke(b.id)
@@ -419,7 +426,7 @@ object RuleEngine {
                 // ── Wallpaper ──
                 RuleModel.BLOCK_SHOW -> {
                     val path = resolveRef(b.param, ctx)
-                    applyPick(context, ctx, b, listOf(path), b.param3.ifEmpty { "home" })
+                    applyPick(context, ctx, b, listOf(path), resolvedTarget(context, b.param3))
                     Flow.CONTINUE
                 }
                 RuleModel.BLOCK_SHOW_SET -> {
@@ -429,7 +436,7 @@ object RuleEngine {
                 }
                 RuleModel.BLOCK_PICK_GROUP, RuleModel.BLOCK_PICK_PLAYLIST, RuleModel.BLOCK_RANDOM -> {
                     val candidates = candidatesFor(context, ctx, b)
-                    applyPick(context, ctx, b, candidates, b.param2.ifEmpty { "home" })
+                    applyPick(context, ctx, b, candidates, resolvedTarget(context, b.param3))
                     Flow.CONTINUE
                 }
                 RuleModel.BLOCK_PULL_DISCOVER -> {
@@ -445,7 +452,8 @@ object RuleEngine {
                             )
                         }
                         if (path != null) {
-                            applyImagePath(context, ctx, b, path, b.param2.ifEmpty { "home" })
+                            applyImagePath(context, ctx, b, path,
+                                resolvedTarget(context, b.param3))
                             Flow.CONTINUE
                         } else {
                             ctx.lastPickOk = false
@@ -455,6 +463,13 @@ object RuleEngine {
                 }
                 RuleModel.BLOCK_NEXT -> {
                     stepPlaylist(context, ctx, b, +1)
+                    Flow.CONTINUE
+                }
+                RuleModel.BLOCK_LIMIT -> {
+                    // A Limit scope is evaluated CONTINUOUSLY by the
+                    // service (suiteSetForNow) — firing the rule runs
+                    // nothing here; the scope's state applies on the
+                    // service's next re-evaluation.
                     Flow.CONTINUE
                 }
                 RuleModel.BLOCK_PREV -> {
@@ -718,7 +733,7 @@ object RuleEngine {
                         }.getOrNull()
                     }
                     val bytes = if (url != null) withContext(Dispatchers.IO) {
-                        runCatching { com.wepwawet.discover.DiscoverSearch.downloadImage(url) }
+                        runCatching { com.wepwawet.discover.DiscoverSearch.downloadImage(url) }.onFailure { WepWawetLogger.appWarn("RuleEngine: com — best-effort call failed", "exception" to it.javaClass.simpleName) }
                             .onFailure {
                                 WepWawetLogger.appWarn("$TAG: discover download failed",
                                     "exception" to it.javaClass.simpleName)
@@ -769,7 +784,7 @@ object RuleEngine {
         }
         val current = WEWallpaperService.instance?.currentWallpaperFile()
         var picked = pickFrom(candidates, mode, current, context, ctx)
-        when (target) {
+        when (resolvedTarget(context, target)) {
             "bothDifferent" -> {
                 val second = pickFrom(candidates.filter { it != picked }, mode, current, context, ctx)
                 if (second != null && second != picked) {
@@ -779,7 +794,33 @@ object RuleEngine {
                     applyImagePath(context, ctx, b, picked, "both")
                 }
             }
-            else -> applyImagePath(context, ctx, b, picked, target)
+            else -> applyImagePath(context, ctx, b, picked, resolvedTarget(context, target))
+        }
+    }
+
+    /**
+     * v0.9.0 redesign: the UNIVERSAL target resolution. The Home/Lock
+     * tri-state toggles (DiscoverPrefs.readScreens) sit at the top of the
+     * app and govern EVERY apply anywhere. A block with an EMPTY target
+     * field (the default) follows them: home-only, lock-only, both-same
+     * (one image, same color toggles) or both-different (different
+     * colors). A block with an EXPLICIT target ("on the lock screen")
+     * keeps it — the editor still offers per-block choices.
+     */
+    fun resolvedTarget(context: Context, target: String): String {
+        if (target.isNotEmpty()) return target
+        val screens = com.wepwawet.discover.DiscoverPrefs.readScreens(context)
+        val home = com.wepwawet.discover.DiscoverPrefs.homeRequired(screens.first)
+        val lock = com.wepwawet.discover.DiscoverPrefs.lockRequired(screens.second)
+        return when {
+            home && lock -> if (com.wepwawet.discover.DiscoverPrefs.isDualMode(
+                    screens.first, screens.second)) "bothDifferent" else "both"
+            home -> "home"
+            lock -> "lock"
+            // Both toggles off: nothing selected anywhere — apply to both
+            // (the toggles' screen makes the state obvious; a rule the
+            // user runs by hand should still show SOMETHING).
+            else -> "both"
         }
     }
 
@@ -851,31 +892,56 @@ object RuleEngine {
         }
     }
 
-    /** next / previous / shuffle relative to the playlist's rotation order. */
+    /**
+     * next / previous / shuffle relative to the playlist's rotation order.
+     *
+     * v0.9.0 redesign: this is the ONLY thing that advances a playlist —
+     * the "Every N" trigger runs it, the rotation itself no longer ticks.
+     * Random slots are real candidates (a picked slot PULLS a fresh image
+     * through its own settings); group blocks resolve to their members.
+     * A paused rotation or an active rule hold steps nothing. The target
+     * is the universal Home/Lock system, not the block's own field.
+     */
     private suspend fun stepPlaylist(
         context: Context,
         ctx: RunContext,
         b: RuleModel.Block,
         dir: Int,
     ) {
+        val svc = WEWallpaperService.instance
+        if (svc?.isRotationPaused() == true) return
+        if (svc?.isRotationHeld() == true) return
         val playlist = SuitePlaylistStore.read(context, ctx.playlistId) ?: return
         val paths = ArrayList<String>()
         for (e in playlist.entries) {
             if (GroupBlocks.isGroupBlock(e.filepath)) {
                 paths.addAll(withContext(Dispatchers.IO) { GroupBlocks.resolve(context, e).paths })
-            } else if (!RandomPullEngine.isSlot(e.filepath)) {
+            } else {
+                // Slots included — a landing pulls fresh.
                 paths.add(e.filepath)
             }
         }
         if (paths.isEmpty()) return
-        val current = WEWallpaperService.instance?.currentWallpaperFile()
+        val current = svc?.currentWallpaperFile()
         val idx = current?.let { paths.indexOf(it) } ?: -1
         val picked = when {
             dir > 0 -> paths[(idx + 1).coerceAtLeast(0).mod(paths.size)]
             dir < 0 -> paths[(idx - 1 + paths.size).mod(paths.size)]
             else -> paths[Random.nextInt(paths.size)]
         }
-        applyImagePath(context, ctx, b, picked, b.param2.ifEmpty { "home" })
+        if (RandomPullEngine.isSlot(picked)) {
+            val slot = playlist.entries.firstOrNull { it.filepath == picked } ?: return
+            val pulled = withContext(Dispatchers.IO) {
+                RandomPullEngine.pull(context, playlist, slot)
+            }
+            if (pulled != null) {
+                applyImagePath(context, ctx, b, pulled, resolvedTarget(context, b.param3))
+            } else {
+                ctx.lastPickOk = false
+            }
+        } else {
+            applyImagePath(context, ctx, b, picked, resolvedTarget(context, b.param3))
+        }
     }
 
     // Recent picks ("avoid the most recently shown").

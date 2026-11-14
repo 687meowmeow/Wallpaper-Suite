@@ -125,6 +125,9 @@ class WEWallpaperService : WallpaperService() {
         currentEngine?.rulesSetRotationPaused(paused)
     }
 
+    /** v0.9.0 redesign: is the rotation paused by a rule right now? */
+    fun isRotationPaused(): Boolean = currentEngine?.rulesIsRotationPaused() ?: false
+
     /** Hold the current wallpaper for [minutes] (rule action). */
     fun holdWallpaperFor(minutes: Int) {
         currentEngine?.rulesHoldFor(minutes * 60_000L)
@@ -133,6 +136,16 @@ class WEWallpaperService : WallpaperService() {
     /** Force one rotation NOW (rule action: restart playlist). */
     fun forcePlaylistRotation() {
         currentEngine?.rulesForceRotation()
+    }
+
+    /** v0.9.0 redesign: is a rule hold currently blocking rotation? */
+    fun isRotationHeld(): Boolean = currentEngine?.rulesIsRotationHeld() ?: false
+
+    /** v0.9.0 redesign: re-check the Limit scopes NOW (a condition event
+     *  fired, or the rules were edited). Never rotates on its own — it
+     *  only switches when the current wallpaper left the allowed set. */
+    fun requestScopeReevaluation() {
+        currentEngine?.rulesReevaluateScopes()
     }
 
     /** v0.9.0 (rules): apply saved wallpaper properties (preset block). */
@@ -477,20 +490,26 @@ class WEWallpaperService : WallpaperService() {
                 suiteEntries = playlist.entries.map { it.filepath }
                 suiteOrderRandom =
                     playlist.orderMode == com.wepwawet.playlist.SuitePlaylistStore.ORDER_RANDOM
-                duration = playlist.intervalMinutes * 60000
+                // v0.9.0 redesign: NO duration rotation for suite playlists.
+                // The playlist changes ONLY when a rule advances it (the
+                // "Every N" trigger → Next wallpaper block, delivered by
+                // the rules engine) — a playlist with no automations never
+                // changes by itself. duration stays for the official
+                // single-playlist mode only; here it is parked at "never".
+                duration = Int.MAX_VALUE
+                suiteHoldUntil = 0L
                 suiteRandomPullInFlight = false
                 isValid = suiteEntries.isNotEmpty()
                 // v0.8.20/21 (all buttons live): the fingerprint of every
-                // rotation-relevant field — any in-place edit changes it and
-                // syncSettingsAndApplyChanges applies immediately. The
-                // interval is DELIBERATELY excluded: it only steers FUTURE
-                // ticks (synced above), and including it made every slider
-                // finish rotate the wallpaper. Slot settings are part of
-                // the fingerprint — editing a slot applies live too.
+                // rotation-relevant field — any in-place entry edit changes
+                // it and syncSettingsAndApplyChanges applies immediately.
+                // RULES are deliberately NOT in the fingerprint: changing
+                // a trigger or scope must not itself rotate the wallpaper
+                // (the spec is explicit); scopes are re-evaluated separately
+                // by reevaluateScopes().
                 lastSyncedPlaylistFingerprint =
                     "${playlist.id}|${playlist.orderMode}|" +
-                        playlist.entries.joinToString(";") { it.toString() } + "|" +
-                        playlist.timeRules.joinToString(";") { it.toString() }
+                        playlist.entries.joinToString(";") { it.toString() }
                 randomPool.clear()
                 fullSortedList.clear()
                 timePlaylist.clear()
@@ -501,8 +520,6 @@ class WEWallpaperService : WallpaperService() {
                     "name" to playlist.name,
                     "entries" to suiteEntries.size,
                     "order" to playlist.orderMode,
-                    "interval_min" to playlist.intervalMinutes,
-                    "time_rules" to playlist.timeRules.size,
                     "random_slots" to suiteEntries.count {
                         com.wepwawet.playlist.RandomPullEngine.isSlot(it)
                     })
@@ -580,12 +597,21 @@ class WEWallpaperService : WallpaperService() {
                 return ""
             }
 
-            /** The entries that own the current minute (time rule) — or the whole playlist. */
+            /**
+             * v0.9.0 redesign: the rotation set — the FIRST matching LIMIT
+             * SCOPE, or the whole playlist when none matches.
+             *
+             * A scope is a rule of THIS playlist that contains a Limit
+             * block ("Only use these wallpapers while…"). Its condition is
+             * the rule's GATE (evaluated live by RuleEngine.evalCond — a
+             * state, not an event). Scopes are checked in list order; the
+             * first whose gate holds wins; when none hold, the whole
+             * playlist is the set. Paths not in the playlist any more are
+             * dropped; group blocks resolve to their live members.
+             */
             private fun suiteSetForNow(): List<String> {
                 val playlist = suitePlaylist ?: return emptyList()
-                val ruleSet = com.wepwawet.playlist.SuitePlaylistStore
-                    .entriesForMinute(playlist, com.wepwawet.playlist.SuitePlaylistStore.currentMinuteOfDay())
-                val source = ruleSet ?: suiteEntries
+                val source = scopePathsForNow(playlist) ?: suiteEntries
                 // v0.9.0: GROUP BLOCKS — a "group://block/<name>" marker
                 // resolves to the group's CURRENT members in the block's
                 // order (manual/newest/oldest/az/random), so a rotation that
@@ -608,20 +634,67 @@ class WEWallpaperService : WallpaperService() {
                 return out
             }
 
+            /** The first matching scope's paths, or null when none matches. */
+            private fun scopePathsForNow(
+                playlist: com.wepwawet.playlist.SuitePlaylistStore.Playlist,
+            ): List<String>? {
+                val ruleSet = com.wepwawet.rules.SuiteRulesStore
+                    .readPlaylistRules(this@WEWallpaperService, playlist.id)
+                val memberPaths = playlist.entries.map { it.filepath }.toHashSet()
+                for (rule in ruleSet.rules) {
+                    if (!rule.enabled) continue
+                    val limit = rule.actions.firstOrNull {
+                        it.type == com.wepwawet.rules.RuleModel.BLOCK_LIMIT
+                    } ?: continue
+                    val gate = rule.gate
+                    if (gate != null && !com.wepwawet.rules.RuleEngine.evalCond(
+                            this@WEWallpaperService, playlist.id, gate, null)
+                    ) continue
+                    val paths = limit.paths.filter { it in memberPaths }
+                    if (paths.isNotEmpty()) return paths
+                }
+                return null
+            }
+
+            /**
+             * v0.9.0 redesign: re-evaluate the scopes and switch ONLY when
+             * the current wallpaper just left the allowed set (a boundary
+             * crossing or a condition event). Never rotates on its own.
+             */
+            fun reevaluateScopes() {
+                if (!suiteMode || isPreview) return
+                if (rotationPaused || System.currentTimeMillis() < suiteHoldUntil) return
+                playlistUpdate()
+            }
+
             /** Pick the next wallpaper inside the current set per the order mode. */
             private fun suitePickNew(): String {
                 return suitePickNewAndMaybePull()
             }
 
             /**
-             * v0.9.0 (rules): hold the current wallpaper for [ms] — the gate
-             * `now - lastChangeTime > duration` can only pass once the hold
-             * elapses, so lastChangeTime is set to exactly `now + ms -
-             * duration` (in the future when the hold exceeds the interval).
+             * v0.9.0 (rules): hold the current wallpaper for [ms].
+             * Official mode: the gate `now - lastChangeTime > duration`
+             * only passes once the hold elapses (lastChangeTime set to
+             * `now + ms - duration`). Suite mode: duration is parked at
+             * Int.MAX_VALUE (no duration rotation) and the hold is its own
+             * [suiteHoldUntil] timestamp the scope switch and the rules
+             * engine's Next-step both respect.
              */
+            @Volatile
+            private var suiteHoldUntil: Long = 0L
+
             fun holdFor(ms: Long) {
-                lastChangeTime = System.currentTimeMillis() + ms - duration
+                if (suiteMode) {
+                    suiteHoldUntil = System.currentTimeMillis() + ms
+                } else {
+                    lastChangeTime = System.currentTimeMillis() + ms - duration
+                }
             }
+
+            /** v0.9.0 redesign: is a rule hold currently active? */
+            fun isRotationHeld(): Boolean =
+                System.currentTimeMillis() < suiteHoldUntil
 
             /** v0.9.0 (rules): read-only views for the rules engine. */
             fun rulesCurrentFile(): String? = currentFile
@@ -736,19 +809,83 @@ class WEWallpaperService : WallpaperService() {
             fun nextWakeDelayMs(): Long {
                 val now = System.currentTimeMillis()
                 var wakeAt = now + WAKE_SELF_HEAL_MS
-                val rotationIn = duration - (now - lastChangeTime)
-                if (rotationIn > 0 && now + rotationIn < wakeAt) {
-                    wakeAt = now + rotationIn
-                }
-                if (suiteMode) {
+                if (!suiteMode) {
+                    // Official single playlist: the interval rotation still
+                    // rules the wake schedule.
+                    val rotationIn = duration - (now - lastChangeTime)
+                    if (rotationIn > 0 && now + rotationIn < wakeAt) {
+                        wakeAt = now + rotationIn
+                    }
+                } else {
+                    // v0.9.0 redesign: suite playlists wake only at the
+                    // next SCOPE time boundary (a window start/end that can
+                    // hand the rotation to a different entry set). Scopes
+                    // with non-time conditions re-evaluate when the trigger
+                    // hub reports their event — never by polling. Interval
+                    // advancement needs no wake: the hub's own computed
+                    // schedule fires the rules.
                     val pl = suitePlaylist
-                    if (pl != null && pl.timeRules.isNotEmpty()) {
-                        val boundary = com.wepwawet.playlist.SuitePlaylistStore
-                            .nextTimeRuleBoundaryMs(pl, now)
+                    if (pl != null) {
+                        val boundary = nextScopeBoundaryMs(pl, now)
                         if (boundary != null && boundary < wakeAt) wakeAt = boundary
                     }
                 }
                 return (wakeAt - now).coerceIn(1_000L, WAKE_SELF_HEAL_MS)
+            }
+
+            /**
+             * The next minute-of-day boundary (start or end, wrapping past
+             * midnight) across every TIME-RANGE condition of this
+             * playlist's LIMIT scopes — the moments the allowed set can
+             * change on the clock. Full-day windows (start == end) never
+             * cross a boundary.
+             */
+            private fun nextScopeBoundaryMs(
+                playlist: com.wepwawet.playlist.SuitePlaylistStore.Playlist,
+                now: Long,
+            ): Long? {
+                val ruleSet = com.wepwawet.rules.SuiteRulesStore
+                    .readPlaylistRules(this@WEWallpaperService, playlist.id)
+                var best: Long? = null
+                for (rule in ruleSet.rules) {
+                    if (!rule.enabled) continue
+                    if (rule.actions.none {
+                            it.type == com.wepwawet.rules.RuleModel.BLOCK_LIMIT
+                        }) continue
+                    for (minute in scopeBoundaryMinutes(rule.gate)) {
+                        val at = nextMinuteOfDayOccurrenceMs(minute, now)
+                        if (best == null || at < best) best = at
+                    }
+                }
+                return best
+            }
+
+            /** The start/end minutes of every time-range cond in the tree. */
+            private fun scopeBoundaryMinutes(cond: com.wepwawet.rules.RuleModel.Cond?): IntArray {
+                if (cond == null) return IntArray(0)
+                val out = ArrayList<Int>()
+                if (cond.type == com.wepwawet.rules.RuleModel.COND_TIME_RANGE &&
+                    cond.minuteStart != cond.minuteEnd
+                ) {
+                    out.add(cond.minuteStart)
+                    out.add(cond.minuteEnd)
+                }
+                for (child in cond.children) {
+                    out.addAll(scopeBoundaryMinutes(child).toList())
+                }
+                return out.toIntArray()
+            }
+
+            /** The next local occurrence of a minute-of-day, 250ms in. */
+            private fun nextMinuteOfDayOccurrenceMs(minuteOfDay: Int, now: Long): Long {
+                val cal = java.util.Calendar.getInstance()
+                cal.timeInMillis = now
+                cal.set(java.util.Calendar.HOUR_OF_DAY, minuteOfDay / 60)
+                cal.set(java.util.Calendar.MINUTE, minuteOfDay % 60)
+                cal.set(java.util.Calendar.SECOND, 0)
+                cal.set(java.util.Calendar.MILLISECOND, 250)
+                if (cal.timeInMillis <= now) cal.add(java.util.Calendar.DAY_OF_YEAR, 1)
+                return cal.timeInMillis
             }
 
             fun shouldUpdateWallpaper(): Boolean {
@@ -756,24 +893,19 @@ class WEWallpaperService : WallpaperService() {
                 // v0.9.0 (rules): a paused rotation never rotates.
                 if (rotationPaused) return false
                 if (suiteMode) {
+                    // v0.9.0 redesign: NO duration rotation — the playlist
+                    // advances ONLY when a rule's Next-wallpaper block runs
+                    // (the "Every N" trigger). The tick's one job here is
+                    // SCOPE ENFORCEMENT: a boundary or condition change that
+                    // no longer allows the current wallpaper switches it
+                    // immediately (into the new scope's set).
                     val set = suiteSetForNow()
-                    // v0.8.19: the dynamic random slot counts as a candidate.
                     if (set.isEmpty()) return false
-                    // A window change (or playlist edit) that no longer
-                    // contains the current wallpaper switches immediately.
-                    // (A random-slot image IS a legit current wallpaper.)
                     val current = currentFile
                     if (current != null && current !in set &&
                         !com.wepwawet.playlist.RandomPullEngine.isSlotFile(current)
                     ) return true
-                    // A single-entry window pins its wallpaper (the random
-                    // slot alone keeps rotating — that's its purpose).
-                    // A lone RANDOM SLOT keeps rotating — every landing
-                    // pulls a FRESH image, so re-picking it is never a no-op.
-                    if (set.size <= 1 &&
-                        set.none { com.wepwawet.playlist.RandomPullEngine.isSlot(it) }
-                    ) return false
-                    return (System.currentTimeMillis() - lastChangeTime) > duration
+                    return false
                 }
                 val currentTime = System.currentTimeMillis()
                 return when (mode) {
@@ -887,6 +1019,14 @@ class WEWallpaperService : WallpaperService() {
                 playlist.syncSettingsAndApplyChanges()
                 playlistUpdate()
             }
+        }
+
+        fun rulesIsRotationHeld(): Boolean = playlist.isRotationHeld()
+
+        fun rulesIsRotationPaused(): Boolean = playlist.rotationPaused
+
+        fun rulesReevaluateScopes() {
+            handler.post { playlist.reevaluateScopes() }
         }
 
         fun rulesApplyProperties(propertiesJson: String) {
@@ -1059,7 +1199,7 @@ class WEWallpaperService : WallpaperService() {
             }
 
             wallpaper?.setVisibility(GLSurfaceView.VISIBLE)
-            parallaxController.linkWallpaper(wallpaperControls!!)
+            parallaxController.linkWallpaper(videoWallpaperView)
             wallpaperControls?.setLoadCallback {
                 wallpaperControls?.let { controls ->
                     applyProperties(controls.getWallpaperProperties())

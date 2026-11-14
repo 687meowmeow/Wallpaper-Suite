@@ -6,6 +6,9 @@ import android.graphics.Canvas
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -20,6 +23,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
@@ -47,6 +51,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -146,7 +151,7 @@ fun ImageEditorScreen(
                             drawable.draw(canvas)
                         }
                     }
-            }.getOrElse {
+            }.onFailure { WepWawetLogger.appWarn("ImageEditorScreen: ImageEditorScreen — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }.getOrElse {
                 WepWawetLogger.appWarn("ImageEditor: load failed",
                     "exception" to it.javaClass.name,
                     "message" to (it.message ?: ""))
@@ -159,10 +164,12 @@ fun ImageEditorScreen(
     // The saved crop (if any) restores the previous rectangle — fractions
     // of the source bitmap, so they map straight onto this session.
     val savedCrop = remember(imageUri) { ImageCropStore.read(context)[imageUri] }
-    var rect by remember(bitmap) {
+    var cropState by remember(bitmap) {
         mutableStateOf(
-            savedCrop?.let { Rect(it.left, it.top, it.right, it.bottom) }
-                ?: Rect(0f, 0f, 1f, 1f)
+            savedCrop?.let {
+                InteractiveCropState(
+                    pendingRestore = Rect(it.left, it.top, it.right, it.bottom))
+            } ?: InteractiveCropState()
         )
     }
 
@@ -226,11 +233,11 @@ fun ImageEditorScreen(
             }
 
             // ---- Crop surface (shared with BitmapCropDialog) ----
-            CropSurface(
+            InteractiveCropSurface(
                 bmp = bmp,
-                rect = rect,
+                state = cropState,
                 lockRatio = lockRatio,
-                onRectChange = { rect = it },
+                onStateChange = { cropState = it },
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
@@ -251,16 +258,15 @@ fun ImageEditorScreen(
                         selected = activePreset == index,
                         onClick = {
                             activePreset = index
-                            rect = fitPresetRect(
-                                rect, presets[index].second,
-                                bmp.width.toFloat() / bmp.height)
+                            cropState = cropState.withPreset(presets[index].second)
                         },
                         label = { Text(label) },
                     )
                 }
             }
             Text(
-                "Drag the corners to resize — drag inside to move." +
+                "Drag the frame's edges and corners to resize it — drag or " +
+                    "pinch the image underneath to move and zoom it." +
                     if (lockRatio != null) " Ratio locked." else "",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -277,7 +283,7 @@ fun ImageEditorScreen(
             ) {
                 TextButton(
                     onClick = {
-                        rect = Rect(0f, 0f, 1f, 1f)
+                        cropState = InteractiveCropState().withPreset(null)
                         activePreset = 0
                     },
                 ) {
@@ -312,7 +318,8 @@ fun ImageEditorScreen(
                                     context = context,
                                     imageUri = imageUri,
                                     bmp = bmp,
-                                    rect = rect,
+                                    rect = cropState.srcRectNormalized(
+                                        bmp.width, bmp.height),
                                     oldCropPath = savedCrop?.cropFilePath,
                                 )
                                 onBack()
@@ -349,163 +356,328 @@ fun cropPresets(context: android.content.Context): List<Pair<String, Float?>> {
 }
 
 /**
- * The crop surface used by BOTH the folder-image editor and the Discover
- * "crop before setting" dialog: the image fit-centered at its exact aspect
- * (dispW x dispH) so crop fractions map linearly, with the drag handler
- * reading the LIVE rect state (a lambda capturing a plain val would keep
- * dragging a STALE rectangle) and a draw-only overlay (dim + border +
- * handles + thirds).
+ * v0.9.0 redesign: THE INTERACTIVE CROP — the crop frame can be resized by
+ * dragging its EDGES and CORNERS, and the IMAGE UNDER THE FRAME can be
+ * moved (one finger) and pinch-zoomed (two fingers), exactly like the
+ * user asked ("I can't drag the crop borders and I can't move the image
+ * under the crop frame"). The image is clamped to always COVER the frame,
+ * and the result — the image region visible through the frame — is what
+ * actually gets applied.
+ *
+ * State model ([InteractiveCropState]): the frame in VIEWPORT fractions,
+ * plus the image transform (scale = image px → viewport px, offset =
+ * image top-left in viewport px). The surface mutates the caller's state
+ * through copies (Compose value semantics).
  */
+data class InteractiveCropState(
+    // The crop frame, in fractions of the viewport.
+    val frameLeft: Float = 0.06f,
+    val frameTop: Float = 0.06f,
+    val frameRight: Float = 0.94f,
+    val frameBottom: Float = 0.94f,
+    // The image transform.
+    val scale: Float = 1f,
+    val offsetX: Float = 0f,
+    val offsetY: Float = 0f,
+    /** Set once the first layout initialized the transform. */
+    val initialized: Boolean = false,
+    /** The viewport size (px) the surface last saw — srcRect needs it. */
+    val viewportW: Float = 0f,
+    val viewportH: Float = 0f,
+    /** A preset apply request (tick changes trigger it; ratio null = Free). */
+    val applyPresetTick: Int = 0,
+    val presetRatio: Float? = null,
+    /** A saved crop to restore (image-space fractions), applied once. */
+    val pendingRestore: Rect? = null,
+)
+
+/** The frame rect in viewport px. */
+private fun frameRectPx(s: InteractiveCropState, w: Float, h: Float) = Rect(
+    s.frameLeft * w, s.frameTop * h, s.frameRight * w, s.frameBottom * h,
+)
+
+/** The smallest scale at which the image still covers the frame. */
+private fun minScaleFor(s: InteractiveCropState, imgW: Int, imgH: Int): Float {
+    val f = frameRectPx(s, s.viewportW, s.viewportH)
+    if (imgW <= 0 || imgH <= 0) return 1f
+    return maxOf(f.width / imgW, f.height / imgH).coerceAtLeast(0.01f)
+}
+
+/** Clamp the transform so the image covers the frame exactly (no blank). */
+private fun clampImage(
+    s: InteractiveCropState,
+    imgW: Int,
+    imgH: Int,
+): InteractiveCropState {
+    if (s.viewportW <= 0f || s.viewportH <= 0f) return s
+    var scale = s.scale.coerceAtLeast(minScaleFor(s, imgW, imgH))
+    val f = frameRectPx(s, s.viewportW, s.viewportH)
+    val drawnW = imgW * scale
+    val drawnH = imgH * scale
+    // The image must span past the frame on both axes.
+    val ox = s.offsetX.coerceIn(f.right - drawnW, f.left)
+    val oy = s.offsetY.coerceIn(f.bottom - drawnH, f.top)
+    return s.copy(scale = scale, offsetX = ox, offsetY = oy)
+}
+
+/** Center the image on the frame at its minimum covering scale. */
+private fun fitImageToFrame(
+    s: InteractiveCropState,
+    imgW: Int,
+    imgH: Int,
+): InteractiveCropState {
+    if (s.viewportW <= 0f || s.viewportH <= 0f || imgW <= 0 || imgH <= 0) return s
+    val scale = minScaleFor(s, imgW, imgH)
+    val f = frameRectPx(s, s.viewportW, s.viewportH)
+    val cx = (f.left + f.right) / 2f
+    val cy = (f.top + f.bottom) / 2f
+    return s.copy(
+        scale = scale,
+        offsetX = cx - imgW * scale / 2f,
+        offsetY = cy - imgH * scale / 2f,
+    )
+}
+
+/**
+ * The image region under the frame, as fractions of the bitmap (0..1) —
+ * THIS is the crop that gets applied (saveCrop / Bitmap.createBitmap).
+ */
+fun InteractiveCropState.srcRectNormalized(imgW: Int, imgH: Int): Rect {
+    if (imgW <= 0 || imgH <= 0 || scale <= 0f) return Rect(0f, 0f, 1f, 1f)
+    val f = frameRectPx(this, viewportW, viewportH)
+    val l = ((f.left - offsetX) / scale / imgW).coerceIn(0f, 1f)
+    val t = ((f.top - offsetY) / scale / imgH).coerceIn(0f, 1f)
+    val r = ((f.right - offsetX) / scale / imgW).coerceIn(0f, 1f)
+    val b = ((f.bottom - offsetY) / scale / imgH).coerceIn(0f, 1f)
+    return Rect(
+        minOf(l, r), minOf(t, b), maxOf(l, r), maxOf(t, b),
+    )
+}
+
+/** Ask the surface to apply a preset (null = Free → the full frame). */
+fun InteractiveCropState.withPreset(ratio: Float?): InteractiveCropState =
+    copy(applyPresetTick = applyPresetTick + 1, presetRatio = ratio)
+
+/** The frame fractions for a preset ratio inside the CURRENT viewport. */
+private fun presetFrame(
+    ratio: Float?,
+    viewportW: Float,
+    viewportH: Float,
+): Rect {
+    if (ratio == null || viewportW <= 0f || viewportH <= 0f) {
+        return Rect(0.02f, 0.02f, 0.98f, 0.98f)
+    }
+    // Pixel-space fit: frameW/frameH = ratio (square viewport px).
+    var w = 0.92f
+    var h = w * viewportH / (ratio * viewportW)
+    if (h > 0.92f) {
+        h = 0.92f
+        w = h * ratio * viewportW / viewportH
+    }
+    val cx = 0.5f
+    val cy = 0.5f
+    return Rect(cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f)
+}
+
 @Composable
-private fun CropSurface(
+fun InteractiveCropSurface(
     bmp: Bitmap,
-    rect: Rect,
+    state: InteractiveCropState,
     lockRatio: Float?,
-    onRectChange: (Rect) -> Unit,
+    onStateChange: (InteractiveCropState) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    BoxWithConstraints(modifier = modifier) {
-        val availW = maxWidth - 16.dp
-        val availH = maxHeight - 16.dp
-        val scale = minOf(
-            availW.value / bmp.width,
-            availH.value / bmp.height,
-        ).coerceAtLeast(0.01f)
-        val dispW = (bmp.width * scale).dp
-        val dispH = (bmp.height * scale).dp
+    androidx.compose.foundation.layout.BoxWithConstraints(modifier) {
+        val density = androidx.compose.ui.platform.LocalDensity.current
+        val viewportW = with(density) { maxWidth.toPx() }
+        val viewportH = with(density) { maxHeight.toPx() }
 
-        // v0.8.18 CRITICAL FIX: the gesture lambdas below live inside
-        // pointerInput, which only restarts when its KEYS change — a plain
-        // captured `rect` parameter would stay FROZEN at the value from
-        // when pointerInput launched, so every drag re-read the ORIGINAL
-        // rect ("you cant move the cropping borders or where it is in the
-        // image"). rememberUpdatedState gives the lambdas the LIVE value.
-        val liveRect by rememberUpdatedState(rect)
-        val liveOnChange by rememberUpdatedState(onRectChange)
+        // Live state for the gesture closures (pointerInput restarts only
+        // on key changes — a plain capture would go stale mid-gesture).
+        val liveState by rememberUpdatedState(state)
+        val liveOnChange by rememberUpdatedState(onStateChange)
+
+        // One-shot state work (initialize / apply a preset / re-fit after a
+        // viewport change) — in a SideEffect, never mid-composition.
+        var lastPresetTick by remember { mutableStateOf(0) }
+        androidx.compose.runtime.SideEffect {
+            if (viewportW > 0f && viewportH > 0f) {
+                val s = state
+                if (!s.initialized) {
+                    val base = s.copy(
+                        viewportW = viewportW, viewportH = viewportH,
+                    )
+                    onStateChange(fitImageToFrame(base, bmp.width, bmp.height)
+                        .copy(initialized = true))
+                } else if (s.pendingRestore != null) {
+                    // Restore a saved crop: a centered frame with the
+                    // saved region's aspect, scaled so the frame shows
+                    // EXACTLY that region of the image.
+                    val src = s.pendingRestore
+                    val srcW = (src.right - src.left).coerceIn(0.01f, 1f)
+                    val srcH = (src.bottom - src.top).coerceIn(0.01f, 1f)
+                    val f = presetFrame(srcW / srcH, viewportW, viewportH)
+                    var next = s.copy(
+                        viewportW = viewportW, viewportH = viewportH,
+                        frameLeft = f.left, frameTop = f.top,
+                        frameRight = f.right, frameBottom = f.bottom,
+                        pendingRestore = null,
+                    )
+                    val scale = maxOf(
+                        (f.right - f.left) * viewportW / (srcW * bmp.width),
+                        (f.bottom - f.top) * viewportH / (srcH * bmp.height),
+                    ).coerceAtLeast(0.01f)
+                    val srcCx = (src.left + src.right) / 2f * bmp.width
+                    val srcCy = (src.top + src.bottom) / 2f * bmp.height
+                    next = next.copy(
+                        scale = scale,
+                        offsetX = viewportW / 2f - srcCx * scale,
+                        offsetY = viewportH / 2f - srcCy * scale,
+                    )
+                    onStateChange(clampImage(next, bmp.width, bmp.height))
+                } else if (s.applyPresetTick != lastPresetTick) {
+                    lastPresetTick = s.applyPresetTick
+                    val f = presetFrame(s.presetRatio, viewportW, viewportH)
+                    var next = s.copy(
+                        viewportW = viewportW, viewportH = viewportH,
+                        frameLeft = f.left, frameTop = f.top,
+                        frameRight = f.right, frameBottom = f.bottom,
+                    )
+                    next = fitImageToFrame(next, bmp.width, bmp.height)
+                    onStateChange(next)
+                } else if (s.viewportW != viewportW || s.viewportH != viewportH) {
+                    // The viewport changed (rotation): re-fit.
+                    onStateChange(fitImageToFrame(
+                        s.copy(viewportW = viewportW, viewportH = viewportH),
+                        bmp.width, bmp.height))
+                }
+            }
+        }
 
         Box(
             modifier = Modifier
-                .align(Alignment.Center)
-                .size(dispW, dispH)
-                .clip(RoundedCornerShape(4.dp))
-                .background(Color(0xFF101014))
-                .pointerInput(lockRatio, dispW, dispH) {
+                .fillMaxSize()
+                .androidx.compose.ui.draw.clipToBounds()
+                // ── Detector 1: the FRAME handles. A drag that starts on a
+                //    corner/edge of the frame RESIZES it (consumed, so
+                //    detector 2 leaves it alone). A drag anywhere else —
+                //    including INSIDE the frame — consumes nothing and
+                //    falls through to the image pan/pinch.
+                .pointerInput(bmp, lockRatio) {
                     val minPx = 36.dp.toPx()
-                    val cornerPx = 28.dp.toPx()
-                    val edgePx = 22.dp.toPx()
-                    // v0.8.19 (crop fix): ABSOLUTE finger tracking. The old
-                    // handler fed each frame's DELTA into the corner math
-                    // (`finger = corner + frameDelta`), which double-counted
-                    // the axis the ratio fit snapped back on the previous
-                    // frame and lost the touch-slop distance entirely —
-                    // drags felt dead, corners "didn't work", and a locked
-                    // ratio made it worse every frame. Now the drag tracks
-                    // the finger's ABSOLUTE position: at drag start we
-                    // remember which handle was grabbed and how far the
-                    // finger sat from it; every frame re-derives the rect
-                    // from (finger − grabOffset) directly — the same math
-                    // on every frame, no accumulation drift, slop included.
-                    var active = CropHandle.NONE
-                    var grabDx = 0f
-                    var grabDy = 0f
-                    detectDragGestures(
-                        onDragStart = { offset ->
-                            val r = androidx.compose.ui.geometry.Rect(
-                                liveRect.left * dispW.value,
-                                liveRect.top * dispH.value,
-                                liveRect.right * dispW.value,
-                                liveRect.bottom * dispH.value,
-                            )
-                            active = hitTest(offset, r, cornerPx, edgePx)
-                            // Where the finger sits relative to the grabbed
-                            // anchor point (the MOVE rect's top-left, or the
-                            // grabbed corner itself).
-                            when (active) {
-                                CropHandle.MOVE -> {
-                                    grabDx = offset.x - r.left
-                                    grabDy = offset.y - r.top
-                                }
-                                CropHandle.TL -> { grabDx = offset.x - r.left; grabDy = offset.y - r.top }
-                                CropHandle.TR -> { grabDx = offset.x - r.right; grabDy = offset.y - r.top }
-                                CropHandle.BL -> { grabDx = offset.x - r.left; grabDy = offset.y - r.bottom }
-                                CropHandle.BR -> { grabDx = offset.x - r.right; grabDy = offset.y - r.bottom }
-                                CropHandle.L -> { grabDx = offset.x - r.left; grabDy = 0f }
-                                CropHandle.R -> { grabDx = offset.x - r.right; grabDy = 0f }
-                                CropHandle.T -> { grabDx = 0f; grabDy = offset.y - r.top }
-                                CropHandle.B -> { grabDx = 0f; grabDy = offset.y - r.bottom }
-                                CropHandle.NONE -> Unit
+                    val cornerPx = 30.dp.toPx()
+                    val edgePx = 24.dp.toPx()
+                    awaitEachGesture {
+                        val down = awaitFirstDown()
+                        val st0 = liveState
+                        if (st0.viewportW <= 0f || st0.viewportH <= 0f) {
+                            return@awaitEachGesture
+                        }
+                        val frame = frameRectPx(st0, st0.viewportW, st0.viewportH)
+                        val handle = hitTest(down.position, frame, cornerPx, edgePx)
+                        if (handle == CropHandle.NONE || handle == CropHandle.MOVE) {
+                            return@awaitEachGesture
+                        }
+                        var dragging = false
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id }
+                                ?: break
+                            if (!change.pressed) break
+                            if (!dragging) {
+                                val moved = (change.position - down.position).getDistance()
+                                if (moved < viewConfiguration.touchSlop) continue
+                                dragging = true
                             }
-                        },
-                        onDrag = { change, _ ->
-                            change.consume()
-                            if (active == CropHandle.NONE) return@detectDragGestures
-                            val finger = change.position
-                            val prev = androidx.compose.ui.geometry.Rect(
-                                liveRect.left * dispW.value,
-                                liveRect.top * dispH.value,
-                                liveRect.right * dispW.value,
-                                liveRect.bottom * dispH.value,
-                            )
-                            val px = dragRect(
-                                handle = active,
-                                // The finger position minus the grab offset:
-                                // where the grabbed anchor should now be.
-                                fingerX = finger.x - grabDx,
-                                fingerY = finger.y - grabDy,
-                                prev = prev,
-                                dispW = dispW.value,
-                                dispH = dispH.value,
+                            // ABSOLUTE finger tracking — no accumulation drift.
+                            val cur = liveState
+                            val next = dragRect(
+                                handle = handle,
+                                fingerX = change.position.x,
+                                fingerY = change.position.y,
+                                prev = frameRectPx(cur, cur.viewportW, cur.viewportH),
+                                dispW = cur.viewportW,
+                                dispH = cur.viewportH,
                                 ratio = lockRatio,
                                 minPx = minPx,
                             )
-                            liveOnChange(
-                                androidx.compose.ui.geometry.Rect(
-                                    (px.left / dispW.value).coerceIn(0f, 1f),
-                                    (px.top / dispH.value).coerceIn(0f, 1f),
-                                    (px.right / dispW.value).coerceIn(0f, 1f),
-                                    (px.bottom / dispH.value).coerceIn(0f, 1f),
-                                )
+                            var ns = cur.copy(
+                                frameLeft = (next.left / cur.viewportW).coerceIn(0f, 1f),
+                                frameTop = (next.top / cur.viewportH).coerceIn(0f, 1f),
+                                frameRight = (next.right / cur.viewportW).coerceIn(0f, 1f),
+                                frameBottom = (next.bottom / cur.viewportH).coerceIn(0f, 1f),
                             )
-                        },
-                        onDragEnd = { active = CropHandle.NONE },
-                        onDragCancel = { active = CropHandle.NONE },
-                    )
+                            // A grown frame may need more zoom to stay covered.
+                            ns = clampImage(ns, bmp.width, bmp.height)
+                            liveOnChange(ns)
+                            change.consume()
+                        }
+                    }
+                }
+                // ── Detector 2: the IMAGE — pan with one finger, pinch-zoom
+                //    with two, always clamped to cover the frame.
+                .pointerInput(bmp) {
+                    detectTransformGestures { centroid, pan, gestureZoom, _ ->
+                        val st = liveState
+                        if (st.viewportW <= 0f || st.viewportH <= 0f) {
+                            return@detectTransformGestures
+                        }
+                        val minScale = minScaleFor(st, bmp.width, bmp.height)
+                        val newScale = (st.scale * gestureZoom).coerceAtLeast(minScale)
+                        // Keep the image point under the centroid fixed,
+                        // then apply the pan.
+                        val relX = centroid.x - st.offsetX
+                        val relY = centroid.y - st.offsetY
+                        val g = if (st.scale > 0f) newScale / st.scale else 1f
+                        var ns = st.copy(
+                            scale = newScale,
+                            offsetX = centroid.x - relX * g + pan.x,
+                            offsetY = centroid.y - relY * g + pan.y,
+                        )
+                        ns = clampImage(ns, bmp.width, bmp.height)
+                        if (ns != st) liveOnChange(ns)
+                    }
                 },
         ) {
             Image(
                 bitmap = bmp.asImageBitmap(),
                 contentDescription = null,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.FillBounds,
+                modifier = Modifier
+                    .offset {
+                        androidx.compose.ui.unit.IntOffset(
+                            state.offsetX.roundToInt(),
+                            state.offsetY.roundToInt(),
+                        )
+                    }
+                    .size(
+                        with(density) { (bmp.width * state.scale).toDp() },
+                        with(density) { (bmp.height * state.scale).toDp() },
+                    ),
             )
-            // Draw-only overlay: dim + border + handles + thirds.
+            // Draw-only overlay: dim outside the frame + border + handles
+            // + rule of thirds.
             Canvas(modifier = Modifier.fillMaxSize()) {
-                val r = Rect(
-                    rect.left * size.width,
-                    rect.top * size.height,
-                    rect.right * size.width,
-                    rect.bottom * size.height,
-                )
+                val f = frameRectPx(state, size.width, size.height)
                 val dim = Color.Black.copy(alpha = 0.55f)
-                drawRect(dim, topLeft = Offset.Zero,
-                    size = Size(size.width, r.top))
-                drawRect(dim, topLeft = Offset(0f, r.bottom),
-                    size = Size(size.width, size.height - r.bottom))
-                drawRect(dim, topLeft = Offset(0f, r.top),
-                    size = Size(r.left, r.height))
-                drawRect(dim, topLeft = Offset(r.right, r.top),
-                    size = Size(size.width - r.right, r.height))
+                drawRect(dim, topLeft = Offset.Zero, size = Size(size.width, f.top))
+                drawRect(dim, topLeft = Offset(0f, f.bottom),
+                    size = Size(size.width, size.height - f.bottom))
+                drawRect(dim, topLeft = Offset(0f, f.top),
+                    size = Size(f.left, f.height))
+                drawRect(dim, topLeft = Offset(f.right, f.top),
+                    size = Size(size.width - f.right, f.height))
                 val third = Color.White.copy(alpha = 0.28f)
                 for (i in 1..2) {
-                    val x = r.left + (r.right - r.left) * i / 3f
-                    val y = r.top + (r.bottom - r.top) * i / 3f
-                    drawLine(third, Offset(x, r.top), Offset(x, r.bottom), 1.dp.toPx())
-                    drawLine(third, Offset(r.left, y), Offset(r.right, y), 1.dp.toPx())
+                    val x = f.left + (f.right - f.left) * i / 3f
+                    val y = f.top + (f.bottom - f.top) * i / 3f
+                    drawLine(third, Offset(x, f.top), Offset(x, f.bottom), 1.dp.toPx())
+                    drawLine(third, Offset(f.left, y), Offset(f.right, y), 1.dp.toPx())
                 }
                 drawRect(
                     Color.White,
-                    topLeft = Offset(r.left, r.top),
-                    size = Size(r.width, r.height),
+                    topLeft = Offset(f.left, f.top),
+                    size = Size(f.width, f.height),
                     style = Stroke(width = 2.dp.toPx()),
                 )
                 val arm = 18.dp.toPx()
@@ -514,10 +686,10 @@ private fun CropSurface(
                     drawLine(Color.White, Offset(cx, cy), Offset(cx + dx * arm, cy), thick)
                     drawLine(Color.White, Offset(cx, cy), Offset(cx, cy + dy * arm), thick)
                 }
-                mark(r.left, r.top, 1f, 1f)
-                mark(r.right, r.top, -1f, 1f)
-                mark(r.left, r.bottom, 1f, -1f)
-                mark(r.right, r.bottom, -1f, -1f)
+                mark(f.left, f.top, 1f, 1f)
+                mark(f.right, f.top, -1f, 1f)
+                mark(f.left, f.bottom, 1f, -1f)
+                mark(f.right, f.bottom, -1f, -1f)
             }
         }
     }
@@ -537,7 +709,7 @@ fun BitmapCropDialog(
     onApply: (Bitmap) -> Unit,
 ) {
     val context = LocalContext.current
-    var rect by remember { mutableStateOf(Rect(0f, 0f, 1f, 1f)) }
+    var cropState by remember { mutableStateOf(InteractiveCropState()) }
     val presets = remember { cropPresets(context) }
     var activePreset by remember { mutableStateOf(0) }
     val lockRatio = presets[activePreset].second
@@ -560,11 +732,11 @@ fun BitmapCropDialog(
                 style = MaterialTheme.typography.titleMedium,
                 color = Color.White,
             )
-            CropSurface(
+            InteractiveCropSurface(
                 bmp = bitmap,
-                rect = rect,
+                state = cropState,
                 lockRatio = lockRatio,
-                onRectChange = { rect = it },
+                onStateChange = { cropState = it },
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
@@ -581,16 +753,15 @@ fun BitmapCropDialog(
                         selected = activePreset == index,
                         onClick = {
                             activePreset = index
-                            rect = fitPresetRect(
-                                rect, presets[index].second,
-                                bitmap.width.toFloat() / bitmap.height)
+                            cropState = cropState.withPreset(presets[index].second)
                         },
                         label = { Text(label) },
                     )
                 }
             }
             Text(
-                "Drag the corners to resize — drag inside to move." +
+                "Drag the frame's edges and corners to resize it — drag or " +
+                    "pinch the image underneath to move and zoom it." +
                     if (lockRatio != null) " Ratio locked." else "",
                 style = MaterialTheme.typography.labelSmall,
                 color = Color.White.copy(alpha = 0.7f),
@@ -607,13 +778,14 @@ fun BitmapCropDialog(
                 }
                 Button(
                     onClick = {
-                        val l = (rect.left * bitmap.width).roundToInt()
+                        val src = cropState.srcRectNormalized(bitmap.width, bitmap.height)
+                        val l = (src.left * bitmap.width).roundToInt()
                             .coerceIn(0, bitmap.width - 2)
-                        val t = (rect.top * bitmap.height).roundToInt()
+                        val t = (src.top * bitmap.height).roundToInt()
                             .coerceIn(0, bitmap.height - 2)
-                        val r = (rect.right * bitmap.width).roundToInt()
+                        val r = (src.right * bitmap.width).roundToInt()
                             .coerceIn(l + 1, bitmap.width)
-                        val b = (rect.bottom * bitmap.height).roundToInt()
+                        val b = (src.bottom * bitmap.height).roundToInt()
                             .coerceIn(t + 1, bitmap.height)
                         if (r - l >= 8 && b - t >= 8) {
                             onApply(Bitmap.createBitmap(bitmap, l, t, r - l, b - t))
@@ -632,49 +804,6 @@ fun BitmapCropDialog(
 
 // ── Geometry helpers ──────────────────────────────────────────────────────
 
-/**
- * The largest rect with `ratio` (a PIXEL width/height ratio, e.g. the
- * Phone preset) that fits inside the image, centered on the current
- * crop's center (full image for ratio == null).
- *
- * v0.8.22 CRITICAL FIX ("the crop to phones aspect ratio still doesnt
- * work. the aspect ratio is wrong"): the old math used the ratio
- * DIRECTLY in fraction space (w/h = ratio), which is only right for a
- * SQUARE image. The final PIXEL aspect of the crop is (fracW·bmpW)/
- * (fracH·bmpH) — so the fraction-space ratio must be
- * ratio·bmpH/bmpW = ratio/imgAspect. On a 1920×1080 image the Phone
- * preset (≈0.46) produced a crop with a 0.82 pixel aspect — visibly
- * wrong on every non-square image.
- */
-private fun fitPresetRect(current: Rect, ratio: Float?, imgAspect: Float): Rect {
-    if (ratio == null) return Rect(0f, 0f, 1f, 1f)
-    // pixel ratio → fraction-space ratio (see the doc above).
-    val fracRatio = ratio / imgAspect.coerceAtLeast(0.01f)
-    var w = 1f
-    var h = w / fracRatio
-    if (h > 1f) {
-        h = 1f
-        w = h * fracRatio
-    }
-    val cx = (current.left + current.right) / 2f
-    val cy = (current.top + current.bottom) / 2f
-    var l = cx - w / 2f
-    var t = cy - h / 2f
-    var r = cx + w / 2f
-    var b = cy + h / 2f
-    val dx = when {
-        l < 0f -> -l
-        r > 1f -> 1f - r
-        else -> 0f
-    }
-    val dy = when {
-        t < 0f -> -t
-        b > 1f -> 1f - b
-        else -> 0f
-    }
-    l += dx; r += dx; t += dy; b += dy
-    return Rect(l, t, r, b)
-}
 
 /** Which part of the crop rect the finger grabbed. */
 private enum class CropHandle { NONE, MOVE, TL, TR, BL, BR, L, R, T, B }

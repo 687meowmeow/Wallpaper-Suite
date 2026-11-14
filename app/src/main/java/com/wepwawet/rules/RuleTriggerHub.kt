@@ -164,7 +164,8 @@ object RuleTriggerHub {
         val cm = appCtx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         if (networkCallback != null) {
             try {
-                cm?.unregisterNetworkCallback(networkCallback!!)
+                val cb = networkCallback
+                if (cb != null) cm?.unregisterNetworkCallback(cb)
             } catch (e: Exception) {
                 WepWawetLogger.appDebug("Cleanup: wifi callback unregister failed",
                     "exception" to e.javaClass.simpleName)
@@ -208,7 +209,10 @@ object RuleTriggerHub {
         if (audioDeviceCallback != null) {
             try {
                 (appCtx.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager)
-                    ?.unregisterAudioDeviceCallback(audioDeviceCallback!!)
+                    ?.let { am ->
+                        val cb = audioDeviceCallback
+                        if (cb != null) am.unregisterAudioDeviceCallback(cb)
+                    }
             } catch (e: Exception) {
                 WepWawetLogger.appDebug("Cleanup: audio callback unregister failed",
                     "exception" to e.javaClass.simpleName)

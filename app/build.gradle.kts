@@ -19,8 +19,8 @@ android {
                      // matches the official client's minSdk; Visualizer/MediaDataSource
                      // fast paths and the GLES3 surface pipeline assume it.
         targetSdk = 35
-        versionCode = 141
-        versionName = "0.9.0-alpha"
+        versionCode = 142
+        versionName = "0.8.23-alpha"
         // Native ABI filter — only build for arm64-v8a (WE app targets Snapdragon 8 Gen 2+)
         ndk {
             abiFilters += "arm64-v8a"
@@ -46,7 +46,8 @@ android {
         // both breaks build reproducibility and needlessly busts the Gradle
         // + engine asset caches between otherwise-identical builds. The commit
         // time changes only when the source actually changes.
-        buildConfigField("String", "ENGINE_ASSET_TIME", "\"${getGitCommitEpochSeconds()}\"")
+        buildConfigField("String", "ENGINE_ASSET_TIME",
+            "\"${getGitCommitEpochSeconds(versionCode)}\"")
         // Multidex not needed since we don't have 65k+ methods, but explicit
         multiDexEnabled = true
         // Required for very large APKs that include assets > 200 MB
@@ -263,18 +264,26 @@ fun getGitSha(): String {
  *  Gradle 8.10+ blocks ProcessBuilder at configuration time (the same trap
  *  getGitSha's comment documents) — providers.exec is the supported,
  *  configuration-cache-safe form. */
-fun getGitCommitEpochSeconds(): Long {
-    // Prefer the CI-provided value (no process at all), then git, then 0
-    // (a constant beats a wall clock for reproducibility).
+fun getGitCommitEpochSeconds(versionCode: Int): Long {
+    // Prefer the CI-provided value (no process at all), then git, then a
+    // value DERIVED FROM THE versionCode — never 0: a 0 fallback would
+    // stop the engine assets from re-extracting after an update (the
+    // cache key would go backwards). The versionCode rises every
+    // release, so the derived fallback still invalidates the asset
+    // cache exactly once per update.
     System.getenv("GITHUB_COMMIT_TIMESTAMP")?.toLongOrNull()?.let { return it }
     return try {
         providers.exec {
             commandLine("git", "log", "-1", "--format=%ct")
-        }.standardOutput.asText.get().trim().toLongOrNull() ?: 0L
+        }.standardOutput.asText.get().trim().toLongOrNull()
+            ?: fallbackAssetTime(versionCode)
     } catch (t: Throwable) {
-        0L
+        fallbackAssetTime(versionCode)
     }
 }
+
+/** Monotonic per-release asset clock when git is unavailable at build time. */
+fun fallbackAssetTime(versionCode: Int): Long = 1_700_000_000L + versionCode * 60L
 
 fun getBuildTime(): String {
     val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX")

@@ -193,7 +193,7 @@ fun WallpaperPreviewScreen(
                 WeEnginePrefs.getWallpaperType(context, EngineLibrary.sceneLib(context), wallpaper)
             }
                 .onFailure {
-                    WepWawetLogger.appWarn("WallpaperPreviewScreen: swallowed failure at line 194",
+                    WepWawetLogger.appWarn("WallpaperPreviewScreen: resolveWallpaperType — the engine type probe failed",
                         "exception" to it.javaClass.simpleName,
                         "message" to (it.message ?: ""))
                 }
@@ -500,7 +500,7 @@ fun WallpaperPreviewScreen(
                     (glView as? GLSurfaceView)?.holder?.surface
                         ?.setFrameRate(maxFps.toFloat(), compatibility, 1)
                 }
-            }
+            }.onFailure { WepWawetLogger.appWarn("WallpaperPreviewScreen: block — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
         }
     }
 
@@ -537,7 +537,7 @@ fun WallpaperPreviewScreen(
                     .defaultDisplay?.rotation ?: 0
             }
                 .onFailure {
-                    WepWawetLogger.appWarn("WallpaperPreviewScreen: swallowed failure at line 532",
+                    WepWawetLogger.appWarn("WallpaperPreviewScreen: readDisplayRotation — reading the display rotation failed",
                         "exception" to it.javaClass.simpleName,
                         "message" to (it.message ?: ""))
                 }
@@ -1080,7 +1080,7 @@ fun WallpaperPreviewScreen(
                 // silently fail (EngineLogTailer then has nothing to tail).
                 EngineLibrary.ensureEngineLogDir(context)
                 EngineLibrary.sceneLib(context).setLogToFileEnabled(true)
-            }
+            }.onFailure { WepWawetLogger.appWarn("WallpaperPreviewScreen: block — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
             c.setLoadCallback { onLoaded() }
             // static preview bitmap for the loading fade
             backgroundPreview = withContext(Dispatchers.IO) {
@@ -1089,7 +1089,7 @@ fun WallpaperPreviewScreen(
                         context, EngineLibrary.sceneLib(context), wallpaper)
                 }
                     .onFailure {
-                        WepWawetLogger.appWarn("WallpaperPreviewScreen: swallowed failure at line 1076",
+                        WepWawetLogger.appWarn("WallpaperPreviewScreen: getWallpaperPreviewBitmap (loading fade-in) failed",
                             "exception" to it.javaClass.simpleName,
                             "message" to (it.message ?: ""))
                     }
@@ -1111,7 +1111,7 @@ fun WallpaperPreviewScreen(
                     } else null
                 }
                     .onFailure {
-                        WepWawetLogger.appWarn("WallpaperPreviewScreen: swallowed failure at line 1092",
+                        WepWawetLogger.appWarn("WallpaperPreviewScreen: getWallpaperProjectString (workshop url detail) failed",
                             "exception" to it.javaClass.simpleName,
                             "message" to (it.message ?: ""))
                     }
@@ -1133,7 +1133,7 @@ fun WallpaperPreviewScreen(
                         File(context.filesDir, wallpaper.filePath).length()
                     }
                         .onFailure {
-                            WepWawetLogger.appWarn("WallpaperPreviewScreen: swallowed failure at line 1108",
+                            WepWawetLogger.appWarn("WallpaperPreviewScreen: detail probe (type/resolution/fps) failed",
                                 "exception" to it.javaClass.simpleName,
                                 "message" to (it.message ?: ""))
                         }
@@ -1221,7 +1221,7 @@ fun WallpaperPreviewScreen(
                     WeEnginePrefs.readGeneralSettings(context)
                 }
                     .onFailure {
-                        WepWawetLogger.appWarn("WallpaperPreviewScreen: swallowed failure at line 1190",
+                        WepWawetLogger.appWarn("WallpaperPreviewScreen: lifecycle cleanup — stopping the renderer failed",
                             "exception" to it.javaClass.simpleName,
                             "message" to (it.message ?: ""))
                     }
@@ -1236,7 +1236,7 @@ fun WallpaperPreviewScreen(
                     context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
             }
             onDispose {
-                runCatching { context.unregisterReceiver(receiver) }
+                runCatching { context.unregisterReceiver(receiver) }.onFailure { WepWawetLogger.appWarn("WallpaperPreviewScreen: context — best-effort call failed", "exception" to it.javaClass.simpleName) }
             }
         }
 

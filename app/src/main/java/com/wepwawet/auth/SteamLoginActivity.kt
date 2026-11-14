@@ -307,7 +307,7 @@ class SteamLoginActivity : ComponentActivity() {
                 webView.loadUrl("about:blank")
                 webView.removeAllViews()
                 webView.destroy()
-            }
+            }.onFailure { WepWawetLogger.appWarn("SteamLoginActivity: onDestroy — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
         }
         super.onDestroy()
         WepWawetLogger.lifecycle("SteamLoginActivity.onDestroy")

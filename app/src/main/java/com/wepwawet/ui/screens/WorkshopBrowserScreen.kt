@@ -321,9 +321,9 @@ fun WorkshopBrowserScreen(
     LaunchedEffect(Unit) {
         val savedSortName = filterPrefs.getString("sort", null)
         savedSortName?.let { name ->
-            runCatching { SteamApiService.Sort.valueOf(name) }
+            runCatching { SteamApiService.Sort.valueOf(name) }.onFailure { WepWawetLogger.appWarn("WorkshopBrowserScreen: SteamApiService — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 .onFailure {
-                    WepWawetLogger.appWarn("WorkshopBrowserScreen: swallowed failure at line 324",
+                    WepWawetLogger.appWarn("WorkshopBrowserScreen: loadSavedFilters — restoring the saved sort failed",
                         "exception" to it.javaClass.simpleName,
                         "message" to (it.message ?: ""))
                 }
@@ -341,9 +341,9 @@ fun WorkshopBrowserScreen(
 
         val savedTileName = filterPrefs.getString("tileSize", null)
         savedTileName?.let { name ->
-            runCatching { TileSize.valueOf(name) }
+            runCatching { TileSize.valueOf(name) }.onFailure { WepWawetLogger.appWarn("WorkshopBrowserScreen: TileSize — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 .onFailure {
-                    WepWawetLogger.appWarn("WorkshopBrowserScreen: swallowed failure at line 338",
+                    WepWawetLogger.appWarn("WorkshopBrowserScreen: loadSavedFilters — restoring the saved tile size failed",
                         "exception" to it.javaClass.simpleName,
                         "message" to (it.message ?: ""))
                 }

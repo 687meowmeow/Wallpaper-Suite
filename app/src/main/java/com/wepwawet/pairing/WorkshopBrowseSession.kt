@@ -165,7 +165,7 @@ object WorkshopBrowseSession {
                 // thread was still running and could dispatch a late
                 // onLoggedOn callback that mutated `authenticated`
                 // mid-query.
-                runCatching { downloader.cleanup() }
+                runCatching { downloader.cleanup() }.onFailure { WepWawetLogger.appWarn("WorkshopBrowseSession: downloader — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 this.downloader = null
                 isAuthenticated = false
                 return false
@@ -178,7 +178,7 @@ object WorkshopBrowseSession {
                 // v0.5.32 (audit H3): same cleanup as above — the
                 // downloader connected but is unusable (no workshop
                 // handler). Don't leave it half-initialized.
-                runCatching { downloader.cleanup() }
+                runCatching { downloader.cleanup() }.onFailure { WepWawetLogger.appWarn("WorkshopBrowseSession: downloader — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 this.downloader = null
                 isAuthenticated = false
                 return false

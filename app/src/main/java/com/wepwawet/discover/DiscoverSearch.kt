@@ -749,7 +749,36 @@ object DiscoverSearch {
     // HTTP + download
     // ════════════════════════════════════════════════════════════════
 
-    private fun httpGetJson(url: String): JSONObject? = try {
+    /**
+     * v0.9.0: a short-lived HOST failure cache. Refresh used to burn its
+     * whole 32 s budget re-walking sources that had JUST failed on this
+     * network (a 403 from one carrier path, a dead host, blocked DNS) —
+     * every ladder tier re-tried them, the deadline ran out, and Refresh
+     * "kept timing out". A host that failed in the last 10 minutes is now
+     * skipped outright; the first success clears it.
+     */
+    private val hostFailures = HashMap<String, Long>()
+    private const val HOST_FAILURE_WINDOW_MS = 10 * 60_000L
+
+    private fun hostOf(url: String): String =
+        url.substringAfter("//").substringBefore('/')
+
+    private fun rememberHostFailure(url: String) {
+        hostFailures[hostOf(url)] = System.currentTimeMillis()
+    }
+
+    private fun hostRecentlyFailed(url: String): Boolean =
+        System.currentTimeMillis() - (hostFailures[hostOf(url)] ?: 0L) <
+            HOST_FAILURE_WINDOW_MS
+
+    private fun httpGetJson(url: String): JSONObject? {
+        if (hostRecentlyFailed(url)) return null
+        val result = httpGetJsonInner(url)
+        if (result == null) rememberHostFailure(url) else hostFailures.remove(hostOf(url))
+        return result
+    }
+
+    private fun httpGetJsonInner(url: String): JSONObject? = try {
         client.newCall(Request.Builder().url(url).header("User-Agent", USER_AGENT).build())
             .execute().use { resp ->
                 when {
@@ -769,7 +798,14 @@ object DiscoverSearch {
         null
     }
 
-    private fun httpGetJsonArray(url: String): JSONArray? = try {
+    private fun httpGetJsonArray(url: String): JSONArray? {
+        if (hostRecentlyFailed(url)) return null
+        val result = httpGetJsonArrayInner(url)
+        if (result == null) rememberHostFailure(url) else hostFailures.remove(hostOf(url))
+        return result
+    }
+
+    private fun httpGetJsonArrayInner(url: String): JSONArray? = try {
         client.newCall(Request.Builder().url(url).header("User-Agent", USER_AGENT).build())
             .execute().use { resp ->
                 when {

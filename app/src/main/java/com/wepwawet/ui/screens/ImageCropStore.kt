@@ -43,7 +43,7 @@ object ImageCropStore {
         val raw = prefs(context).getString("overrides", null) ?: return emptyMap()
         return runCatching {
             gson.fromJson<MutableMap<String, Saved>>(raw, mapType) ?: mutableMapOf()
-        }.getOrElse { emptyMap() }
+        }.onFailure { WepWawetLogger.appWarn("ImageCropStore: read — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }.getOrElse { emptyMap() }
     }
 
     fun save(context: Context, originalUri: String, saved: Saved) {
@@ -64,7 +64,7 @@ object ImageCropStore {
             .putString("overrides", gson.toJson(map))
             .apply()
         removed?.let {
-            runCatching { File(it.cropFilePath).delete() }
+            runCatching { File(it.cropFilePath).delete() }.onFailure { WepWawetLogger.appWarn("ImageCropStore: File(it — best-effort call failed", "exception" to it.javaClass.simpleName) }
             WepWawetLogger.appInfo("ImageCropStore: crop removed",
                 "uri" to originalUri.takeLast(48))
         }

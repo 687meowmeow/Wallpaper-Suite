@@ -42,7 +42,7 @@ class MainActivity : ComponentActivity() {
         runCatching {
             WepWawetLogger.lifecycle("MainActivity.onCreate",
                 "intent" to (intent?.dataString ?: "null"))
-        }
+        }.onFailure { WepWawetLogger.appWarn("MainActivity: onCreate — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
 
         // v0.8.1: the pairing subsystem is opt-in now (Settings → "Send to
         // phone" toggle). When it's OFF nothing pairing-related runs at all:
@@ -74,7 +74,7 @@ class MainActivity : ComponentActivity() {
             // we still get the failure in logcat
             runCatching {
                 WepWawetLogger.lifecycle("Failed to auto-start/stop pairing: ${e.message}")
-            }
+            }.onFailure { WepWawetLogger.appWarn("MainActivity: onCreate — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
             Log.e(TAG, "PairingService start/stop failed", e)
         }
 
@@ -107,7 +107,7 @@ class MainActivity : ComponentActivity() {
             runCatching {
                 WepWawetLogger.appError("setContent failed in MainActivity.onCreate",
                     exception = e)
-            }
+            }.onFailure { WepWawetLogger.appWarn("MainActivity: block — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
             Log.e(TAG, "setContent failed", e)
             // Don't rethrow — let the activity continue in a broken state so the
             // user at least sees a black screen instead of an immediate crash
@@ -139,7 +139,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        runCatching { WepWawetLogger.lifecycle("MainActivity.onResume") }
+        runCatching { WepWawetLogger.lifecycle("MainActivity.onResume") }.onFailure { android.util.Log.w("MainActivity", "log write failed", it) }
         // v0.7.24 (H-A6): the background-timeout control moved to
         // ProcessLifecycleOwner inside PairingService — Activity-level
         // onPause/onResume fired on every in-app navigation (e.g. to
@@ -148,12 +148,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
-        runCatching { WepWawetLogger.lifecycle("MainActivity.onPause") }
+        runCatching { WepWawetLogger.lifecycle("MainActivity.onPause") }.onFailure { android.util.Log.w("MainActivity", "log write failed", it) }
         // See onResume — timeout control is process-lifecycle-driven now.
     }
 
     override fun onDestroy() {
-        runCatching { WepWawetLogger.lifecycle("MainActivity.onDestroy") }
+        runCatching { WepWawetLogger.lifecycle("MainActivity.onDestroy") }.onFailure { android.util.Log.w("MainActivity", "log write failed", it) }
         super.onDestroy()
     }
 

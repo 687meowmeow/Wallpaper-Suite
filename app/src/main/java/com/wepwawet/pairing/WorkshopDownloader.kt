@@ -427,7 +427,7 @@ class WorkshopDownloader(
             // linger and get packed alongside the fresh content by
             // MpkgPacker.packFromPkg — producing a corrupted .mpkg.
             if (installDir.exists()) {
-                runCatching { installDir.deleteRecursively() }
+                runCatching { installDir.deleteRecursively() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloader: installDir — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 WepWawetLogger.proxy("$TAG: cleared stale install dir before download",
                     "path" to installDir.absolutePath)
             }
@@ -460,7 +460,9 @@ class WorkshopDownloader(
             // Engine's workshop files don't use OS-specific depots — they're .pkg
             // files downloaded via downloadWebFile after getPublishedFileDetails
             // returns the fileUrl).
-            val downloader = DepotDownloader(steamClient!!, licenseList, true, false, 8, 4, 8, false, null)
+            val client = steamClient
+                ?: throw IllegalStateException("DepotDownloader built before the Steam client connected")
+            val downloader = DepotDownloader(client, licenseList, true, false, 8, 4, 8, false, null)
             WepWawetLogger.proxy("$TAG: DepotDownloader constructed",
                 "downloader_class" to downloader.javaClass.name)
 
@@ -1097,11 +1099,11 @@ class WorkshopDownloader(
         // OkHttp pools — Steam rate-limits by IP, so the user got
         // RateLimitExceeded from the wrong (orphaned) session, blocking
         // the new session.
-        runCatching { steamClient?.disconnect() }
+        runCatching { steamClient?.disconnect() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloader: steamClient — best-effort call failed", "exception" to it.javaClass.simpleName) }
         runCatching {
             (httpClient?.dispatcher?.executorService as? java.util.concurrent.ExecutorService)
                 ?.shutdownNow()
-        }
+        }.onFailure { WepWawetLogger.appWarn("WorkshopDownloader: connectAndAuthenticate — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
         // v0.7.24 (C-D2 BUG FIX): the disconnect above aborts the OLD
         // session's authPollingThread's in-flight pollingWaitForResult()
         // future — but the thread itself was only ever interrupted in
@@ -1182,21 +1184,23 @@ class WorkshopDownloader(
         // every other use here behave identically on an application context.
         val appCtx = context.applicationContext
         appContext = appCtx
-        steamClient = SteamClient(SteamConfiguration.create { it.withHttpClient(httpClient!!) })
-        callbackManager = CallbackManager(steamClient!!)
-        steamUser = steamClient!!.getHandler(SteamUser::class.java)
+        val client = SteamClient(SteamConfiguration.create { it.withHttpClient(httpClient!!) })
+        steamClient = client
+        val manager = CallbackManager(client)
+        callbackManager = manager
+        steamUser = client.getHandler(SteamUser::class.java)
 
-        subscriptions.add(callbackManager!!.subscribe(ConnectedCallback::class.java) { onConnected(it, appCtx) })
-        subscriptions.add(callbackManager!!.subscribe(DisconnectedCallback::class.java) { onDisconnected(it) })
-        subscriptions.add(callbackManager!!.subscribe(LoggedOnCallback::class.java) { onLoggedOn(it) })
-        subscriptions.add(callbackManager!!.subscribe(LoggedOffCallback::class.java) { onLoggedOff(it) })
-        subscriptions.add(callbackManager!!.subscribe(LicenseListCallback::class.java) { onLicenseList(it) })
+        subscriptions.add(manager.subscribe(ConnectedCallback::class.java) { onConnected(it, appCtx) })
+        subscriptions.add(manager.subscribe(DisconnectedCallback::class.java) { onDisconnected(it) })
+        subscriptions.add(manager.subscribe(LoggedOnCallback::class.java) { onLoggedOn(it) })
+        subscriptions.add(manager.subscribe(LoggedOffCallback::class.java) { onLoggedOff(it) })
+        subscriptions.add(manager.subscribe(LicenseListCallback::class.java) { onLicenseList(it) })
         // === Debug: subscribe to the base CallbackMsg class to log EVERY callback
         // that's dispatched by the callback manager. This catches ServiceMethodResponse
         // (the RPC response from steamPublishedFile.getDetails), ServiceMethodNotification,
         // and any other callbacks we don't explicitly subscribe to. ===
         try {
-            subscriptions.add(callbackManager!!.subscribe(
+            subscriptions.add(manager.subscribe(
                 `in`.dragonbra.javasteam.steam.steamclient.callbackmgr.CallbackMsg::class.java
             ) { msg ->
                 // === v0.9.0: high-frequency callbacks are dropped from the LOG ===
@@ -1220,7 +1224,7 @@ class WorkshopDownloader(
         isRunning = true
         cmRetries = 0
         WepWawetLogger.proxy("$TAG: connecting to Steam...")
-        steamClient!!.connect()
+        client.connect()
 
         // === Callback manager thread ===
         // Runs runWaitCallbacks(1000) in a loop while isRunning is true.

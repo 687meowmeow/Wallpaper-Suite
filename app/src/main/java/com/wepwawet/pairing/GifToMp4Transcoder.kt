@@ -165,7 +165,7 @@ object GifToMp4Transcoder {
         if (!ok || !finished) {
             encoder.release()
             bitmap.recycle()
-            runCatching { outputFile.delete() }
+            runCatching { outputFile.delete() }.onFailure { WepWawetLogger.appWarn("GifToMp4Transcoder: outputFile — best-effort call failed", "exception" to it.javaClass.simpleName) }
             WepWawetLogger.proxyError("$TAG: transcode FAILED",
                 "frames_attempted" to frames.size)
             return false

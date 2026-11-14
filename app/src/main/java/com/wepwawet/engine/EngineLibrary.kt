@@ -42,7 +42,7 @@ object EngineLibrary {
             // right after init and filter them from every enumeration.
             // If an app update re-extracts them (assetTime changes), the
             // next init purges them again.
-            runCatching { purgeOfficialWallpapers(context.applicationContext) }
+            runCatching { purgeOfficialWallpapers(context.applicationContext) }.onFailure { WepWawetLogger.appWarn("EngineLibrary: purgeOfficialWallpapers(context — best-effort call failed", "exception" to it.javaClass.simpleName) }
             lib = created
             return created
         }
@@ -61,7 +61,7 @@ object EngineLibrary {
         if (files.isEmpty()) return
         var deleted = 0
         for (f in files) {
-            runCatching { if (f.delete()) deleted++ }
+            runCatching { if (f.delete()) deleted++ }.onFailure { WepWawetLogger.appWarn("EngineLibrary: if (f — best-effort call failed", "exception" to it.javaClass.simpleName) }
         }
         WepWawetLogger.engine("Library: official sample wallpapers purged",
             "deleted" to deleted)
@@ -103,7 +103,7 @@ object EngineLibrary {
                     "created" to created,
                 )
             }
-        }
+        }.onFailure { WepWawetLogger.appWarn("EngineLibrary: ensureEngineLogDir — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
     }
 
     // =====================================================================
@@ -373,7 +373,7 @@ object EngineLibrary {
                     if (cachedPkg.exists()) {
                         val ok = runCatching { cachedPkg.delete() }
                             .onFailure {
-                                WepWawetLogger.appWarn("EngineLibrary: swallowed failure at line 374",
+                                WepWawetLogger.appWarn("EngineLibrary: deleteCachedPkg — deleting the cached scene .pkg failed",
                                     "exception" to it.javaClass.simpleName,
                                     "message" to (it.message ?: ""))
                             }
@@ -403,7 +403,7 @@ object EngineLibrary {
                     }
                     val installDir = File(context.cacheDir, "workshop_downloads/$itemId")
                     if (installDir.exists()) {
-                        runCatching { installDir.deleteRecursively() }
+                        runCatching { installDir.deleteRecursively() }.onFailure { WepWawetLogger.appWarn("EngineLibrary: installDir — best-effort call failed", "exception" to it.javaClass.simpleName) }
                     }
                 }
 

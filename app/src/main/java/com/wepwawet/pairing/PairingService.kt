@@ -165,7 +165,7 @@ class PairingService : Service() {
             } else {
                 runCatching {
                     stop(context)
-                }
+                }.onFailure { WepWawetLogger.appWarn("PairingService: setPairingEnabled — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
                 WepWawetLogger.proxy("pairing disabled — pairing service stopped")
             }
         }
@@ -312,7 +312,7 @@ class PairingService : Service() {
                 ?: context.packageManager.getLaunchIntentForPackage("com.fws.wallpaperengine")
             if (wePackages != null) {
                 wePackages.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                runCatching { context.startActivity(wePackages) }
+                runCatching { context.startActivity(wePackages) }.onFailure { WepWawetLogger.appWarn("PairingService: context — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 WepWawetLogger.proxy("launched Wallpaper Engine Android app")
             } else {
                 WepWawetLogger.proxyWarn("Wallpaper Engine Android app not found — cannot auto-open")
@@ -526,7 +526,7 @@ class PairingService : Service() {
             "fgs_type" to fgsType,
             "action" to "graceful_stop")
         stopServers()
-        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }.onFailure { WepWawetLogger.appWarn("PairingService: stopForeground(STOP_FOREGROUND_REMOVE) — best-effort call failed", "exception" to it.javaClass.simpleName) }
         stopSelf()
     }
 
@@ -562,7 +562,7 @@ class PairingService : Service() {
             // WITHOUT ever having called startForeground() — calling
             // stopForeground() then throws. Wrapped; the stopSelf() below is
             // what actually matters in that path.
-            runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+            runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }.onFailure { WepWawetLogger.appWarn("PairingService: stopForeground(STOP_FOREGROUND_REMOVE) — best-effort call failed", "exception" to it.javaClass.simpleName) }
             stopSelf()
             return START_NOT_STICKY
         }
@@ -763,7 +763,7 @@ class PairingService : Service() {
     override fun onDestroy() {
         WepWawetLogger.proxy("PairingService.onDestroy")
         // v0.7.21: Unregister the notification-deleted receiver.
-        runCatching { unregisterReceiver(notificationDeletedReceiver) }
+        runCatching { unregisterReceiver(notificationDeletedReceiver) }.onFailure { WepWawetLogger.appWarn("PairingService: unregisterReceiver(notificationDeletedReceiver) — best-effort call failed", "exception" to it.javaClass.simpleName) }
         // v0.7.23: Remove all pending handler callbacks to prevent leaks
         // (BUG PS-1: the repostNotificationRunnable + backgroundTimeoutRunnable).
         mainHandler.removeCallbacks(repostNotificationRunnable)

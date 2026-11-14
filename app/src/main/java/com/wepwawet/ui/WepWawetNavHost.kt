@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -267,11 +268,24 @@ fun WepWawetNavHost() {
             }
         },
     ) { padding ->
-    NavHost(
-        navController = nav,
-        startDestination = "library",
-        modifier = Modifier.padding(padding),
+    // v0.9.0 redesign: THE UNIVERSAL Home/Lock toggles sit at the top of
+    // the app on the main tabs ("The Lock and Home toggles should be
+    // universal and sit at the top of the app"). Every apply path in the
+    // app — image wallpapers, live wallpapers, rules, Discover — follows
+    // them (RuleEngine.resolvedTarget + the Discover/Library appliers).
+    androidx.compose.foundation.layout.Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding),
     ) {
+        if (showBottomBar) {
+            com.wepwawet.ui.components.UniversalScreenToggles()
+        }
+        NavHost(
+            navController = nav,
+            startDestination = "library",
+            modifier = Modifier.weight(1f),
+        ) {
 
         // v0.8.0: the library is the main page — the device's wallpaper
         // collection (engine-enumerated) + manual import. The Workshop /
@@ -496,7 +510,7 @@ fun WepWawetNavHost() {
             val trimItemTitle = runCatching {
                 java.net.URLDecoder.decode(
                     entry.arguments?.getString("itemTitle").orEmpty(), "UTF-8")
-            }.getOrElse { entry.arguments?.getString("itemTitle").orEmpty() }
+            }.onFailure { WepWawetLogger.appWarn("WepWawetNavHost: block — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }.getOrElse { entry.arguments?.getString("itemTitle").orEmpty() }
             // v0.7.20: Read the video file path from the per-item state (was
             // WorkshopDownloadJob.state.value.pendingVideoFile which under
             // concurrent downloads could read the wrong item's pending video).
@@ -539,5 +553,6 @@ fun WepWawetNavHost() {
             )
         }
     }
-    } // Scaffold content
+    } // NavHost
+    } // v0.9.0: the Column holding the toggles + NavHost
 }

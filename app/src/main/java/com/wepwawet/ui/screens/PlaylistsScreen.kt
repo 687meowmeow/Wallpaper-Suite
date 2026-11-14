@@ -159,15 +159,14 @@ fun PlaylistsScreen(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
-                                    val rulesText = when {
-                                        playlist.timeRules.isEmpty() -> ""
-                                        else -> " · ${playlist.timeRules.size} time rules"
-                                    }
                                     val orderText =
                                         if (playlist.orderMode == SuitePlaylistStore.ORDER_RANDOM)
                                             "random" else "ordered"
                                     Text(
-                                        "${playlist.entries.size} wallpapers · $orderText$rulesText",
+                                        "${playlist.entries.size} wallpapers · $orderText · " +
+                                            "${com.wepwawet.rules.SuiteRulesStore
+                                                .readPlaylistRules(context, playlist.id)
+                                                .rules.size} automations",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- v0.7.24 (H-A7 + H-A8): every declared path now matches a directory the
      app ACTUALLY writes to. The old set (mpkg-outbox/, workshop-cache/,
-     logs/, wine-prefix/) matched nothing — no code ever wrote to any of
+     logs/, prefix/) matched nothing — no code ever wrote to any of
      them, and getUriForFile was never called, making the provider fully
      dead. Real locations:
        - files/wepwawet/logs/     (LogPersistenceWorker daily logs)

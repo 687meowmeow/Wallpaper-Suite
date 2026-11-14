@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -231,7 +232,6 @@ fun LibraryScreen(
     // come up with menu asking if you want to use an already existing or
     // make one") and the shared create-folder flow.
     var showPlusMenu by remember { mutableStateOf(false) }
-    var plusMenuForImport by remember { mutableStateOf(false) }
     // v0.8.22: the group a pending folder pick/create LINKS to (from the
     // manage menu's "Link to folder"); null = the active group / auto-name.
     var linkFolderForGroup by remember { mutableStateOf<String?>(null) }
@@ -561,7 +561,7 @@ fun LibraryScreen(
         if (unknown.isEmpty()) return@LaunchedEffect
         WepWawetLogger.appInfo("LibraryScreen: fetching workshop tags",
             "count" to unknown.size)
-        runCatching { api.getPublishedFileDetails(unknown.take(30)) }
+        runCatching { api.getPublishedFileDetails(unknown.take(30)) }.onFailure { WepWawetLogger.appWarn("LibraryScreen: api — best-effort call failed", "exception" to it.javaClass.simpleName) }
             .onSuccess { result ->
                 result.onSuccess { items ->
                     var stored = 0
@@ -808,39 +808,40 @@ fun LibraryScreen(
                     title = "Wallpapers",
                     onBack = null,
                     actions = {
-                        // v0.8.18: the "+" is context-sensitive — while a
-                        // v0.8.22: the top-bar "+" ADDS IMAGES to the ACTIVE
-                        // GROUP — with a linked folder it imports straight
-                        // into that folder (GET_CONTENT chooser → copy into
-                        // the tree); a group without a link opens the
-                        // choose/create/import menu, whose folder choice
-                        // LINKS the folder to that group (files land there
-                        // from then on). With no group active it opens the
-                        // same menu (mpkg/video imports stay reachable via
-                        // "Import other files").
+                        // v0.9.0 redesign: the top-bar "+" is ONLY for
+                        // importing files, and it ALWAYS opens the standard
+                        // Android system chooser (the Files-or-Gallery
+                        // disambiguation). With a linked group active the
+                        // picked images import straight into that folder;
+                        // otherwise the general import takes mpkg / video /
+                        // images.
                         SlimTopBarIcon(
                             onClick = {
                                 val link = activeGroup?.let { groupFolders[it] }
-                                if (link != null) {
-                                    try {
+                                try {
+                                    if (link != null) {
                                         folderImagePicker.launch(
                                             getContentChooserIntent(
                                                 mimeTypes = arrayOf("image/*"),
                                                 allowMultiple = true))
-                                    } catch (t: Throwable) {
-                                        WepWawetLogger.appWarn(
-                                            "LibraryScreen: image picker failed",
-                                            "exception" to t.javaClass.name)
+                                    } else {
+                                        importLauncher.launch(
+                                            getContentChooserIntent(
+                                                mimeTypes = arrayOf(
+                                                    "video/*", "image/jpg", "image/jpeg",
+                                                    "image/png", "image/webp", "image/gif",
+                                                    "application/*",
+                                                ),
+                                                allowMultiple = true))
                                     }
-                                } else {
-                                    // v0.8.18 (v19 round): the top-bar "+"
-                                    // opens the choose/create/import menu.
-                                    plusMenuForImport = true
-                                    showPlusMenu = true
+                                } catch (t: Throwable) {
+                                    WepWawetLogger.appWarn(
+                                        "LibraryScreen: import picker failed",
+                                        "exception" to t.javaClass.name,
+                                        "message" to (t.message ?: ""))
                                 }
                             },
-                            contentDescription = if (activeGroup != null)
-                                "Add images to group" else "Import wallpapers",
+                            contentDescription = "Import wallpapers",
                             icon = Icons.Filled.Add,
                         )
                         SlimTopBarIcon(
@@ -933,9 +934,10 @@ fun LibraryScreen(
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            // ===== Filter chips: All + ANIMATED + GROUPS + FOLDERS + ＋ Folder =====
-            // Tap a chip to filter; long-press a GROUP chip to rename/delete;
-            // long-press a FOLDER chip to remove the folder. There is no
+            // ===== Filter chips: All + LIVE + GROUPS + ＋ =====
+            // Tap a chip to filter; DOUBLE-TAP a GROUP chip for its manage
+            // menu (rename/delete/link); long-press-drag a group chip to
+            // rearrange the row. There is no
             // "＋ group" chip — groups are created from a wallpaper's
             // long-press menu (removed per user request).
             // v0.8.13: the workshop TAGS moved out of this row into the
@@ -961,7 +963,8 @@ fun LibraryScreen(
                         Text("All (${wallpapers.size + allFolderImages.size})")
                     },
                 )
-                // v0.8.13: the built-in ANIMATED group — every Wallpaper
+                // v0.9.0 redesign: the built-in group chip reads LIVE
+                // ("change the animated chip to live") — every Wallpaper
                 // Engine wallpaper (engine-library .mpkg entries).
                 FilterChip(
                     selected = animatedActive,
@@ -969,10 +972,10 @@ fun LibraryScreen(
                         activeGroup = null
                         activeTags = emptySet()
                         animatedActive = !animatedActive
-                        WepWawetLogger.engineDebug("LibraryScreen: animated group toggled",
+                        WepWawetLogger.engineDebug("LibraryScreen: live group toggled",
                             "enabled" to animatedActive)
                     },
-                    label = { Text("Animated (${wallpapers.count { !it.isLocal }})") },
+                    label = { Text("Live (${wallpapers.count { !it.isLocal }})") },
                     leadingIcon = {
                         Icon(
                             Icons.Filled.AutoAwesome,
@@ -1017,6 +1020,19 @@ fun LibraryScreen(
                         // of filtering, and its per-event step math never
                         // crossed a chip width, so dragging did nothing.
                         modifier = Modifier
+                            // v0.9.0 redesign: DOUBLE TAP opens the manage
+                            // menu (rename / delete / link to folder) — the
+                            // old hold-still path is gone; a double tap's
+                            // two single-tap toggles cancel out, so the
+                            // filter stays put.
+                            .pointerInput(group) {
+                                detectTapGestures(onDoubleTap = {
+                                    manageGroupName = group
+                                    WepWawetLogger.engineDebug(
+                                        "LibraryScreen: group menu opened (double tap)",
+                                        "group" to group)
+                                })
+                            }
                             .pointerInput(group, groups.size) {
                                 var startIndex = -1
                                 var totalDragPx = 0f
@@ -1069,11 +1085,10 @@ fun LibraryScreen(
                                             WepWawetLogger.engineDebug(
                                                 "LibraryScreen: group order saved",
                                                 "groups" to groups.size)
-                                        } else {
-                                            // Held STILL — the manage menu
-                                            // (rename / delete).
-                                            manageGroupName = group
                                         }
+                                        // v0.9.0 redesign: held STILL does
+                                        // nothing — the manage menu opens
+                                        // on DOUBLE TAP now.
                                     },
                                     onDragCancel = {
                                         dragGroupName = null
@@ -1829,31 +1844,7 @@ fun LibraryScreen(
                 showPlusMenu = false
                 showCreateFolder = true
             },
-            onImportOther = if (plusMenuForImport) {
-                {
-                    showPlusMenu = false
-                    linkFolderForGroup = null
-                    try {
-                        importLauncher.launch(
-                            getContentChooserIntent(
-                                mimeTypes = arrayOf(
-                                    "video/*", "image/jpg", "image/jpeg", "image/png",
-                                    "image/webp", "image/gif", "application/*",
-                                ),
-                                allowMultiple = true))
-                    } catch (t: Throwable) {
-                        // v0.8.18 (review B15): surface the failure — the
-                        // old empty-style catch left the menu silently
-                        // doing nothing on OEM picker failures.
-                        WepWawetLogger.appWarn("LibraryScreen: import picker failed",
-                            "exception" to t.javaClass.name,
-                            "message" to (t.message ?: ""))
-                        scope.launch {
-                            snackbar.showSnackbar("Couldn't open the file picker")
-                        }
-                    }
-                }
-            } else null,
+            onImportOther = null,
         )
     }
 
@@ -2561,7 +2552,7 @@ internal object LibraryPrefs {
             .getString(KEY_TILE_SIZE, null)
         return runCatching { LibraryTileSize.valueOf(name ?: "") }
             .onFailure {
-                WepWawetLogger.appWarn("LibraryScreen: swallowed failure at line 2554",
+                WepWawetLogger.appWarn("LibraryScreen: readTileSize — restoring the saved tile size failed",
                     "exception" to it.javaClass.simpleName,
                     "message" to (it.message ?: ""))
             }

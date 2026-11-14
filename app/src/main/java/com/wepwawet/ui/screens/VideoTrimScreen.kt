@@ -172,7 +172,7 @@ fun VideoTrimScreen(
         onDispose {
             player.pause()
             player.release()
-            thumbnails.forEach { runCatching { it.recycle() } }
+            thumbnails.forEach { runCatching { it.recycle() }.onFailure { WepWawetLogger.appWarn("VideoTrimScreen: it — best-effort call failed", "exception" to it.javaClass.simpleName) } }
             thumbnails.clear()
         }
     }
@@ -248,7 +248,7 @@ fun VideoTrimScreen(
                     "duration_ms" to dur, "width" to videoWidth, "height" to videoHeight)
 
                 // v0.7.21: Clear any stale thumbnails before regenerating.
-                thumbnails.forEach { runCatching { it.recycle() } }
+                thumbnails.forEach { runCatching { it.recycle() }.onFailure { WepWawetLogger.appWarn("VideoTrimScreen: it — best-effort call failed", "exception" to it.javaClass.simpleName) } }
                 thumbnails.clear()
 
                 // v0.7.25: Frame count is DURATION-BASED (one frame per ~1.6
@@ -283,7 +283,7 @@ fun VideoTrimScreen(
                                 t * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, targetW, targetH)
                         }
                             .onFailure {
-                                WepWawetLogger.appWarn("VideoTrimScreen: swallowed failure at line 284",
+                                WepWawetLogger.appWarn("VideoTrimScreen: getScaledFrameAtTime (preview frame) failed",
                                     "exception" to it.javaClass.simpleName,
                                     "message" to (it.message ?: ""))
                             }
@@ -307,7 +307,7 @@ fun VideoTrimScreen(
                 // it when it never became part of the strip (e.g. the scaled
                 // decode succeeded directly).
                 if (raw0 != null && thumbnails.none { it === raw0 }) {
-                    runCatching { raw0.recycle() }
+                    runCatching { raw0.recycle() }.onFailure { WepWawetLogger.appWarn("VideoTrimScreen: raw0 — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 }
                 WepWawetLogger.workshop("VideoTrimScreen: thumbnails generated",
                     "count" to thumbnails.size,
@@ -320,7 +320,7 @@ fun VideoTrimScreen(
                 WepWawetLogger.workshopWarn("VideoTrimScreen: metadata/thumbnail failed",
                     "exception" to e.javaClass.name, "message" to (e.message ?: ""))
             } finally {
-                runCatching { retriever.release() }
+                runCatching { retriever.release() }.onFailure { WepWawetLogger.appWarn("VideoTrimScreen: retriever — best-effort call failed", "exception" to it.javaClass.simpleName) }
             }
         }
     }
@@ -411,7 +411,7 @@ fun VideoTrimScreen(
                 }
                 if (speed != 0f) {
                     val deltaMs = (speed / totalPx * durationMs.toFloat()).toLong()
-                    runCatching { filmstripScrollState.scrollBy(speed) }
+                    runCatching { filmstripScrollState.scrollBy(speed) }.onFailure { WepWawetLogger.appWarn("VideoTrimScreen: filmstripScrollState — best-effort call failed", "exception" to it.javaClass.simpleName) }
                     when (dragHandle) {
                         1 -> {
                             val maxStart = (endMs - MIN_CLIP_MS).coerceAtLeast(0L).coerceAtMost(durationMs)
@@ -943,8 +943,8 @@ fun VideoTrimScreen(
                                                         publishedfileid = itemId, title = itemTitle),
                                                     type = com.wepwawet.data.model.WallpaperType.VIDEO,
                                                 ))
-                                        if (trimSuccess) runCatching { trimmedFile.delete() }
-                                        runCatching { videoFile.delete() }
+                                        if (trimSuccess) runCatching { trimmedFile.delete() }.onFailure { WepWawetLogger.appWarn("VideoTrimScreen: trimmedFile — best-effort call failed", "exception" to it.javaClass.simpleName) }
+                                        runCatching { videoFile.delete() }.onFailure { WepWawetLogger.appWarn("VideoTrimScreen: videoFile — best-effort call failed", "exception" to it.javaClass.simpleName) }
                                         com.wepwawet.pairing.WorkshopDownloadJob
                                             .onVideoConsumedByTrimScreen(itemId)
                                         WepWawetLogger.workshop("VideoTrimScreen: clip + library import complete",
@@ -988,12 +988,12 @@ fun VideoTrimScreen(
                                             return@withContext
                                         }
                                         PairingService.launchWallpaperEngineApp(context)
-                                        runCatching { trimmedFile.delete() }
+                                        runCatching { trimmedFile.delete() }.onFailure { WepWawetLogger.appWarn("VideoTrimScreen: trimmedFile — best-effort call failed", "exception" to it.javaClass.simpleName) }
                                         // v0.7.23 BUG VT-3 / v0.8.18 (review B1):
                                         // the source video is only deleted after
                                         // a confirmed queue — provably safe now.
-                                        runCatching { videoFile.delete() }
-                                        runCatching { installDir.deleteRecursively() }
+                                        runCatching { videoFile.delete() }.onFailure { WepWawetLogger.appWarn("VideoTrimScreen: videoFile — best-effort call failed", "exception" to it.javaClass.simpleName) }
+                                        runCatching { installDir.deleteRecursively() }.onFailure { WepWawetLogger.appWarn("VideoTrimScreen: installDir — best-effort call failed", "exception" to it.javaClass.simpleName) }
                                         com.wepwawet.pairing.WorkshopDownloadJob.onVideoConsumedByTrimScreen(itemId)
                                         WepWawetLogger.workshop("VideoTrimScreen: trim + send complete",
                                             "item_id" to itemId, "mpkg_size" to mpkgFile.length())
@@ -1086,8 +1086,8 @@ fun VideoTrimScreen(
                                         // v0.7.23 BUG VT-3 / v0.8.18 (review B1):
                                         // only delete the source video after a confirmed
                                         // queue.
-                                        runCatching { videoFile.delete() }
-                                        runCatching { installDir.deleteRecursively() }
+                                        runCatching { videoFile.delete() }.onFailure { WepWawetLogger.appWarn("VideoTrimScreen: videoFile — best-effort call failed", "exception" to it.javaClass.simpleName) }
+                                        runCatching { installDir.deleteRecursively() }.onFailure { WepWawetLogger.appWarn("VideoTrimScreen: installDir — best-effort call failed", "exception" to it.javaClass.simpleName) }
                                         com.wepwawet.pairing.WorkshopDownloadJob.onVideoConsumedByTrimScreen(itemId)
                                         success = true
                                     }

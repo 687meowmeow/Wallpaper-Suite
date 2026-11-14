@@ -203,7 +203,7 @@ object DownloadManager {
                     com.wepwawet.WepWawetApplication.instance,
                     com.wepwawet.rules.RuleModel.TRIG_WORKSHOP_DOWNLOADED,
                     mapOf("itemId" to itemId.toString()))
-            }
+            }.onFailure { WepWawetLogger.appWarn("DownloadManager: completeDownload — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
         }
         WepWawetLogger.workshop("DownloadManager: completed download",
             "item_id" to itemId, "size" to fileSizeBytes, "device" to deviceName)

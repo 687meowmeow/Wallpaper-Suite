@@ -301,8 +301,8 @@ object VideoTranscoder {
                     android.media.MediaCodec.CONFIGURE_FLAG_ENCODE)
                 encTmp.start()
             } catch (e: Exception) {
-                runCatching { encTmp?.stop() }
-                runCatching { encTmp?.release() }
+                runCatching { encTmp?.stop() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: encTmp — best-effort call failed", "exception" to it.javaClass.simpleName) }
+                runCatching { encTmp?.release() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: encTmp — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 encTmp = null
                 if (codecMime == android.media.MediaFormat.MIMETYPE_VIDEO_HEVC) {
                     WepWawetLogger.proxyWarn("$TAG: HEVC encoder rejected the format — retrying with H.264",
@@ -349,7 +349,8 @@ object VideoTranscoder {
             // Configure the video decoder
             extractor.selectTrack(videoTrackIndex)
             val vDec = android.media.MediaCodec.createDecoderByType(
-                videoInputFormat.getString(android.media.MediaFormat.KEY_MIME)!!
+                videoInputFormat.getString(android.media.MediaFormat.KEY_MIME)
+                    ?: throw IllegalStateException("video track has no MIME type")
             )
             videoDecoder = vDec
             vDec.configure(videoInputFormat, null, null, 0)
@@ -363,7 +364,8 @@ object VideoTranscoder {
             if (hasAudio) {
                 try {
                     val audioInputFormat = extractor.getTrackFormat(audioTrackIndex)
-                    val audioMime = audioInputFormat.getString(android.media.MediaFormat.KEY_MIME)!!
+                    val audioMime = audioInputFormat.getString(android.media.MediaFormat.KEY_MIME)
+                        ?: throw IllegalStateException("audio track has no MIME type")
                     // v0.7.4: dedicated extractor for the audio track (the first
                     // extractor has the VIDEO track selected). Created up front
                     // and released in the finally block — the old code leaked it
@@ -415,11 +417,11 @@ object VideoTranscoder {
                 } catch (e: Exception) {
                     WepWawetLogger.proxyWarn("$TAG: audio transcode setup failed — dropping audio",
                         "exception" to e.javaClass.name, "message" to (e.message ?: ""))
-                    runCatching { audioDecoder?.stop() }
-                    runCatching { audioDecoder?.release() }
-                    runCatching { audioEncoder?.stop() }
-                    runCatching { audioEncoder?.release() }
-                    runCatching { audioExtractor?.release() }
+                    runCatching { audioDecoder?.stop() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: audioDecoder — best-effort call failed", "exception" to it.javaClass.simpleName) }
+                    runCatching { audioDecoder?.release() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: audioDecoder — best-effort call failed", "exception" to it.javaClass.simpleName) }
+                    runCatching { audioEncoder?.stop() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: audioEncoder — best-effort call failed", "exception" to it.javaClass.simpleName) }
+                    runCatching { audioEncoder?.release() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: audioEncoder — best-effort call failed", "exception" to it.javaClass.simpleName) }
+                    runCatching { audioExtractor?.release() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: audioExtractor — best-effort call failed", "exception" to it.javaClass.simpleName) }
                     audioDecoder = null
                     audioEncoder = null
                     audioExtractor = null
@@ -802,24 +804,24 @@ object VideoTranscoder {
             // v0.7.4: release EVERYTHING on every exit path (was success-only).
             // stop() before release() where the codec was started; stop() on an
             // unstarted/errored codec throws, so it's wrapped separately.
-            runCatching { videoDecoder?.stop() }
-            runCatching { videoDecoder?.release() }
-            runCatching { videoEncoder?.stop() }
-            runCatching { videoEncoder?.release() }
-            runCatching { audioDecoder?.stop() }
-            runCatching { audioDecoder?.release() }
-            runCatching { audioEncoder?.stop() }
-            runCatching { audioEncoder?.release() }
-            runCatching { audioExtractor?.release() }
+            runCatching { videoDecoder?.stop() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: videoDecoder — best-effort call failed", "exception" to it.javaClass.simpleName) }
+            runCatching { videoDecoder?.release() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: videoDecoder — best-effort call failed", "exception" to it.javaClass.simpleName) }
+            runCatching { videoEncoder?.stop() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: videoEncoder — best-effort call failed", "exception" to it.javaClass.simpleName) }
+            runCatching { videoEncoder?.release() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: videoEncoder — best-effort call failed", "exception" to it.javaClass.simpleName) }
+            runCatching { audioDecoder?.stop() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: audioDecoder — best-effort call failed", "exception" to it.javaClass.simpleName) }
+            runCatching { audioDecoder?.release() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: audioDecoder — best-effort call failed", "exception" to it.javaClass.simpleName) }
+            runCatching { audioEncoder?.stop() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: audioEncoder — best-effort call failed", "exception" to it.javaClass.simpleName) }
+            runCatching { audioEncoder?.release() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: audioEncoder — best-effort call failed", "exception" to it.javaClass.simpleName) }
+            runCatching { audioExtractor?.release() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: audioExtractor — best-effort call failed", "exception" to it.javaClass.simpleName) }
             if (muxerStarted) {
-                runCatching { muxer?.stop() }
+                runCatching { muxer?.stop() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: muxer — best-effort call failed", "exception" to it.javaClass.simpleName) }
             }
-            runCatching { muxer?.release() }
-            runCatching { extractor.release() }
+            runCatching { muxer?.release() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: muxer — best-effort call failed", "exception" to it.javaClass.simpleName) }
+            runCatching { extractor.release() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: extractor — best-effort call failed", "exception" to it.javaClass.simpleName) }
             // Remove the partial output file on failure so a corrupt MP4 is
             // never shipped to the phone.
             if (!success) {
-                runCatching { outputFile.delete() }
+                runCatching { outputFile.delete() }.onFailure { WepWawetLogger.appWarn("VideoTranscoder: outputFile — best-effort call failed", "exception" to it.javaClass.simpleName) }
             }
         }
     }

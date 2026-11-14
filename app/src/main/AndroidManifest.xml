@@ -20,8 +20,7 @@
          actually need (it's matched to the service's foregroundServiceType
          attribute). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <!-- Wake lock for the live-wallpaper render loop (a stale comment used
-         to say "Wine" here — no Wine process exists in this app). -->
+    <!-- Wake lock for the live-wallpaper render loop. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Keep Wi-Fi alive for the (rare) LAN-pair fallback -->
 

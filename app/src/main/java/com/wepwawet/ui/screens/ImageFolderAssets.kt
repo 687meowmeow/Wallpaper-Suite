@@ -85,7 +85,7 @@ object ImageFolderAssets {
             prefs2.edit().putBoolean("suite_cleanup_done", true).apply()
             runCatching {
                 File(context.filesDir, "suite_images").deleteRecursively()
-            }
+            }.onFailure { WepWawetLogger.appWarn("ImageFolderAssets: readFolders — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
             WepWawetLogger.appInfo("ImageFolderAssets: v0.8.17 suite folder removed")
         }
         return uris.map { SavedFolder(it, folderDisplayName(it)) }
@@ -325,7 +325,7 @@ object ImageFolderAssets {
                     failed++
                     runCatching {
                         context.contentResolver.delete(target, null)
-                    }
+                    }.onFailure { WepWawetLogger.appWarn("ImageFolderAssets: importImagesToFolder — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
                 }
             } catch (t: Throwable) {
                 failed++
@@ -363,11 +363,11 @@ object ImageFolderAssets {
         runCatching {
             context.contentResolver.takePersistableUriPermission(
                 uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
+        }.onFailure { WepWawetLogger.appWarn("ImageFolderAssets: takePersistableGrants — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
         runCatching {
             context.contentResolver.takePersistableUriPermission(
                 uri, android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-        }
+        }.onFailure { WepWawetLogger.appWarn("ImageFolderAssets: takePersistableGrants — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
     }
 
     /**
@@ -442,7 +442,7 @@ object ImageFolderAssets {
                         context.contentResolver, dirUri, "application/octet-stream", ".nomedia")
                 }
                     .onFailure {
-                        WepWawetLogger.appWarn("ImageFolderAssets: swallowed failure at line 443",
+                        WepWawetLogger.appWarn("ImageFolderAssets: createNomediaMarker — creating the .nomedia document failed",
                             "exception" to it.javaClass.simpleName,
                             "message" to (it.message ?: ""))
                     }

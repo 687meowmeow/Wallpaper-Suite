@@ -312,7 +312,7 @@ object DiscoverApplier {
         val legacy = File(context.filesDir, "nyanpasu/history")
         if (legacy.isDirectory) {
             legacy.listFiles()?.forEach { f -> f.renameTo(File(dir, f.name)) }
-            runCatching { legacy.parentFile?.let { File(it, "nyanpasu").delete() } }
+            runCatching { legacy.parentFile?.let { File(it, "nyanpasu").delete() } }.onFailure { WepWawetLogger.appWarn("DiscoverApplier: legacy — best-effort call failed", "exception" to it.javaClass.simpleName) }
         }
         return dir
     }

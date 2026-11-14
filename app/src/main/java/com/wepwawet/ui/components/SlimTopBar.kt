@@ -58,6 +58,9 @@ fun SlimTopBar(
     onBack: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
     actions: @Composable RowScope.() -> Unit = {},
+    /** v0.9.0 redesign: optional custom title content (the playlist
+     *  editor's tappable name + ACTIVE badge). Replaces the plain title. */
+    titleContent: (@Composable RowScope.() -> Unit)? = null,
 ) {
     Surface(
         modifier = modifier
@@ -89,12 +92,16 @@ fun SlimTopBar(
                     }
                     Spacer(Modifier.width(2.dp))
                 }
-                Text(
-                    title,
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                if (titleContent != null) {
+                    titleContent()
+                } else {
+                    Text(
+                        title,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
             // Right side: actions
             Row(

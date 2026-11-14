@@ -379,7 +379,14 @@ class BitmapToMp4Encoder(
                     if (encoded != null && info.size > 0 && muxerStarted) {
                         encoded.position(info.offset)
                         encoded.limit(info.offset + info.size)
-                        muxer!!.writeSampleData(muxerTrack, encoded, info)
+                        val mux = muxer
+                        if (mux != null) {
+                            mux.writeSampleData(muxerTrack, encoded, info)
+                        } else {
+                            WepWawetLogger.appWarn(
+                                "BitmapToMp4Encoder: writeSampleData — muxer gone mid-encode; frame dropped",
+                                "exception" to "IllegalStateException")
+                        }
                     }
                     c.releaseOutputBuffer(index, false)
                     if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {

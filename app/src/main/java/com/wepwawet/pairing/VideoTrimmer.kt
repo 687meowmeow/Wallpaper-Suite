@@ -268,10 +268,10 @@ object VideoTrimmer {
         } finally {
             // v0.7.4 fix 3: release BOTH the extractor and the muxer on every
             // exit path, and delete the partial output file on failure.
-            runCatching { extractor.release() }
-            runCatching { muxer?.release() }
+            runCatching { extractor.release() }.onFailure { WepWawetLogger.appWarn("VideoTrimmer: extractor — best-effort call failed", "exception" to it.javaClass.simpleName) }
+            runCatching { muxer?.release() }.onFailure { WepWawetLogger.appWarn("VideoTrimmer: muxer — best-effort call failed", "exception" to it.javaClass.simpleName) }
             if (!success) {
-                runCatching { outputFile.delete() }
+                runCatching { outputFile.delete() }.onFailure { WepWawetLogger.appWarn("VideoTrimmer: outputFile — best-effort call failed", "exception" to it.javaClass.simpleName) }
             }
         }
     }
@@ -313,7 +313,7 @@ object VideoTrimmer {
             // v0.7.25 (audit M-V5): release EXACTLY ONCE, in finally — the old
             // code released in the try block AND again in the catch, so a
             // throwing first release triggered a double release.
-            runCatching { extractor.release() }
+            runCatching { extractor.release() }.onFailure { WepWawetLogger.appWarn("VideoTrimmer: extractor — best-effort call failed", "exception" to it.javaClass.simpleName) }
         }
         if (durationMs > 0) return durationMs
         // Container-level fallback.
@@ -326,7 +326,7 @@ object VideoTrimmer {
         } catch (e: Exception) {
             -1L
         } finally {
-            runCatching { retriever.release() }
+            runCatching { retriever.release() }.onFailure { WepWawetLogger.appWarn("VideoTrimmer: retriever — best-effort call failed", "exception" to it.javaClass.simpleName) }
         }
     }
 }

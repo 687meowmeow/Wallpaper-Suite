@@ -162,7 +162,7 @@ fun WallpaperPropertyEditor(
     // localizations for this wallpaper.
     LaunchedEffect(revision) {
         val lib = EngineLibrary.sceneLib(context)
-        runCatching { lib.setLanguage(Locale.getDefault().toLanguageTag()) }
+        runCatching { lib.setLanguage(Locale.getDefault().toLanguageTag()) }.onFailure { WepWawetLogger.appWarn("WallpaperPropertyEditor: lib — best-effort call failed", "exception" to it.javaClass.simpleName) }
             .onFailure {
                 WepWawetLogger.appWarn("WallpaperPropertyEditor: setLanguage failed",
                     "exception" to it.javaClass.simpleName,
@@ -191,7 +191,7 @@ fun WallpaperPropertyEditor(
                 }
             }
                 .onFailure {
-                    WepWawetLogger.appWarn("WallpaperPropertyEditor: swallowed failure at line 187",
+                    WepWawetLogger.appWarn("WallpaperPropertyEditor: readCustomLocalizations — parsing the stored localization JSON failed",
                         "exception" to it.javaClass.simpleName,
                         "message" to (it.message ?: ""))
                 }
@@ -226,7 +226,7 @@ fun WallpaperPropertyEditor(
             EngineLibrary.sceneLib(context).getLocalization(token)
         }
             .onFailure {
-                WepWawetLogger.appWarn("WallpaperPropertyEditor: swallowed failure at line 216",
+                WepWawetLogger.appWarn("WallpaperPropertyEditor: localizeText — the engine localization lookup failed",
                     "exception" to it.javaClass.simpleName,
                     "message" to (it.message ?: ""))
             }
@@ -762,7 +762,7 @@ private fun SceneTextureRow(
             context.contentResolver.getType(first)?.lowercase(Locale.ROOT)
         }
             .onFailure {
-                WepWawetLogger.appWarn("WallpaperPropertyEditor: swallowed failure at line 746",
+                WepWawetLogger.appWarn("WallpaperPropertyEditor: resolvePickedImageType — querying the picked file's MIME type failed",
                     "exception" to it.javaClass.simpleName,
                     "message" to (it.message ?: ""))
             }
@@ -791,7 +791,7 @@ private fun SceneTextureRow(
             .clickable {
                 runCatching {
                     picker.launch(Unit)
-                }
+                }.onFailure { WepWawetLogger.appWarn("WallpaperPropertyEditor: SceneTextureRow — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
             }
             .padding(vertical = 12.dp),
         horizontalArrangement = Arrangement.SpaceBetween,

@@ -264,9 +264,9 @@ fun RuleEditorScreen(
 
             // ── Triggers ──
             item {
-                Text("Triggers", style = MaterialTheme.typography.titleSmall)
+                Text("When…", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "Any of these starts the rule.",
+                    "Any of these starts the automation.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -294,9 +294,9 @@ fun RuleEditorScreen(
 
             // ── Gate ──
             item {
-                Text("Gate (optional)", style = MaterialTheme.typography.titleSmall)
+                Text("Only if… (optional)", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "Every condition here must be true for the rule to run at all.",
+                    "Every condition here must be true for the automation to run.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -305,7 +305,7 @@ fun RuleEditorScreen(
                 if (gateCond == null) {
                     TextButton(onClick = {
                         save { gate = RuleModel.Cond(type = RuleModel.COND_ALL) }
-                    }) { Text("＋ Add a gate") }
+                    }) { Text("＋ Add a condition") }
                 } else {
                     CondCard(cond = gateCond) { newGate -> save { gate = newGate } }
                 }
@@ -313,10 +313,10 @@ fun RuleEditorScreen(
 
             // ── Action stack ──
             item {
-                Text("Actions", style = MaterialTheme.typography.titleSmall)
+                Text("Do…", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "Runs top to bottom. Long-press a card to duplicate; " +
-                        "swipe a card right to delete.",
+                    "Runs top to bottom. Drag a card by its handle to " +
+                        "reorder; the ⋮ menu duplicates, disables or deletes.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

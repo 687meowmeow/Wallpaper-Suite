@@ -4,8 +4,6 @@ import android.content.Context
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.wepwawet.log.WepWawetLogger
-import org.json.JSONArray
-import org.json.JSONObject
 import java.io.File
 import java.util.UUID
 
@@ -18,12 +16,11 @@ import java.util.UUID
  *   • holding any mix of animated (Scene/Video) and static wallpapers —
  *     an entry is just an engine-relative file path, the type tag is
  *     informational;
- *   • rotating in RANDOM or ORDERED (preset) order;
- *   • on a change interval (minutes);
- *   • with optional TIME RULES — "from 22:00 to 06:00 show this wallpaper
- *     (or rotate within this group)". A rule whose window matches the
- *     current clock restricts the rotation to that rule's entries; a
- *     single-entry rule simply pins one wallpaper for its window.
+ *   • rotating in RANDOM or ORDERED (preset) order.
+ * v0.9.0 redesign: HOW a playlist changes lives in the rules store
+ * (SuiteRulesStore) — an "Every N" trigger advances it, and "Only use
+ * these wallpapers while…" (Limit) scopes restrict it. A playlist with
+ * no automations never changes by itself.
  *
  * Persistence: one JSON file (filesDir/suite_playlists.json, Gson) plus
  * the active playlist id in the same file. All writes are synchronous +
@@ -74,18 +71,6 @@ object SuitePlaylistStore {
         var blockManualMembers: List<String>? = null,
     )
 
-    /**
-     * A time window + the subset of the playlist's entries that owns it.
-     * `startMinute`/`endMinute` are minutes-of-day; a window may wrap
-     * past midnight (e.g. 22:00→06:00). endMinute == startMinute is
-     * treated as a full-day window.
-     */
-    data class TimeRule(
-        val startMinute: Int,
-        val endMinute: Int,
-        val entryFilePaths: MutableList<String>,
-    )
-
     data class Playlist(
         // v0.8.13: `var`, NOT `val` — Gson deserializes by writing fields
         // via reflection, and a FINAL field is the one construct that can
@@ -100,23 +85,12 @@ object SuitePlaylistStore {
         var name: String = "Playlist",
         /** "random" | "ordered". */
         var orderMode: String = ORDER_RANDOM,
-        /** Rotation interval in minutes (random/ordered modes). */
-        var intervalMinutes: Int = 15,
         var entries: MutableList<Entry> = ArrayList(),
-        var timeRules: MutableList<TimeRule> = ArrayList(),
-        // ── v0.8.19/20 LEGACY random-slot fields ──
-        // v0.8.21: random slots are ENTRIES now (unique markers + per-slot
-        // settings, moveable like wallpapers). These playlist-level fields
-        // are only READ to migrate old data — sanitized() folds them into
-        // slot entries and clears them.
-        var randomSlotCount: Int = 0,
-        var randomStrictTags: List<String>? = null,
-        var randomSoftTags: List<String>? = null,
-        var randomStyleValue: Int? = null,
-        var randomR18Mode: Int? = null,
-        var randomSources: List<String>? = null,
-        /** v0.8.19 legacy boolean — read-only, folds into slot entries. */
-        var randomPullEnabled: Boolean = false,
+        // v0.9.0 redesign: intervalMinutes and timeRules are GONE — how
+        // often the playlist changes is a trigger ("Every N …" → Next
+        // wallpaper) and "only these wallpapers while…" is a Limit scope,
+        // both living in the rules store (SuiteRulesStore). A playlist
+        // with no automations never changes by itself.
     )
 
     const val ORDER_RANDOM = "random"
@@ -158,16 +132,7 @@ object SuitePlaylistStore {
                 val clean = rawLists.mapNotNull { it.sanitized() }.toMutableList()
                 StoreFile(playlists = clean, activePlaylistId = raw?.activePlaylistId ?: "")
             } else {
-                // v0.8.11–v0.8.13 release builds: R8 renamed every field of
-                // every Gson-serialized class here (no keep rule covered this
-                // package), so Gson sees NO fields and the parse comes back
-                // empty even though the file holds the user's playlists.
-                // Those builds wrote obfuscated keys in declaration order
-                // (Playlist a=id b=name c=orderMode d=intervalMinutes
-                // e=entries f=timeRules; StoreFile a=playlists
-                // b=activePlaylistId) — recover them instead of silently
-                // resetting the store.
-                migrateR8Obfuscated(text) ?: StoreFile()
+                StoreFile()
             }
         } catch (e: Exception) {
             WepWawetLogger.appWarn("SuitePlaylistStore: read failed — resetting",
@@ -177,114 +142,19 @@ object SuitePlaylistStore {
     }
 
     /**
-     * Drops playlists with a null/blank id or name; fills safe defaults;
-     * migrates the legacy random-slot fields into slot ENTRIES.
+     * Drops playlists with a null/blank id or name; fills safe defaults.
+     * (v0.9.0 redesign: the legacy random-slot and R8-obfuscated
+     * migrations are gone — the data format is free to change.)
      */
     private fun Playlist.sanitized(): Playlist? {
         if (id.isNullOrBlank() || name == null) return null
-        // v0.8.21 migration: the v0.8.19/20 playlist-level random slot
-        // (boolean, then a count + shared tag settings) becomes random-slot
-        // ENTRIES — unique markers, per-slot settings, moveable like any
-        // wallpaper. One-time: the legacy fields are cleared afterwards so
-        // a later deliberate removal of every slot stays removed.
-        val legacyCount = when {
-            randomSlotCount > 0 -> randomSlotCount
-            randomPullEnabled -> 1
-            else -> 0
-        }
-        val migrated = Playlist(
+        return Playlist(
             id = id,
             name = name,
             orderMode = orderMode ?: ORDER_RANDOM,
-            intervalMinutes = intervalMinutes,
             entries = (entries ?: emptyList()).toMutableList(),
-            timeRules = (timeRules ?: emptyList()).toMutableList(),
         )
-        if (legacyCount > 0 && migrated.entries.none {
-                RandomPullEngine.isSlot(it.filepath)
-            }
-        ) {
-            repeat(legacyCount) {
-                migrated.entries.add(RandomPullEngine.newSlotEntry(
-                    strict = randomStrictTags,
-                    soft = randomSoftTags,
-                    style = randomStyleValue,
-                    r18 = randomR18Mode,
-                    sources = randomSources,
-                ))
-            }
-            WepWawetLogger.appInfo("SuitePlaylistStore: migrated random slots to entries",
-                "playlist" to (migrated.name ?: migrated.id),
-                "slots" to legacyCount)
-        }
-        return migrated
     }
-
-    /** Reads the v0.8.11–13 R8-obfuscated layout via [org.json]. */
-    private fun migrateR8Obfuscated(text: String): StoreFile? {
-        return try {
-            val root = JSONObject(text)
-            val arr = root.optJSONArray("playlists") ?: root.optJSONArray("a") ?: return null
-            val migrated = ArrayList<Playlist>(arr.length())
-            for (i in 0 until arr.length()) {
-                val o = arr.optJSONObject(i) ?: continue
-                val id = o.optStringOrNull("id") ?: o.optStringOrNull("a") ?: continue
-                if (id.isBlank()) continue
-                migrated.add(Playlist(
-                    id = id,
-                    name = o.optStringOrNull("name") ?: o.optStringOrNull("b") ?: "Playlist",
-                    orderMode = o.optStringOrNull("orderMode") ?: o.optStringOrNull("c") ?: ORDER_RANDOM,
-                    intervalMinutes = o.optInt("intervalMinutes", o.optInt("d", 15)),
-                    entries = readEntries(o.optJSONArray("entries") ?: o.optJSONArray("e")),
-                    timeRules = readRules(o.optJSONArray("timeRules") ?: o.optJSONArray("f")),
-                ))
-            }
-            val active = root.optStringOrNull("activePlaylistId")
-                ?: root.optStringOrNull("b") ?: ""
-            if (migrated.isEmpty() && active.isBlank()) return null
-            WepWawetLogger.appInfo("SuitePlaylistStore: migrated legacy obfuscated store",
-                "playlists" to migrated.size)
-            StoreFile(playlists = migrated, activePlaylistId = active)
-        } catch (e: Exception) {
-            WepWawetLogger.appWarn("SuitePlaylistStore: legacy migration failed",
-                "exception" to e.javaClass.name)
-            null
-        }
-    }
-
-    private fun readEntries(arr: JSONArray?): MutableList<Entry> {
-        if (arr == null) return ArrayList()
-        val out = ArrayList<Entry>(arr.length())
-        for (i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
-            out.add(Entry(
-                filepath = o.optStringOrNull("filepath") ?: o.optStringOrNull("a") ?: continue,
-                title = o.optStringOrNull("title") ?: o.optStringOrNull("b") ?: "",
-                type = o.optStringOrNull("type") ?: o.optStringOrNull("c") ?: "",
-            ))
-        }
-        return out
-    }
-
-    private fun readRules(arr: JSONArray?): MutableList<TimeRule> {
-        if (arr == null) return ArrayList()
-        val out = ArrayList<TimeRule>(arr.length())
-        for (i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
-            val paths = o.optJSONArray("entryFilePaths") ?: o.optJSONArray("c")
-            out.add(TimeRule(
-                startMinute = o.optInt("startMinute", o.optInt("a", 0)),
-                endMinute = o.optInt("endMinute", o.optInt("b", 0)),
-                entryFilePaths = ArrayList<String>().also { list ->
-                    paths?.let { for (j in 0 until it.length()) list.add(it.optString(j)) }
-                },
-            ))
-        }
-        return out
-    }
-
-    private fun JSONObject.optStringOrNull(key: String): String? =
-        if (has(key) && !isNull(key)) optString(key) else null
 
     @Synchronized
     private fun writeStore(context: Context, store: StoreFile) {
@@ -304,14 +174,6 @@ object SuitePlaylistStore {
         readStore(context).playlists.firstOrNull { it.id == id }
 
     fun upsert(context: Context, playlist: Playlist) {
-        // v0.8.15: time rules may only reference entries that still exist —
-        // the editor's entry removal used to leave dangling paths that made
-        // a rule show "N wallpapers pinned" for wallpapers no longer in
-        // the playlist (rotation itself already ignored orphans).
-        val entryPaths = playlist.entries.map { it.filepath }.toHashSet()
-        for (rule in playlist.timeRules) {
-            rule.entryFilePaths.removeAll { it !in entryPaths }
-        }
         val store = readStore(context)
         val idx = store.playlists.indexOfFirst { it.id == playlist.id }
         if (idx >= 0) store.playlists[idx] = playlist else store.playlists.add(playlist)
@@ -320,7 +182,6 @@ object SuitePlaylistStore {
             "id" to playlist.id,
             "name" to playlist.name,
             "entries" to playlist.entries.size,
-            "time_rules" to playlist.timeRules.size,
             "order" to playlist.orderMode)
         notifyService(context)
     }
@@ -365,7 +226,7 @@ object SuitePlaylistStore {
         val leftover = store.playlists.firstOrNull { it.id == "discover" } ?: return
         for (entry in leftover.entries) {
             if (entry.filepath.contains("/discover/")) {
-                runCatching { java.io.File(entry.filepath).delete() }
+                runCatching { java.io.File(entry.filepath).delete() }.onFailure { WepWawetLogger.appWarn("SuitePlaylistStore: java — best-effort call failed", "exception" to it.javaClass.simpleName) }
             }
         }
         store.playlists.removeAll { it.id == "discover" }
@@ -456,9 +317,6 @@ object SuitePlaylistStore {
         var changed = false
         for (playlist in store.playlists) {
             if (playlist.entries.removeAll { it.filepath == filepath }) changed = true
-            for (rule in playlist.timeRules) {
-                if (rule.entryFilePaths.removeAll { it == filepath }) changed = true
-            }
         }
         if (changed) {
             writeStore(context, store)
@@ -485,14 +343,6 @@ object SuitePlaylistStore {
                     changed = true
                 }
             }
-            for (rule in playlist.timeRules) {
-                for (i in rule.entryFilePaths.indices) {
-                    if (rule.entryFilePaths[i] == fromPath) {
-                        rule.entryFilePaths[i] = toPath
-                        changed = true
-                    }
-                }
-            }
         }
         if (changed) {
             writeStore(context, store)
@@ -505,62 +355,9 @@ object SuitePlaylistStore {
 
     // ── Rule evaluation (used by the live service) ───────────────────
 
-    /**
-     * The entries that own the CURRENT minute of day: the first time rule
-     * whose window contains `minuteOfDay`, or null when no rule matches
-     * (the whole playlist rotates). Windows may wrap midnight.
-     */
-    fun entriesForMinute(playlist: Playlist, minuteOfDay: Int): List<String>? {
-        for (rule in playlist.timeRules) {
-            if (rule.entryFilePaths.isEmpty()) continue
-            val inWindow = if (rule.startMinute == rule.endMinute) {
-                true // full-day window
-            } else if (rule.startMinute < rule.endMinute) {
-                minuteOfDay >= rule.startMinute && minuteOfDay < rule.endMinute
-            } else {
-                // wraps midnight (e.g. 22:00→06:00)
-                minuteOfDay >= rule.startMinute || minuteOfDay < rule.endMinute
-            }
-            if (inWindow) {
-                return rule.entryFilePaths
-                    .filter { path -> playlist.entries.any { it.filepath == path } }
-            }
-        }
-        return null
-    }
-
-    /**
-     * v0.9.0 (battery): the next epoch-ms when a time-rule window boundary
-     * crosses — the earliest moment the rotation's active entry set can
-     * CHANGE, which is when the service's playlist tick must be awake.
-     * Null when the playlist has no real windows (nothing to wake for
-     * beyond the interval rotation itself). Full-day windows
-     * (start == end) never cross a boundary.
-     */
-    fun nextTimeRuleBoundaryMs(playlist: Playlist, now: Long): Long? {
-        var best: Long? = null
-        for (rule in playlist.timeRules) {
-            if (rule.startMinute == rule.endMinute) continue // full-day
-            for (minute in intArrayOf(rule.startMinute, rule.endMinute)) {
-                val at = nextMinuteOfDayOccurrenceMs(minute, now)
-                if (best == null || at < best) best = at
-            }
-        }
-        return best
-    }
-
-    /** The next local-time occurrence of a minute-of-day, just past the
-     *  boundary (250ms in, so a tick landing on it sees the NEW set). */
-    private fun nextMinuteOfDayOccurrenceMs(minuteOfDay: Int, now: Long): Long {
-        val cal = java.util.Calendar.getInstance()
-        cal.timeInMillis = now
-        cal.set(java.util.Calendar.HOUR_OF_DAY, minuteOfDay / 60)
-        cal.set(java.util.Calendar.MINUTE, minuteOfDay % 60)
-        cal.set(java.util.Calendar.SECOND, 0)
-        cal.set(java.util.Calendar.MILLISECOND, 250)
-        if (cal.timeInMillis <= now) cal.add(java.util.Calendar.DAY_OF_YEAR, 1)
-        return cal.timeInMillis
-    }
+    // v0.9.0 redesign: entriesForMinute / nextTimeRuleBoundaryMs are GONE —
+    // "only these wallpapers while…" is a Limit SCOPE in the rules store
+    // (SuiteRulesStore), evaluated by WEWallpaperService.suiteSetForNow.
 
     /** minute-of-day for "now" (local timezone). */
     fun currentMinuteOfDay(): Int {

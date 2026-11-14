@@ -235,7 +235,7 @@ object WorkshopDownloadJob {
         runCatching {
             com.wepwawet.pairing.DownloadService.startForDownload(
                 com.wepwawet.WepWawetApplication.instance)
-        }
+        }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: onDownloadStarted — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
     }
 
     /**
@@ -341,7 +341,7 @@ object WorkshopDownloadJob {
                 }
                 true
             }
-        }.getOrElse { e ->
+        }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: autoImportToLibrary — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }.getOrElse { e ->
             WepWawetLogger.workshopWarn("autoImport failed",
                 "exception" to e.javaClass.name,
                 "message" to (e.message ?: ""))
@@ -556,7 +556,7 @@ object WorkshopDownloadJob {
                     downloaderRef?.parseProjectJson(presetInstallDir)
                 }
                     .onFailure {
-                        WepWawetLogger.appWarn("WorkshopDownloadJob: swallowed failure at line 557",
+                        WepWawetLogger.appWarn("WorkshopDownloadJob: parseProjectJson (preset dependency probe) failed",
                             "exception" to it.javaClass.simpleName,
                             "message" to (it.message ?: ""))
                     }
@@ -621,12 +621,12 @@ object WorkshopDownloadJob {
                         } finally {
                             if (wakeLock2.isHeld) wakeLock2.release()
                         }
-                        runCatching { baseDownloaded.delete() }
-                        runCatching { baseInstallDir.deleteRecursively() }
-                        runCatching { presetInstallDir.deleteRecursively() }
+                        runCatching { baseDownloaded.delete() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: baseDownloaded — best-effort call failed", "exception" to it.javaClass.simpleName) }
+                        runCatching { baseInstallDir.deleteRecursively() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: baseInstallDir — best-effort call failed", "exception" to it.javaClass.simpleName) }
+                        runCatching { presetInstallDir.deleteRecursively() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: presetInstallDir — best-effort call failed", "exception" to it.javaClass.simpleName) }
                         if (presetMpkgSize > 0L && baseMpkg.exists()) {
                             val importOk = autoImportToLibrary(appContext, baseMpkg, item.id, item.title)
-                            runCatching { baseMpkg.delete() }
+                            runCatching { baseMpkg.delete() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: baseMpkg — best-effort call failed", "exception" to it.javaClass.simpleName) }
                             if (importOk) {
                                 val msg = "Preset added to your library ✓ (${formatBytes(presetMpkgSize)}) — base wallpaper $baseId with preset values"
                                 WepWawetLogger.workshop("WorkshopDownloadJob: preset added to library",
@@ -819,7 +819,7 @@ object WorkshopDownloadJob {
                     onDownloadFailed(item, err)
                     // v0.7.4: don't delete the CACHE entry on failure — only
                     // the freshly-downloaded temp file.
-                    if (downloadedPkg !== cachedPkg) runCatching { downloadedPkg.delete() }
+                    if (downloadedPkg !== cachedPkg) runCatching { downloadedPkg.delete() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: downloadedPkg — best-effort call failed", "exception" to it.javaClass.simpleName) }
                     return@launchSafely
                 }
             } finally {
@@ -847,7 +847,7 @@ object WorkshopDownloadJob {
                     endedAt = System.currentTimeMillis(),
                 ) }
                 onDownloadFailed(item, err)
-                if (downloadedPkg !== cachedPkg) runCatching { downloadedPkg.delete() }
+                if (downloadedPkg !== cachedPkg) runCatching { downloadedPkg.delete() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: downloadedPkg — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 return@launchSafely
             }
 
@@ -881,13 +881,13 @@ object WorkshopDownloadJob {
                         downloadedPkg.copyTo(cachedPkg, overwrite = true)
                     }
                 }
-                runCatching { downloadedPkg.delete() }
+                runCatching { downloadedPkg.delete() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: downloadedPkg — best-effort call failed", "exception" to it.javaClass.simpleName) }
             }
-            runCatching { cacheMpkg.delete() }
+            runCatching { cacheMpkg.delete() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: cacheMpkg — best-effort call failed", "exception" to it.javaClass.simpleName) }
             // === Delete install directory (was deferred from WorkshopDownloader
             // so packFromPkg/packVideoWallpaper could read standalone files like
             // project.json and preview.jpg from it) ===
-            runCatching { installDir.deleteRecursively() }
+            runCatching { installDir.deleteRecursively() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: installDir — best-effort call failed", "exception" to it.javaClass.simpleName) }
             WepWawetLogger.workshop("WorkshopDownloadJob: install dir cleaned up",
                 "path" to installDir.absolutePath)
 
@@ -924,7 +924,7 @@ object WorkshopDownloadJob {
                 // ===
                 WepWawetLogger.workshop("WorkshopDownloadJob: cleaning up SteamClient",
                     "id" to item.id)
-                runCatching { downloaderRef?.cleanup() }
+                runCatching { downloaderRef?.cleanup() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: downloaderRef — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 downloaderRef = null
             }
         }
@@ -1140,7 +1140,7 @@ object WorkshopDownloadJob {
                             File(appContext.cacheDir, "workshop_downloads/${item.id}"))
                     }
                         .onFailure {
-                            WepWawetLogger.appWarn("WorkshopDownloadJob: swallowed failure at line 1135",
+                            WepWawetLogger.appWarn("WorkshopDownloadJob: parseProjectJson (preset error-message probe) failed",
                                 "exception" to it.javaClass.simpleName,
                                 "message" to (it.message ?: ""))
                         }
@@ -1303,7 +1303,7 @@ object WorkshopDownloadJob {
                         ) }
                         onDownloadFailed(item, err)
                         // v0.7.4: don't delete the CACHE entry on failure.
-                        if (downloadedPkg !== cachedPkg) runCatching { downloadedPkg.delete() }
+                        if (downloadedPkg !== cachedPkg) runCatching { downloadedPkg.delete() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: downloadedPkg — best-effort call failed", "exception" to it.javaClass.simpleName) }
                         return@launchSafely
                     }
                 } finally {
@@ -1329,7 +1329,7 @@ object WorkshopDownloadJob {
                         endedAt = System.currentTimeMillis(),
                     ) }
                     onDownloadFailed(item, err)
-                    if (downloadedPkg !== cachedPkg) runCatching { downloadedPkg.delete() }
+                    if (downloadedPkg !== cachedPkg) runCatching { downloadedPkg.delete() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: downloadedPkg — best-effort call failed", "exception" to it.javaClass.simpleName) }
                     return@launchSafely
                 }
 
@@ -1379,7 +1379,7 @@ object WorkshopDownloadJob {
                     // Keep cacheMpkg (the user can retry the send once the
                     // phone reconnects) and still clean up the raw install
                     // dir — the .mpkg is the artifact that matters now.
-                    runCatching { installDir.deleteRecursively() }
+                    runCatching { installDir.deleteRecursively() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: installDir — best-effort call failed", "exception" to it.javaClass.simpleName) }
                     return@launchSafely
                 }
 
@@ -1397,7 +1397,7 @@ object WorkshopDownloadJob {
                 // cleaner ran. (WorkshopDownloader also wipes it BEFORE the
                 // next download of the same id, but that doesn't help users
                 // who send several different wallpapers.) ===
-                runCatching { installDir.deleteRecursively() }
+                runCatching { installDir.deleteRecursively() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: installDir — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 WepWawetLogger.workshop("WorkshopDownloadJob.send: install dir cleaned up",
                     "path" to installDir.absolutePath)
 
@@ -1431,7 +1431,7 @@ object WorkshopDownloadJob {
                             "path" to cachedPkg.absolutePath,
                             "size" to cachedPkg.length())
                     }
-                    runCatching { downloadedPkg.delete() }
+                    runCatching { downloadedPkg.delete() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: downloadedPkg — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 }
 
                 val msg = "Queued ${formatBytes(cacheMpkg.length())} for transfer to $deviceName"
@@ -1460,7 +1460,7 @@ object WorkshopDownloadJob {
                 // ===
                 WepWawetLogger.workshop("WorkshopDownloadJob.send: cleaning up SteamClient",
                     "id" to item.id)
-                runCatching { downloaderRef?.cleanup() }
+                runCatching { downloaderRef?.cleanup() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: downloaderRef — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 downloaderRef = null
             }
         }
@@ -1564,18 +1564,18 @@ object WorkshopDownloadJob {
                     onDownloadFailed(pendingItem, err)
                     // The source video survives (retryable), but the install
                     // dir is no longer needed — the .mpkg carries the video.
-                    runCatching { installDir.deleteRecursively() }
+                    runCatching { installDir.deleteRecursively() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: installDir — best-effort call failed", "exception" to it.javaClass.simpleName) }
                     return@launchSafely
                 }
                 PairingService.launchWallpaperEngineApp(appContext)
                 // v0.7.23 BUG WD-2 / v0.8.18 (review B1): the source video
                 // is only deleted after queueWallpaper returned TRUE above —
                 // the file is provably in the transfer queue.
-                runCatching { videoFile.delete() }
+                runCatching { videoFile.delete() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: videoFile — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 // v0.7.4: clean up the install dir here too (the video path in
                 // launchSendToPhone returns early before the normal cleanup —
                 // this is the continuation of that flow, so it owns the cleanup).
-                runCatching { installDir.deleteRecursively() }
+                runCatching { installDir.deleteRecursively() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: installDir — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 WepWawetLogger.workshop("WorkshopDownloadJob.continueVideoSend: install dir cleaned up",
                     "path" to installDir.absolutePath)
                 val msg = "Queued ${formatBytes(cacheMpkg.length())} for transfer to $deviceName"
@@ -1743,10 +1743,10 @@ object WorkshopDownloadJob {
                     progress = 0.95f) }
                 val importOk = autoImportToLibrary(appContext, cacheMpkg, itemId, item.title)
                 if (deleteSource) {
-                    runCatching { videoFile.delete() }
-                    runCatching { installDir.deleteRecursively() }
+                    runCatching { videoFile.delete() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: videoFile — best-effort call failed", "exception" to it.javaClass.simpleName) }
+                    runCatching { installDir.deleteRecursively() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: installDir — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 }
-                runCatching { cacheMpkg.delete() }
+                runCatching { cacheMpkg.delete() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: cacheMpkg — best-effort call failed", "exception" to it.javaClass.simpleName) }
                 if (importOk) {
                     val msg = "Added to your wallpaper library ✓ (${formatBytes(mpkgSize)}) — open it on the main page"
                     WepWawetLogger.workshop("WorkshopDownloadJob.importVideoToLibrary: added to library",
@@ -1813,7 +1813,7 @@ object WorkshopDownloadJob {
             "id" to itemId,
             "pending_file" to (pendingFile ?: "null"))
         if (pendingFile != null) {
-            runCatching { File(pendingFile).delete() }
+            runCatching { File(pendingFile).delete() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: File(pendingFile) — best-effort call failed", "exception" to it.javaClass.simpleName) }
         }
         // v0.7.3: Mirror the cancel into DownloadManager so the Downloads
         // screen's entry for this item is removed — otherwise it stays
@@ -1873,7 +1873,7 @@ object WorkshopDownloadJob {
         // screen.
         val pendingFile = _states.value[itemId]?.pendingVideoFile
         if (pendingFile != null) {
-            runCatching { File(pendingFile).delete() }
+            runCatching { File(pendingFile).delete() }.onFailure { WepWawetLogger.appWarn("WorkshopDownloadJob: File(pendingFile) — best-effort call failed", "exception" to it.javaClass.simpleName) }
         }
         updateState(itemId) { it.copy(
             isRunning = false,
