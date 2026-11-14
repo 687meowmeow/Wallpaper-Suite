@@ -20,7 +20,8 @@
          actually need (it's matched to the service's foregroundServiceType
          attribute). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <!-- Wake lock so the Wine process doesn't sleep mid-render -->
+    <!-- Wake lock for the live-wallpaper render loop (a stale comment used
+         to say "Wine" here — no Wine process exists in this app). -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Keep Wi-Fi alive for the (rare) LAN-pair fallback -->
 
@@ -37,6 +38,8 @@
          our `specialUse` foreground service type is NOT in the Android 15+
          restricted-types list — so the receiver can start our service. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- v0.9.0 (rules): chosen-Bluetooth-device triggers read the device name. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
     <!-- Notification permission (Android 13+) for the foreground service sticky notification -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -207,6 +210,20 @@
             DownloadService.startForDownload) and auto-stops when the
             active downloads map becomes empty.
         -->
+        <!-- v0.9.0 (rules): the Quick-Settings tile runs the PINNED rule
+             (set from the rule editor's pin action). Active mode — the
+             state is pushed, never polled. -->
+        <service
+            android:name=".rules.RuleTileService"
+            android:exported="true"
+            android:label="Rule"
+            android:icon="@android:drawable/ic_menu_compass"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
         <service
             android:name=".pairing.DownloadService"
             android:exported="false"

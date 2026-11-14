@@ -197,6 +197,13 @@ object DownloadManager {
                 (listOf(completed) + existing.filter { it.itemId != itemId })
             }
             saveCompletedToDisk()
+            // v0.9.0 (rules): the "a Workshop download finished" trigger.
+            runCatching {
+                com.wepwawet.rules.RuleEvents.post(
+                    com.wepwawet.WepWawetApplication.instance,
+                    com.wepwawet.rules.RuleModel.TRIG_WORKSHOP_DOWNLOADED,
+                    mapOf("itemId" to itemId.toString()))
+            }
         }
         WepWawetLogger.workshop("DownloadManager: completed download",
             "item_id" to itemId, "size" to fileSizeBytes, "device" to deviceName)

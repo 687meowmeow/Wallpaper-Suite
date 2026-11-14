@@ -163,6 +163,11 @@ fun WallpaperPropertyEditor(
     LaunchedEffect(revision) {
         val lib = EngineLibrary.sceneLib(context)
         runCatching { lib.setLanguage(Locale.getDefault().toLanguageTag()) }
+            .onFailure {
+                WepWawetLogger.appWarn("WallpaperPropertyEditor: setLanguage failed",
+                    "exception" to it.javaClass.simpleName,
+                    "message" to (it.message ?: ""))
+            }
         hasGyroscope = (context.getSystemService(android.content.Context.SENSOR_SERVICE)
                 as? SensorManager)?.getDefaultSensor(Sensor.TYPE_GYROSCOPE) != null
         if (!hasGyroscope) {
@@ -184,7 +189,13 @@ fun WallpaperPropertyEditor(
                     (com.google.gson.Gson().fromJson<HashMap<String, String>>(json, type)
                         ?: emptyMap())
                 }
-            }.getOrDefault(emptyMap())
+            }
+                .onFailure {
+                    WepWawetLogger.appWarn("WallpaperPropertyEditor: swallowed failure at line 187",
+                        "exception" to it.javaClass.simpleName,
+                        "message" to (it.message ?: ""))
+                }
+            .getOrDefault(emptyMap())
         }
     }
 
@@ -213,7 +224,13 @@ fun WallpaperPropertyEditor(
         customLocalizations[token]?.let { return it }
         val fromEngine = runCatching {
             EngineLibrary.sceneLib(context).getLocalization(token)
-        }.getOrNull()
+        }
+            .onFailure {
+                WepWawetLogger.appWarn("WallpaperPropertyEditor: swallowed failure at line 216",
+                    "exception" to it.javaClass.simpleName,
+                    "message" to (it.message ?: ""))
+            }
+        .getOrNull()
         if (!fromEngine.isNullOrEmpty()) return fromEngine
         // Non-token author text passes through (the engine's lookup would
         // return it unchanged on the PC; plain titles are not tokens).
@@ -743,7 +760,13 @@ private fun SceneTextureRow(
         // display name query, persistable permission for image/video.
         val mime = runCatching {
             context.contentResolver.getType(first)?.lowercase(Locale.ROOT)
-        }.getOrNull() ?: "image"
+        }
+            .onFailure {
+                WepWawetLogger.appWarn("WallpaperPropertyEditor: swallowed failure at line 746",
+                    "exception" to it.javaClass.simpleName,
+                    "message" to (it.message ?: ""))
+            }
+        .getOrNull() ?: "image"
         val name = queryDisplayName(context, first) ?: first.lastPathSegment ?: "texture"
         if (mime.startsWith("image") || mime.startsWith("video")) {
             runCatching {

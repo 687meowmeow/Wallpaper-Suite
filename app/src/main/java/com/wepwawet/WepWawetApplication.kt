@@ -177,6 +177,27 @@ class WepWawetApplication : Application(), Configuration.Provider, ImageLoaderFa
             else Log.e(TAG, "createNotificationChannels failed", t)
         }
 
+        // v0.9.0 (rules): start the TRIGGER HUB — the aggregated event
+        // source for every rule (one receiver set, one computed time wake,
+        // re-aggregated whenever the rules change), plus the notification
+        // rule-button receiver.
+        runCatching {
+            registerReceiver(
+                com.wepwawet.rules.RuleButtonReceiver(),
+                android.content.IntentFilter("com.wepwawet.rules.FIRE_RULE"))
+            com.wepwawet.rules.RuleEngine.ensureChannel(this)
+            com.wepwawet.rules.RuleTriggerHub.start(this)
+        }.onFailure { t ->
+            if (loggerOk) WepWawetLogger.appWarn("rules hub start failed",
+                "exception" to t.javaClass.simpleName,
+                "message" to (t.message ?: ""))
+            else Log.e(TAG, "rules hub start failed", t)
+        }
+        // The persistent rule-button notification (when one is pinned).
+        runCatching {
+            com.wepwawet.rules.RuleEngine.buildRuleButtonNotification(this)
+        }
+
         // v0.8.19: kick the Discover preload queue ON APP START ("have
         // them preload on app start") — background, quiet, single-flight;
         // the first Discover visit of a session pops an already-downloaded

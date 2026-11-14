@@ -554,7 +554,13 @@ object WorkshopDownloadJob {
                 val presetInstallDir = File(appContext.cacheDir, "workshop_downloads/${item.id}")
                 val presetProject = runCatching {
                     downloaderRef?.parseProjectJson(presetInstallDir)
-                }.getOrNull()
+                }
+                    .onFailure {
+                        WepWawetLogger.appWarn("WorkshopDownloadJob: swallowed failure at line 557",
+                            "exception" to it.javaClass.simpleName,
+                            "message" to (it.message ?: ""))
+                    }
+                .getOrNull()
                 if (presetProject?.dependency != null &&
                     presetProject.dependency.toLongOrNull() != null) {
                     val baseId = presetProject.dependency
@@ -1132,7 +1138,13 @@ object WorkshopDownloadJob {
                     val presetProject = runCatching {
                         downloaderRef?.parseProjectJson(
                             File(appContext.cacheDir, "workshop_downloads/${item.id}"))
-                    }.getOrNull()
+                    }
+                        .onFailure {
+                            WepWawetLogger.appWarn("WorkshopDownloadJob: swallowed failure at line 1135",
+                                "exception" to it.javaClass.simpleName,
+                                "message" to (it.message ?: ""))
+                        }
+                    .getOrNull()
                     val err = if (presetProject?.dependency != null &&
                         presetProject.dependency.toLongOrNull() != null) {
                         "This is a preset wallpaper — use Download (adds it to your " +

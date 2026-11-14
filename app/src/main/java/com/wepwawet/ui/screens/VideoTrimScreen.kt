@@ -281,7 +281,13 @@ fun VideoTrimScreen(
                         frame = runCatching {
                             retriever.getScaledFrameAtTime(
                                 t * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, targetW, targetH)
-                        }.getOrNull()
+                        }
+                            .onFailure {
+                                WepWawetLogger.appWarn("VideoTrimScreen: swallowed failure at line 284",
+                                    "exception" to it.javaClass.simpleName,
+                                    "message" to (it.message ?: ""))
+                            }
+                        .getOrNull()
                     }
                     val raw = frame
                         ?: (if (i == 0 && raw0 != null) raw0

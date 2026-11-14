@@ -534,8 +534,10 @@ object WeEnginePrefs {
                     val size = readLeU32At(raf) ?: return null
                     val name = String(nameBytes, Charsets.UTF_8)
                     if (name in candidates) {
-                        if (bestName == null ||
-                            candidates.indexOf(name) < candidates.indexOf(bestName!!)) {
+                        // v0.9.0 (!! cleanup): `it` shadows as the current best.
+                        val best = bestName
+                        if (best == null ||
+                            candidates.indexOf(name) < candidates.indexOf(best)) {
                             bestName = name
                             bestOffset = offset
                             bestSize = size

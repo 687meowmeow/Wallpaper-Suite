@@ -949,7 +949,7 @@ class WePairingServer {
             // transfer was in flight.
             try {
                 sendEncryptedJson(output, DownloadInfo(command = "transmissionCancel"), crypto)
-            } catch (_: Exception) {}
+            } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
         }
     }
 
@@ -1307,7 +1307,13 @@ class WePairingServer {
                         // but wrong, and it is gone now.
                         val command = runCatching {
                             gson.fromJson(commandJson, DownloadInfo::class.java).command
-                        }.getOrNull()
+                        }
+                            .onFailure {
+                                WepWawetLogger.appWarn("WePairingServer: swallowed failure at line 1310",
+                                    "exception" to it.javaClass.simpleName,
+                                    "message" to (it.message ?: ""))
+                            }
+                        .getOrNull()
                         when (command) {
                             "quit" -> {
                                 WepWawetLogger.proxy("Phone requested quit — closing connection cleanly",
@@ -1324,7 +1330,13 @@ class WePairingServer {
                             "transmissionContinue" -> {
                                 val size = runCatching {
                                     gson.fromJson(commandJson, DownloadInfo::class.java).size
-                                }.getOrNull() ?: 0L
+                                }
+                                    .onFailure {
+                                        WepWawetLogger.appWarn("WePairingServer: swallowed failure at line 1327",
+                                            "exception" to it.javaClass.simpleName,
+                                            "message" to (it.message ?: ""))
+                                    }
+                                .getOrNull() ?: 0L
                                 sendEncryptedJsonString(output, """{"command":"transmissionContinue","size":$size}""")
                             }
                             else -> {

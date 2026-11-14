@@ -176,7 +176,13 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
             withContext(Dispatchers.IO) {
                 runCatching {
                     android.graphics.BitmapFactory.decodeFile(it.file.absolutePath)
-                }.getOrNull()
+                }
+                    .onFailure {
+                        WepWawetLogger.appWarn("DiscoverScreen: swallowed failure at line 179",
+                            "exception" to it.javaClass.simpleName,
+                            "message" to (it.message ?: ""))
+                    }
+                .getOrNull()
             }
         }
     }
@@ -382,10 +388,27 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                                 recentUrls = DiscoverPrefs.readRecentUrls(context),
                                 sources = sources,
                             )
-                        }.getOrNull()
+                        }
+                            .onFailure {
+                                WepWawetLogger.appWarn("DiscoverScreen: swallowed failure at line 385",
+                                    "exception" to it.javaClass.simpleName,
+                                    "message" to (it.message ?: ""))
+                            }
+                        .getOrNull()
                     } ?: break
                     val nextBytes = withContext(Dispatchers.IO) {
-                        runCatching { DiscoverSearch.downloadImage(nextUrl) }.getOrNull()
+                        runCatching { DiscoverSearch.downloadImage(nextUrl) }
+                        .onFailure {
+                            WepWawetLogger.appWarn("DiscoverScreen: queue prefetch download failed",
+                                "exception" to it.javaClass.simpleName,
+                                "message" to (it.message ?: ""))
+                        }
+                            .onFailure {
+                                WepWawetLogger.appWarn("DiscoverScreen: swallowed failure at line 388",
+                                    "exception" to it.javaClass.simpleName,
+                                    "message" to (it.message ?: ""))
+                            }
+                        .getOrNull()
                     }
                     if (nextBytes == null || nextBytes.size <= 1024) break
                     withContext(Dispatchers.IO) {
@@ -430,6 +453,12 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
             bytes = cached
             WepWawetLogger.appInfo("DiscoverScreen: using preloaded image",
                 "bytes" to cached.size)
+            // v0.9.0 (rules): the "Discover queue ran low" trigger — fired
+            // when the consumption left the queue shallow.
+            if (DiscoverPrefs.queueDepth(context, signature) < 2) {
+                com.wepwawet.rules.RuleEvents.post(
+                    context, com.wepwawet.rules.RuleModel.TRIG_DISCOVER_QUEUE_LOW)
+            }
         }
         if (bytes == null) {
             val fetched = withContext(Dispatchers.IO) {
@@ -447,13 +476,16 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
             url = fetched
             bytes = withContext(Dispatchers.IO) { DiscoverSearch.downloadImage(fetched) }
         }
-        val imgBytes = bytes!!
-        DiscoverPrefs.pushRecentUrl(context, url!!)
+        // v0.9.0 (!! cleanup): locals instead of !!s — the vars are mutable
+        // properties, so every read needed a bang; a local keeps it null-safe.
+        val imgBytes = bytes ?: return
+        val imgSrcUrl = url ?: return
+        DiscoverPrefs.pushRecentUrl(context, imgSrcUrl)
         val bmp = withContext(Dispatchers.IO) { DiscoverApplier.decode(imgBytes, maxDim) }
         if (bmp == null) {
             statusLine = "Downloaded image failed to decode"
             WepWawetLogger.appWarn("DiscoverScreen: decode failed",
-                "url" to url!!.take(100), "bytes" to imgBytes.size)
+                "url" to imgSrcUrl.take(100), "bytes" to imgBytes.size)
             return
         }
         previewBitmap = bmp
@@ -474,7 +506,7 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                     softTags = softTags,
                     styleValue = styleValue,
                     r18Mode = r18Mode,
-                    recentUrls = DiscoverPrefs.readRecentUrls(context) + url!!,
+                    recentUrls = DiscoverPrefs.readRecentUrls(context) + imgSrcUrl,
                     sources = sources,
                 )
             }
@@ -740,7 +772,13 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                 previewBitmap = withContext(Dispatchers.IO) {
                     runCatching {
                         android.graphics.BitmapFactory.decodeFile(newest.file.absolutePath)
-                    }.getOrNull()
+                    }
+                        .onFailure {
+                            WepWawetLogger.appWarn("DiscoverScreen: swallowed failure at line 743",
+                                "exception" to it.javaClass.simpleName,
+                                "message" to (it.message ?: ""))
+                        }
+                    .getOrNull()
                 }
             } else if (!fetching) {
                 refreshPreview()
@@ -997,9 +1035,9 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                     Text("Refresh", maxLines = 1)
                 }
             }
-            if (statusLine != null) {
+            statusLine?.let { line ->
                 Text(
-                    statusLine!!,
+                    line,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1269,7 +1307,7 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                                     .fillMaxWidth()
                                     .clickable(enabled = !savingToFolder) {
                                         if (linked) {
-                                            saveToFolder(group.folderUri!!)
+                                            group.folderUri?.let { saveToFolder(it) }
                                         } else {
                                             // Link a folder to this group
                                             // first, then save into it.
@@ -1597,9 +1635,11 @@ private fun HistoryThumb(entry: DiscoverApplier.HistoryEntry) {
             android.graphics.BitmapFactory.decodeFile(entry.file.absolutePath, opts)
         }
     }
-    if (bmp != null) {
+    // v0.9.0 (!! cleanup): a local lifts the delegated-property smart cast.
+    val decodedThumb = bmp
+    if (decodedThumb != null) {
         Image(
-            bitmap = bmp!!.asImageBitmap(),
+            bitmap = decodedThumb.asImageBitmap(),
             contentDescription = "Restore ${entry.timestamp}",
             contentScale = ContentScale.Crop,
             modifier = Modifier

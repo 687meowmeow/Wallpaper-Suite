@@ -647,7 +647,7 @@ class WorkshopDownloader(
                                     }
                                 }
                             }
-                        } catch (_: Exception) {}
+                        } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
                         WepWawetLogger.proxy("$TAG: heartbeat #$tick",
                             "elapsed_s" to elapsedSec,
                             "silent_s" to silentSec,
@@ -722,7 +722,7 @@ class WorkshopDownloader(
                             installDir.walkTopDown().forEach { f ->
                                 if (f.isFile) currentFiles.add(f)
                             }
-                        } catch (_: Exception) {}
+                        } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
                         for (f in currentFiles) {
                             val key = f.absolutePath
                             if (seenFiles.add(key)) {
@@ -925,7 +925,7 @@ class WorkshopDownloader(
 
             downloader.removeListener(listener)
             WepWawetLogger.proxy("$TAG: listener removed")
-            try { downloader.close() } catch (_: Exception) {}
+            try { downloader.close() } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
             // === Clear the download-in-progress flag — onDisconnected can
             // auto-reconnect again now that the DepotDownloader is done. ===
             isDownloadInProgress = false
@@ -1112,8 +1112,8 @@ class WorkshopDownloader(
         // failed spuriously). Interrupt + JOIN the old thread here so it is
         // fully dead before the state reset below.
         authPollingThread?.let { oldThread ->
-            try { oldThread.interrupt() } catch (_: Exception) {}
-            try { oldThread.join(2000) } catch (_: Exception) {}
+            try { oldThread.interrupt() } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
+            try { oldThread.join(2000) } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
         }
         authPollingThread = null
 
@@ -1139,7 +1139,7 @@ class WorkshopDownloader(
         // unbounded on each reconnect — a memory leak. The old subscriptions
         // also reference the old (now-orphaned) callbackManager, so they'd
         // dispatch to stale handlers.
-        subscriptions.forEach { try { it.close() } catch (_: Exception) {} }
+        subscriptions.forEach { try { it.close() } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) } }
         subscriptions.clear()
 
         // === Stop old callback thread before starting a new one ===
@@ -1156,7 +1156,7 @@ class WorkshopDownloader(
             try {
                 oldThread.interrupt()
                 oldThread.join(2000)
-            } catch (_: Exception) {}
+            } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
         }
         callbackThread = null
 
@@ -1288,20 +1288,20 @@ class WorkshopDownloader(
      * Clean up — disconnect from Steam, close subscriptions.
      */
     fun cleanup() {
-        try { steamUser?.logOff() } catch (_: Exception) {}
+        try { steamUser?.logOff() } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
         // v0.7.24 (M-D8): logOff() is asynchronous — disconnecting in the
         // same microsecond could cut the logoff message mid-flight, leaving
         // a ghost session on Steam's side (the CM keeps the session alive
         // until its own timeout, contributing to RateLimitExceeded). A short
         // grace delay lets the message hit the wire.
-        try { Thread.sleep(150) } catch (_: InterruptedException) {}
-        try { steamClient?.disconnect() } catch (_: Exception) {}
+        try { Thread.sleep(150) } catch (e: InterruptedException) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
+        try { steamClient?.disconnect() } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
         // v0.7.4: interrupt the modern-auth polling thread — it may still be
         // blocked in pollingWaitForResult().get() waiting for the user to
         // approve the login on their phone. Without this it lingered as a
         // fire-and-forget thread that later called steamUser!!.logOn() on an
         // already-disconnected client.
-        try { authPollingThread?.interrupt() } catch (_: Exception) {}
+        try { authPollingThread?.interrupt() } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
         authPollingThread = null
         // v0.5.32 (audit H2): also shutdown the OkHttp dispatcher's
         // executor so the cached thread pool doesn't leak daemon threads
@@ -1311,9 +1311,9 @@ class WorkshopDownloader(
         try {
             (httpClient?.dispatcher?.executorService as? java.util.concurrent.ExecutorService)
                 ?.shutdownNow()
-        } catch (_: Exception) {}
+        } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
         httpClient = null
-        subscriptions.forEach { try { it.close() } catch (_: Exception) {} }
+        subscriptions.forEach { try { it.close() } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) } }
         subscriptions.clear()
         isRunning = false
         // v0.7.4: interrupt + join the callback dispatch thread (mirrors what
@@ -1325,7 +1325,7 @@ class WorkshopDownloader(
             try {
                 oldThread.interrupt()
                 oldThread.join(2000)
-            } catch (_: Exception) {}
+            } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
         }
         callbackThread = null
     }
@@ -1488,8 +1488,8 @@ class WorkshopDownloader(
                 // reconnect path below), and Thread.sleep(3000) here would
                 // block ALL callback dispatch for 3 seconds.
                 Thread {
-                    try { Thread.sleep(3000); steamClient?.connect() } catch (_: InterruptedException) {}
-                    catch (_: Exception) {}
+                    try { Thread.sleep(3000); steamClient?.connect() } catch (e: InterruptedException) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
+                    catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
                 }.apply { isDaemon = true; name = "JavaSteam-CmRetry"; start() }
                 return
             }
@@ -1669,14 +1669,14 @@ class WorkshopDownloader(
             // internal locks. The callback thread must be free to drain any
             // remaining callbacks from the old connection.
             Thread {
-                try { Thread.sleep(2000); steamClient?.connect() } catch (_: InterruptedException) {}
-                catch (_: Exception) {}
+                try { Thread.sleep(2000); steamClient?.connect() } catch (e: InterruptedException) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
+                catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
             }.apply { isDaemon = true; name = "JavaSteam-Reconnect"; start() }
         } else if (!callback.isUserInitiated && !authenticated) {
             // Reconnect during initial connection attempt — same: spawn a new thread.
             Thread {
-                try { Thread.sleep(2000); steamClient?.connect() } catch (_: InterruptedException) {}
-                catch (_: Exception) {}
+                try { Thread.sleep(2000); steamClient?.connect() } catch (e: InterruptedException) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
+                catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
             }.apply { isDaemon = true; name = "JavaSteam-Reconnect"; start() }
         } else {
             isRunning = false
@@ -1714,7 +1714,7 @@ class WorkshopDownloader(
                             header[5] == 'K'.code.toByte() && header[6] == 'G'.code.toByte() &&
                             header[7] == 'V'.code.toByte()) return file
                     }
-                } catch (_: Exception) {}
+                } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
             }
         }
         return null

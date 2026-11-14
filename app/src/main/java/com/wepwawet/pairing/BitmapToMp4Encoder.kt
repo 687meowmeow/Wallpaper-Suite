@@ -222,11 +222,11 @@ class BitmapToMp4Encoder(
 
     /** Release encoder + muxer resources. Safe to call multiple times. */
     fun release() {
-        try { codec?.stop() } catch (_: Exception) {}
-        try { codec?.release() } catch (_: Exception) {}
+        try { codec?.stop() } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
+        try { codec?.release() } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
         codec = null
-        try { if (muxerStarted) muxer?.stop() } catch (_: Exception) {}
-        try { muxer?.release() } catch (_: Exception) {}
+        try { if (muxerStarted) muxer?.stop() } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
+        try { muxer?.release() } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
         muxer = null
         muxerStarted = false
     }

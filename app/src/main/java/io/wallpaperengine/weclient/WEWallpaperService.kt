@@ -108,6 +108,52 @@ class WEWallpaperService : WallpaperService() {
         currentEngine?.reloadApplyStoredProperties()
     }
 
+    // ── v0.9.0 (rules engine): the small surface the RULES ENGINE drives.
+    //  The state lives in the ENGINE (playlist, handler, controls); these
+    //  are null-safe delegates so RuleEngine never touches the engine class.
+    fun currentWallpaperFile(): String? = currentEngine?.rulesCurrentFile()
+
+    /** How long the current wallpaper has been showing, in minutes (rules). */
+    fun currentWallpaperShownMinutes(): Long = currentEngine?.rulesShownMinutes() ?: 0L
+
+    /** v0.9.0 (rules): mute audio-responsive effects (the engine block). */
+    @Volatile
+    var rulesAudioMuted: Boolean = false
+
+    /** Pause or resume the playlist rotation (rule action). */
+    fun setRotationPaused(paused: Boolean) {
+        currentEngine?.rulesSetRotationPaused(paused)
+    }
+
+    /** Hold the current wallpaper for [minutes] (rule action). */
+    fun holdWallpaperFor(minutes: Int) {
+        currentEngine?.rulesHoldFor(minutes * 60_000L)
+    }
+
+    /** Force one rotation NOW (rule action: restart playlist). */
+    fun forcePlaylistRotation() {
+        currentEngine?.rulesForceRotation()
+    }
+
+    /** v0.9.0 (rules): apply saved wallpaper properties (preset block). */
+    fun rulesApplyProperties(propertiesJson: String) {
+        currentEngine?.rulesApplyProperties(propertiesJson)
+    }
+
+    /** v0.9.0 (rules): the active engine's controls (preset capture). */
+    fun rulesWallpaperControls(): io.wallpaperengine.weviews.WallpaperControls? =
+        currentEngine?.wallpaperControls
+
+    /** v0.9.0 (rules): set the FPS limit (engine block). */
+    fun rulesSetFps(fps: Int) {
+        currentEngine?.rulesSetFps(fps)
+    }
+
+    /** v0.9.0 (rules): pause or resume the renderer (engine block). */
+    fun rulesSetRendererPaused(paused: Boolean) {
+        currentEngine?.rulesSetRendererPaused(paused)
+    }
+
     fun requestPlaylistSettingsChanged() {
         currentEngine?.refreshPlaylistSettings()
     }
@@ -168,7 +214,14 @@ class WEWallpaperService : WallpaperService() {
         private val runnablePlaylist = object : Runnable {
             override fun run() {
                 playlistUpdate()
-                handler.postDelayed(this, 5000L)
+                // v0.9.0 (battery): SLEEP UNTIL the next moment work is
+                // actually possible, instead of polling every 1-5 seconds
+                // forever. The old fixed-interval polling woke the CPU
+                // 12-60 times/minute just to re-check a gate that almost
+                // always said "not yet". The next moment is the EARLIEST of
+                // the next interval rotation, the next suite time-rule
+                // boundary, and the self-heal cap (see nextWakeDelayMs).
+                handler.postDelayed(this, playlist.nextWakeDelayMs())
             }
         }
 
@@ -264,6 +317,13 @@ class WEWallpaperService : WallpaperService() {
             // activation switch (null until the first sync so a fresh
             // engine never counts as a switch).
             private var lastSyncedActiveId: String? = null
+
+            // v0.9.0 (rules): a rule can PAUSE the rotation outright
+            // ("pause rotation / resume rotation" blocks). While paused the
+            // tick keeps waking (so a resume applies instantly) but never
+            // rotates.
+            @Volatile
+            var rotationPaused: Boolean = false
 
             // v0.8.20 (all buttons live): a fingerprint of every
             // rotation-relevant field of the last synced playlist — any
@@ -525,7 +585,27 @@ class WEWallpaperService : WallpaperService() {
                 val playlist = suitePlaylist ?: return emptyList()
                 val ruleSet = com.wepwawet.playlist.SuitePlaylistStore
                     .entriesForMinute(playlist, com.wepwawet.playlist.SuitePlaylistStore.currentMinuteOfDay())
-                return ruleSet ?: suiteEntries
+                val source = ruleSet ?: suiteEntries
+                // v0.9.0: GROUP BLOCKS — a "group://block/<name>" marker
+                // resolves to the group's CURRENT members in the block's
+                // order (manual/newest/oldest/az/random), so a rotation that
+                // lands on the block picks from inside it, and later group
+                // edits flow into the playlist automatically.
+                if (source.none { com.wepwawet.playlist.GroupBlocks.isGroupBlock(it) }) {
+                    return source
+                }
+                val out = ArrayList<String>(source.size * 2)
+                for (path in source) {
+                    if (!com.wepwawet.playlist.GroupBlocks.isGroupBlock(path)) {
+                        out.add(path)
+                        continue
+                    }
+                    val entry = playlist.entries.firstOrNull { it.filepath == path }
+                        ?: continue
+                    out.addAll(com.wepwawet.playlist.GroupBlocks
+                        .resolve(this@WEWallpaperService, entry).paths)
+                }
+                return out
             }
 
             /** Pick the next wallpaper inside the current set per the order mode. */
@@ -533,14 +613,30 @@ class WEWallpaperService : WallpaperService() {
                 return suitePickNewAndMaybePull()
             }
 
+            /**
+             * v0.9.0 (rules): hold the current wallpaper for [ms] — the gate
+             * `now - lastChangeTime > duration` can only pass once the hold
+             * elapses, so lastChangeTime is set to exactly `now + ms -
+             * duration` (in the future when the hold exceeds the interval).
+             */
+            fun holdFor(ms: Long) {
+                lastChangeTime = System.currentTimeMillis() + ms - duration
+            }
+
+            /** v0.9.0 (rules): read-only views for the rules engine. */
+            fun rulesCurrentFile(): String? = currentFile
+
+            fun rulesShownMinutes(): Long =
+                (System.currentTimeMillis() - lastChangeTime) / 60_000L
+
             fun onWallpaperChangedExternally() {
                 lastChangeTime = System.currentTimeMillis()
-                if (currentFile != null) {
+                currentFile?.let { file ->
                     when (mode) {
                         WallpaperProperties.PLAYLIST_MODE_RANDOM -> {
-                            if (randomPool.containsKey(currentFile)) {
-                                val count = randomPool[currentFile] ?: 0
-                                randomPool[currentFile!!] = count - 1
+                            if (randomPool.containsKey(file)) {
+                                val count = randomPool[file] ?: 0
+                                randomPool[file] = count - 1
                             }
                         }
                         WallpaperProperties.PLAYLIST_MODE_SORTED -> {
@@ -619,8 +715,46 @@ class WEWallpaperService : WallpaperService() {
                 return ""
             }
 
+            /** v0.9.0: the self-heal cap for [nextWakeDelayMs] — clocks
+             *  shift (DST, manual time, timezone), playlists are edited
+             *  while the tick sleeps, and modes change; one re-check at this
+             *  granularity is still 1000x fewer wakes than the old poll. */
+            private val WAKE_SELF_HEAL_MS = 10 * 60_000L
+
+            /**
+             * v0.9.0 (battery): how long the playlist tick may SLEEP before
+             * it is next needed — the earliest of:
+             *  • the next interval rotation (duration since the last
+             *    change),
+             *  • the next suite time-rule window boundary (a boundary can
+             *    hand the rotation to a different entry set — the tick must
+             *    be awake for it),
+             *  • the self-heal cap [WAKE_SELF_HEAL_MS].
+             * Floored at 1s (a due rotation can never busy-loop) and capped
+             * so a sleeping tick still self-heals.
+             */
+            fun nextWakeDelayMs(): Long {
+                val now = System.currentTimeMillis()
+                var wakeAt = now + WAKE_SELF_HEAL_MS
+                val rotationIn = duration - (now - lastChangeTime)
+                if (rotationIn > 0 && now + rotationIn < wakeAt) {
+                    wakeAt = now + rotationIn
+                }
+                if (suiteMode) {
+                    val pl = suitePlaylist
+                    if (pl != null && pl.timeRules.isNotEmpty()) {
+                        val boundary = com.wepwawet.playlist.SuitePlaylistStore
+                            .nextTimeRuleBoundaryMs(pl, now)
+                        if (boundary != null && boundary < wakeAt) wakeAt = boundary
+                    }
+                }
+                return (wakeAt - now).coerceIn(1_000L, WAKE_SELF_HEAL_MS)
+            }
+
             fun shouldUpdateWallpaper(): Boolean {
                 if (!isActive() || isPreview) return false
+                // v0.9.0 (rules): a paused rotation never rotates.
+                if (rotationPaused) return false
                 if (suiteMode) {
                     val set = suiteSetForNow()
                     // v0.8.19: the dynamic random slot counts as a candidate.
@@ -628,8 +762,9 @@ class WEWallpaperService : WallpaperService() {
                     // A window change (or playlist edit) that no longer
                     // contains the current wallpaper switches immediately.
                     // (A random-slot image IS a legit current wallpaper.)
-                    if (currentFile != null && currentFile !in set &&
-                        !com.wepwawet.playlist.RandomPullEngine.isSlotFile(currentFile!!)
+                    val current = currentFile
+                    if (current != null && current !in set &&
+                        !com.wepwawet.playlist.RandomPullEngine.isSlotFile(current)
                     ) return true
                     // A single-entry window pins its wallpaper (the random
                     // slot alone keeps rotating — that's its purpose).
@@ -720,6 +855,58 @@ class WEWallpaperService : WallpaperService() {
                         notifyColorsChanged()
                     }
                 }
+            }
+        }
+
+        // ── v0.9.0 (rules engine): the engine-level halves of the rule
+        // actions. The service-level delegates above call these; everything
+        // (playlist, handler, controls) lives right here.
+        fun rulesCurrentFile(): String? = playlist.rulesCurrentFile()
+
+        fun rulesShownMinutes(): Long = playlist.rulesShownMinutes()
+
+        fun rulesSetRotationPaused(paused: Boolean) {
+            handler.post {
+                playlist.rotationPaused = paused
+                WepWawetLogger.engine(
+                    "Service: rotation " + (if (paused) "paused" else "resumed") + " by rule")
+                if (!paused) playlistUpdate()
+            }
+        }
+
+        fun rulesHoldFor(ms: Long) {
+            handler.post {
+                playlist.holdFor(ms)
+                WepWawetLogger.engine("Service: wallpaper held by rule",
+                    "minutes" to (ms / 60_000L))
+            }
+        }
+
+        fun rulesForceRotation() {
+            handler.post {
+                playlist.syncSettingsAndApplyChanges()
+                playlistUpdate()
+            }
+        }
+
+        fun rulesApplyProperties(propertiesJson: String) {
+            handler.post {
+                wallpaperControls?.applyWallpaperProperties(propertiesJson)
+            }
+        }
+
+        fun rulesSetFps(fps: Int) {
+            handler.post {
+                val info = io.wallpaperengine.wedata.GeneralSettingsInfo()
+                info.maxFps = fps
+                wallpaperControls?.setGeneralSettings(info)
+            }
+        }
+
+        fun rulesSetRendererPaused(paused: Boolean) {
+            handler.post {
+                if (paused) wallpaperControls?.onPauseWallpaper()
+                else wallpaperControls?.onResumeWallpaper()
             }
         }
 
@@ -820,6 +1007,9 @@ class WEWallpaperService : WallpaperService() {
 
         override fun onAudioData(fft: FloatArray) {
             if (wallpaper == null) return
+            // v0.9.0 (rules): the "mute audio-responsive effects" block —
+            // a muted wallpaper keeps rendering, it just stops reacting.
+            if (rulesAudioMuted) return
             wallpaperControls?.sendAudioData(fft)
         }
 

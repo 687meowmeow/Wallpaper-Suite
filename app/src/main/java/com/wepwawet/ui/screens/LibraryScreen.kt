@@ -576,6 +576,13 @@ fun LibraryScreen(
                     }
                 }
             }
+            .onFailure {
+                // v0.9.0: a swallowed backfill failure meant tags silently
+                // never appeared ("added=0"-style hidden bug).
+                WepWawetLogger.appWarn("LibraryScreen: workshop tag backfill failed",
+                    "exception" to it.javaClass.simpleName,
+                    "message" to (it.message ?: ""))
+            }
     }
 
     // v0.8.0: consume a staged ACTION_VIEW import (opened from a file manager).
@@ -643,8 +650,9 @@ fun LibraryScreen(
             scheduleReload()
             if (failure != null) {
                 snackbar.showSnackbar("Import failed — $failure")
-            } else if (firstImported != null) {
-                onOpenWallpaper(firstImported!!)
+            } else {
+                // v0.9.0 (!! cleanup): the local keeps the smart cast.
+                firstImported?.let { onOpenWallpaper(it) }
             }
         }
     }
@@ -2551,7 +2559,13 @@ internal object LibraryPrefs {
     fun readTileSize(context: android.content.Context): LibraryTileSize {
         val name = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
             .getString(KEY_TILE_SIZE, null)
-        return runCatching { LibraryTileSize.valueOf(name ?: "") }.getOrDefault(LibraryTileSize.MEDIUM)
+        return runCatching { LibraryTileSize.valueOf(name ?: "") }
+            .onFailure {
+                WepWawetLogger.appWarn("LibraryScreen: swallowed failure at line 2554",
+                    "exception" to it.javaClass.simpleName,
+                    "message" to (it.message ?: ""))
+            }
+        .getOrDefault(LibraryTileSize.MEDIUM)
     }
 
     // ── v0.8.13: last-open filter persistence ──────────────────────
@@ -2580,10 +2594,10 @@ internal object LibraryPrefs {
             !prefs.contains(KEY_FILTER_FOLDER) &&
             !prefs.contains(KEY_FILTER_ANIMATED)
         ) return null
-        val group = prefs.getString(KEY_FILTER_GROUP, "")!!.ifEmpty { null }
+        val group = prefs.getString(KEY_FILTER_GROUP, "").orEmpty().ifEmpty { null }
         val animated = prefs.getBoolean(KEY_FILTER_ANIMATED, false)
-        val folder = prefs.getString(KEY_FILTER_FOLDER, "")!!.ifEmpty { null }
-        val tags = prefs.getString(KEY_FILTER_TAGS, "")!!
+        val folder = prefs.getString(KEY_FILTER_FOLDER, "").orEmpty().ifEmpty { null }
+        val tags = prefs.getString(KEY_FILTER_TAGS, "").orEmpty()
             .split(",").filter { it.isNotBlank() }.toSet()
         return Tuple4(group, animated, folder, tags)
     }

@@ -283,7 +283,7 @@ object VideoTranscoder {
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
                     try {
                         setInteger(android.media.MediaFormat.KEY_LATENCY, 0)  // API 30+
-                    } catch (_: Exception) {}
+                    } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
                 }
             }
 
@@ -330,7 +330,7 @@ object VideoTranscoder {
                                     android.media.MediaCodecInfo.CodecProfileLevel.AVCLevel42
                                 else
                                     android.media.MediaCodecInfo.CodecProfileLevel.AVCLevel51)
-                        } catch (_: Exception) {}
+                        } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
                     }
                     encTmp = android.media.MediaCodec.createEncoderByType(effectiveCodecMime)
                     encTmp.configure(avcFormat, null, null,

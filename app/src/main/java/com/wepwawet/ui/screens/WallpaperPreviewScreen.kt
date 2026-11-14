@@ -191,7 +191,13 @@ fun WallpaperPreviewScreen(
         resolvedType = withContext(Dispatchers.IO) {
             runCatching {
                 WeEnginePrefs.getWallpaperType(context, EngineLibrary.sceneLib(context), wallpaper)
-            }.getOrNull()
+            }
+                .onFailure {
+                    WepWawetLogger.appWarn("WallpaperPreviewScreen: swallowed failure at line 194",
+                        "exception" to it.javaClass.simpleName,
+                        "message" to (it.message ?: ""))
+                }
+            .getOrNull()
         }
         WepWawetLogger.engine("Preview: media kind resolved",
             "type" to (resolvedType ?: "null"),
@@ -529,7 +535,13 @@ fun WallpaperPreviewScreen(
                 @Suppress("DEPRECATION")
                 (context.getSystemService(Context.WINDOW_SERVICE) as WindowManager)
                     .defaultDisplay?.rotation ?: 0
-            }.getOrDefault(0)
+            }
+                .onFailure {
+                    WepWawetLogger.appWarn("WallpaperPreviewScreen: swallowed failure at line 532",
+                        "exception" to it.javaClass.simpleName,
+                        "message" to (it.message ?: ""))
+                }
+            .getOrDefault(0)
         }
         LaunchedEffect(rotation, controls) {
             controls?.setScreenRotation(rotation)
@@ -982,7 +994,9 @@ fun WallpaperPreviewScreen(
                         HorizontalRule()
                         DetailRow("Type", d?.type ?: "—")
                         DetailRow("Resolution", d?.resolution ?: "—")
-                        if ((d?.fps ?: 0) > 0) DetailRow("FPS", d!!.fps.toString())
+                        // v0.9.0 (!! cleanup): read the value once.
+                        val fpsVal = d?.fps ?: 0
+                        if (fpsVal > 0) DetailRow("FPS", fpsVal.toString())
                     }
                 },
                 confirmButton = {
@@ -1073,7 +1087,13 @@ fun WallpaperPreviewScreen(
                 runCatching {
                     WeEnginePrefs.getWallpaperPreviewBitmap(
                         context, EngineLibrary.sceneLib(context), wallpaper)
-                }.getOrNull()
+                }
+                    .onFailure {
+                        WepWawetLogger.appWarn("WallpaperPreviewScreen: swallowed failure at line 1076",
+                            "exception" to it.javaClass.simpleName,
+                            "message" to (it.message ?: ""))
+                    }
+                .getOrNull()
             }
             // v0.8.9: reset the black-fallback state for this load.
             livePreviewBlack = false
@@ -1089,7 +1109,13 @@ fun WallpaperPreviewScreen(
                     if (!wallpaper.isLocal) {
                         lib.getWallpaperProjectString(wallpaper.filePath, "workshopurl")
                     } else null
-                }.getOrNull()
+                }
+                    .onFailure {
+                        WepWawetLogger.appWarn("WallpaperPreviewScreen: swallowed failure at line 1092",
+                            "exception" to it.javaClass.simpleName,
+                            "message" to (it.message ?: ""))
+                    }
+                .getOrNull()
                 val resolvedId = workshopUrl?.let { url ->
                     Regex("[?&]id=(\\d+)").find(url)?.groupValues?.get(1)
                 // v0.8.18 (review B14): the shared import-naming parser
@@ -1105,7 +1131,13 @@ fun WallpaperPreviewScreen(
                 val sizeBytes = if (!wallpaper.isLocal) {
                     runCatching {
                         File(context.filesDir, wallpaper.filePath).length()
-                    }.getOrDefault(0L)
+                    }
+                        .onFailure {
+                            WepWawetLogger.appWarn("WallpaperPreviewScreen: swallowed failure at line 1108",
+                                "exception" to it.javaClass.simpleName,
+                                "message" to (it.message ?: ""))
+                        }
+                    .getOrDefault(0L)
                 } else 0L
                 WallpaperDetails(
                     type = type,
@@ -1187,7 +1219,13 @@ fun WallpaperPreviewScreen(
             val receiver = WeEnginePrefs.makePowerSavingReceiver { active ->
                 val general = runCatching {
                     WeEnginePrefs.readGeneralSettings(context)
-                }.getOrNull()
+                }
+                    .onFailure {
+                        WepWawetLogger.appWarn("WallpaperPreviewScreen: swallowed failure at line 1190",
+                            "exception" to it.javaClass.simpleName,
+                            "message" to (it.message ?: ""))
+                    }
+                .getOrNull()
                 powerSavingActive = active && (general?.powerSavingEnabled ?: true)
             }
             val filter = IntentFilter().apply {

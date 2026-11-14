@@ -54,6 +54,10 @@ object DiscoverPreload {
             var added = 0
             while (DiscoverPrefs.queueDepth(context, signature) < DiscoverPrefs.QUEUE_TARGET) {
                 val url = withContext(Dispatchers.IO) {
+                    // v0.9.0: the swallow that hid the "added=0" bug for
+                    // several versions — a silent search failure broke the
+                    // loop instantly and the only log said "done, added=0".
+                    // Every swallowed failure here is now LOUD.
                     runCatching {
                         DiscoverSearch.searchOne(
                             context = context,
@@ -64,10 +68,20 @@ object DiscoverPreload {
                             recentUrls = DiscoverPrefs.readRecentUrls(context),
                             sources = sources,
                         )
+                    }.onFailure {
+                        WepWawetLogger.appWarn("$TAG: preload search failed",
+                            "exception" to it.javaClass.name,
+                            "message" to (it.message ?: ""))
                     }.getOrNull()
                 } ?: break
                 val bytes = withContext(Dispatchers.IO) {
-                    runCatching { DiscoverSearch.downloadImage(url) }.getOrNull()
+                    runCatching { DiscoverSearch.downloadImage(url) }
+                        .onFailure {
+                            WepWawetLogger.appWarn("$TAG: preload download failed",
+                                "exception" to it.javaClass.name,
+                                "message" to (it.message ?: ""))
+                        }
+                        .getOrNull()
                 }
                 if (bytes == null || bytes.size <= 1024) break
                 withContext(Dispatchers.IO) {

@@ -440,7 +440,13 @@ object ImageFolderAssets {
                 val nomedia = runCatching {
                     android.provider.DocumentsContract.createDocument(
                         context.contentResolver, dirUri, "application/octet-stream", ".nomedia")
-                }.getOrNull()
+                }
+                    .onFailure {
+                        WepWawetLogger.appWarn("ImageFolderAssets: swallowed failure at line 443",
+                            "exception" to it.javaClass.simpleName,
+                            "message" to (it.message ?: ""))
+                    }
+                .getOrNull()
                 if (nomedia == null) {
                     WepWawetLogger.appWarn("ImageFolderAssets: .nomedia not created " +
                         "(folder still created)")

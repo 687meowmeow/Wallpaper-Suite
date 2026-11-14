@@ -2998,7 +2998,7 @@ object MpkgPacker {
                     if (movie != null && movie.width() > 0 && movie.height() > 0) {
                         images.add(Img(pngBytes, movie.width(), movie.height()))
                     }
-                } catch (_: Exception) { }
+                } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
             } else {
                 // Decode just to get the dims (cheap; full pixels extracted below for the winner)
                 val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -3024,7 +3024,9 @@ object MpkgPacker {
                 "name" to name)
             return null
         }
-        val largest = images.maxByOrNull { it.w.toLong() * it.h }!!
+        // v0.9.0 (!! cleanup): a bang on maxByOrNull CRASHED on an image list
+        // that parsed as empty — fail the frame instead of the whole pack.
+        val largest = images.maxByOrNull { it.w.toLong() * it.h } ?: return null
         if (largest.w.toLong() * largest.h > 80L * 1024 * 1024) {
             // 80 Mpx sanity cap — a corrupted header claiming a gigantic frame
             // would otherwise OOM the decode below.
@@ -3958,7 +3960,13 @@ object MpkgPacker {
             val durationMs = runCatching {
                 retriever.extractMetadata(
                     android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
-            }.getOrNull() ?: 0L
+            }
+                .onFailure {
+                    WepWawetLogger.appWarn("MpkgPacker: swallowed failure at line 3961",
+                        "exception" to it.javaClass.simpleName,
+                        "message" to (it.message ?: ""))
+                }
+            .getOrNull() ?: 0L
 
             val candidates = if (durationMs > 1200) {
                 listOf(1_000_000L, 500_000L, 0L)  // µs positions to try
@@ -3967,7 +3975,13 @@ object MpkgPacker {
             }
             var bitmap: Bitmap? = null
             for (timeUs in candidates) {
-                bitmap = runCatching { retriever.getFrameAtTime(timeUs) }.getOrNull()
+                bitmap = runCatching { retriever.getFrameAtTime(timeUs) }
+                    .onFailure {
+                        WepWawetLogger.appWarn("MpkgPacker: swallowed failure at line 3970",
+                            "exception" to it.javaClass.simpleName,
+                            "message" to (it.message ?: ""))
+                    }
+                .getOrNull()
                 if (bitmap != null) break
             }
             if (bitmap == null) {

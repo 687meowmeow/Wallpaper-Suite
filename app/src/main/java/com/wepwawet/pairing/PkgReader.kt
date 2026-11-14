@@ -212,7 +212,7 @@ object PkgReader {
                 "message" to (e.message ?: ""))
             return emptyList()
         } finally {
-            try { raf.close() } catch (_: Exception) {}
+            try { raf.close() } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
         }
     }
 
@@ -263,7 +263,7 @@ object PkgReader {
             WepWawetLogger.proxyError("$TAG.readVfsTable FAILED", "exception" to e.javaClass.name)
             return null
         } finally {
-            try { raf.close() } catch (_: Exception) {}
+            try { raf.close() } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
         }
     }
 

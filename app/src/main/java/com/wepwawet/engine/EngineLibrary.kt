@@ -371,7 +371,13 @@ object EngineLibrary {
                     // 1. The cached scene .pkg (set by "Cache .pkg files").
                     val cachedPkg = File(File(context.cacheDir, "pkg_cache"), "$itemId.pkg")
                     if (cachedPkg.exists()) {
-                        val ok = runCatching { cachedPkg.delete() }.getOrDefault(false)
+                        val ok = runCatching { cachedPkg.delete() }
+                            .onFailure {
+                                WepWawetLogger.appWarn("EngineLibrary: swallowed failure at line 374",
+                                    "exception" to it.javaClass.simpleName,
+                                    "message" to (it.message ?: ""))
+                            }
+                        .getOrDefault(false)
                         WepWawetLogger.engine("Library: deleted cached .pkg",
                             "file" to cachedPkg.name,
                             "ok" to ok)

@@ -61,6 +61,17 @@ object SuitePlaylistStore {
         var randomStyleValue: Int? = null,
         var randomR18Mode: Int? = null,
         var randomSources: List<String>? = null,
+        // ── v0.9.0: GROUP-BLOCK settings (only meaningful on block entries,
+        // marked "group://block/<group>" — see GroupBlocks). The block stays
+        // LINKED to the group: at rotation time the marker resolves to the
+        // group's CURRENT members, so wallpapers added to or removed from
+        // the group later appear or disappear in the playlist automatically.
+        /** The linked group's name. */
+        var groupRef: String? = null,
+        /** Block order: manual|newest|oldest|az|random. */
+        var blockOrder: String? = null,
+        /** Manual member order (paths, dragged in the block editor). */
+        var blockManualMembers: List<String>? = null,
     )
 
     /**
@@ -516,6 +527,39 @@ object SuitePlaylistStore {
             }
         }
         return null
+    }
+
+    /**
+     * v0.9.0 (battery): the next epoch-ms when a time-rule window boundary
+     * crosses — the earliest moment the rotation's active entry set can
+     * CHANGE, which is when the service's playlist tick must be awake.
+     * Null when the playlist has no real windows (nothing to wake for
+     * beyond the interval rotation itself). Full-day windows
+     * (start == end) never cross a boundary.
+     */
+    fun nextTimeRuleBoundaryMs(playlist: Playlist, now: Long): Long? {
+        var best: Long? = null
+        for (rule in playlist.timeRules) {
+            if (rule.startMinute == rule.endMinute) continue // full-day
+            for (minute in intArrayOf(rule.startMinute, rule.endMinute)) {
+                val at = nextMinuteOfDayOccurrenceMs(minute, now)
+                if (best == null || at < best) best = at
+            }
+        }
+        return best
+    }
+
+    /** The next local-time occurrence of a minute-of-day, just past the
+     *  boundary (250ms in, so a tick landing on it sees the NEW set). */
+    private fun nextMinuteOfDayOccurrenceMs(minuteOfDay: Int, now: Long): Long {
+        val cal = java.util.Calendar.getInstance()
+        cal.timeInMillis = now
+        cal.set(java.util.Calendar.HOUR_OF_DAY, minuteOfDay / 60)
+        cal.set(java.util.Calendar.MINUTE, minuteOfDay % 60)
+        cal.set(java.util.Calendar.SECOND, 0)
+        cal.set(java.util.Calendar.MILLISECOND, 250)
+        if (cal.timeInMillis <= now) cal.add(java.util.Calendar.DAY_OF_YEAR, 1)
+        return cal.timeInMillis
     }
 
     /** minute-of-day for "now" (local timezone). */

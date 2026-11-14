@@ -321,7 +321,13 @@ fun WorkshopBrowserScreen(
     LaunchedEffect(Unit) {
         val savedSortName = filterPrefs.getString("sort", null)
         savedSortName?.let { name ->
-            runCatching { SteamApiService.Sort.valueOf(name) }.getOrNull()?.let { loaded ->
+            runCatching { SteamApiService.Sort.valueOf(name) }
+                .onFailure {
+                    WepWawetLogger.appWarn("WorkshopBrowserScreen: swallowed failure at line 324",
+                        "exception" to it.javaClass.simpleName,
+                        "message" to (it.message ?: ""))
+                }
+            .getOrNull()?.let { loaded ->
                 if (loaded != sort) {
                     sort = loaded
                     WepWawetLogger.workshop(
@@ -335,7 +341,13 @@ fun WorkshopBrowserScreen(
 
         val savedTileName = filterPrefs.getString("tileSize", null)
         savedTileName?.let { name ->
-            runCatching { TileSize.valueOf(name) }.getOrNull()?.let { loaded ->
+            runCatching { TileSize.valueOf(name) }
+                .onFailure {
+                    WepWawetLogger.appWarn("WorkshopBrowserScreen: swallowed failure at line 338",
+                        "exception" to it.javaClass.simpleName,
+                        "message" to (it.message ?: ""))
+                }
+            .getOrNull()?.let { loaded ->
                 if (loaded != tileSize) {
                     tileSize = loaded
                     WepWawetLogger.workshop(

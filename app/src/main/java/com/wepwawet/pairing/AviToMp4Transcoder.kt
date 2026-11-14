@@ -390,8 +390,8 @@ object AviToMp4Transcoder {
                 "frames_processed" to frameIdx)
             ok = false
         } finally {
-            try { decoder.stop() } catch (_: Exception) {}
-            try { decoder.release() } catch (_: Exception) {}
+            try { decoder.stop() } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
+            try { decoder.release() } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
         }
 
         val finished = if (ok) encoder.finish() else false.also { encoder.release() }

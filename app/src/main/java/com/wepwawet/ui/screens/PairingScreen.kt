@@ -89,6 +89,11 @@ fun PairingScreen(
             "pin" to pin)
         if (PairingService.isPairingEnabled(context)) {
             runCatching { PairingService.start(context, pin) }
+                .onFailure {
+                    WepWawetLogger.appWarn("PairingScreen: service start failed",
+                        "exception" to it.javaClass.simpleName,
+                        "message" to (it.message ?: ""))
+                }
         } else {
             WepWawetLogger.lifecycle("PairingScreen appear — pairing disabled, service not started")
         }
@@ -189,6 +194,11 @@ fun PairingScreen(
                             // v0.8.1: restart only while the pairing toggle is ON.
                             if (PairingService.isPairingEnabled(context)) {
                                 runCatching { PairingService.start(context, pinToSave) }
+                .onFailure {
+                    WepWawetLogger.appWarn("PairingScreen: service start failed",
+                        "exception" to it.javaClass.simpleName,
+                        "message" to (it.message ?: ""))
+                }
                             }
                             showPinDialog = false
                         }) { Text("Save") }

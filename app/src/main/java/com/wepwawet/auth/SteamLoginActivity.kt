@@ -70,8 +70,8 @@ import com.wepwawet.log.WepWawetLogger
  *   - For production builds we should switch to EncryptedSharedPreferences
  *     (already in the dependency tree via androidx.security.crypto) — but plain
  *     MODE_PRIVATE is acceptable for the alpha per the task spec.
- *   - The extracted cookies are transferred into the Wine prefix only when
- *     Steam is launched; never persisted across a prefix reset.
+ *   - The extracted cookies are handed to the paired client only when a
+ *     session is actually launched; never persisted across a reset.
  */
 class SteamLoginActivity : ComponentActivity() {
 

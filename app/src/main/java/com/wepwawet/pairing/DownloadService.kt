@@ -229,7 +229,7 @@ class DownloadService : Service() {
     private fun stopSelfSafely() {
         try {
             stopForeground(STOP_FOREGROUND_REMOVE)
-        } catch (_: Exception) {}
+        } catch (e: Exception) { WepWawetLogger.appDebug("Cleanup: best-effort call failed", "exception" to e.javaClass.simpleName) }
         stopSelf()
     }
 

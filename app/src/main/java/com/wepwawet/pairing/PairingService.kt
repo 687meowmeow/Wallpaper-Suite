@@ -405,6 +405,14 @@ class PairingService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        // v0.9.0 (rules): the ALWAYS-ALIVE host — the trigger hub
+        // re-aggregates its registrations whenever the service (re)starts.
+        runCatching {
+            com.wepwawet.rules.RuleTriggerHub.start(this)
+        }.onFailure {
+            WepWawetLogger.appWarn("PairingService: rules hub start failed",
+                "exception" to it.javaClass.simpleName)
+        }
         createNotificationChannel()
         // v0.7.21: Register the notification-deleted receiver so we can
         // re-post the notification when the user swipes it away (Android 14+
