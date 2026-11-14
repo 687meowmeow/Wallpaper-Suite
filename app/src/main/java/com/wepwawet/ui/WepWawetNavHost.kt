@@ -50,6 +50,7 @@ import com.wepwawet.ui.screens.LibraryScreen
 import com.wepwawet.ui.screens.FavoritesScreen
 import com.wepwawet.ui.screens.LogsScreen
 import com.wepwawet.ui.screens.PlaylistsScreen
+import com.wepwawet.ui.screens.PlaylistActivityScreen
 import com.wepwawet.ui.screens.PlaylistEditorScreen
 import com.wepwawet.ui.screens.PairingScreen
 import com.wepwawet.ui.screens.SettingsScreen
@@ -356,7 +357,13 @@ fun WepWawetNavHost() {
             PlaylistEditorScreen(
                 playlistId = playlistId,
                 onBack = { nav.popBackStack() },
+                onOpenActivity = { nav.navigate("ruleActivity") },
             )
+        }
+
+        // v0.8.25: the playlist-system activity view (fired/skipped + why).
+        composable("ruleActivity") {
+            PlaylistActivityScreen(onBack = { nav.popBackStack() })
         }
 
         composable("workshop") {
@@ -453,6 +460,8 @@ fun WepWawetNavHost() {
                 // onResume, so server-side sorts kept HTML-scraping after
                 // saving until the app was backgrounded once).
                 onApiKeySaved = { key -> steamApi.apiKey = key },
+                // v0.8.25: the playlist activity view (fired/skipped + why).
+                onOpenActivity = { nav.navigate("ruleActivity") },
             )
         }
 

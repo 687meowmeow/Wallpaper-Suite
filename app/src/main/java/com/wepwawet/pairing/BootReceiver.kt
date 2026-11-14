@@ -72,7 +72,12 @@ class BootReceiver : BroadcastReceiver() {
 
         when (action) {
             Intent.ACTION_BOOT_COMPLETED,
-            Intent.ACTION_MY_PACKAGE_REPLACED -> {
+            Intent.ACTION_MY_PACKAGE_REPLACED,
+            // v0.8.25 (no drift): a clock or timezone change moves every
+            // RTC_WAKEUP alarm's meaning — re-arm the rules schedule the
+            // moment it happens instead of waiting for the self-heal.
+            Intent.ACTION_TIME_CHANGED,
+            Intent.ACTION_TIMEZONE_CHANGED -> {
                 startPairingService(context)
                 // v0.9.2: re-arm the RULES HUB + its AlarmManager wake —
                 // the alarm's PendingIntent survives reboot only as a

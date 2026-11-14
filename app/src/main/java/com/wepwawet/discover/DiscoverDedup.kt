@@ -54,8 +54,11 @@ object DiscoverDedup {
         val noQuery = url.substringBefore('?').substringBefore('#')
         val lower = noQuery.lowercase()
         // Pixiv (any proxy host): the illust id + page survives every size
-        // variant and every proxy.
-        if ("pixiv" in lower) {
+        // variant and every proxy. NOTE: the main image host is
+        // i.PXIMG.net — it contains "pximg", NOT "pixiv" (the unit test
+        // caught exactly this: pximg URLs fell through to the url:
+        // fallback and their variants didn't collapse).
+        if ("pixiv" in lower || "pximg" in lower) {
             PIXIV_NAME.find(noQuery)?.let { return "pixiv:${it.groupValues[1]}_p${it.groupValues[2]}" }
         }
         // A ?id=/<digit>/ post id (dapi JSON endpoints hand these out).

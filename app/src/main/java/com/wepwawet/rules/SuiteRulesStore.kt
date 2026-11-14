@@ -54,12 +54,22 @@ object SuiteRulesStore {
         return try {
             JSONObject(f.readText())
         } catch (e: Exception) {
-            // v0.9.0: a corrupt store is logged, never silently reset — the
-            // rules are user-built data; a WARN with the reason makes a
-            // hand-recoverable backup of the file possible.
-            WepWawetLogger.appWarn("SuiteRulesStore: read failed — starting fresh",
+            // v0.8.25 (audit): a read failure must NOT return an EMPTY root —
+            // the next write would then wipe every rule the user built. The
+            // unreadable file is quarantined (timestamped .corrupt backup)
+            // and the failure is LOUD.
+            val stamp = System.currentTimeMillis()
+            runCatching {
+                file(context).copyTo(File(context.filesDir, "suite_rules.json.corrupt-$stamp"),
+                    overwrite = true)
+            }
+            runCatching { file(context).delete() }
+            WepWawetLogger.appWarn("SuiteRulesStore: read failed — file quarantined",
                 "exception" to e.javaClass.name,
-                "message" to (e.message ?: ""))
+                "message" to (e.message ?: ""),
+                "backup" to "suite_rules.json.corrupt-$stamp")
+            RuleActivityLog.record(context, "error", "", "",
+                "Rules file unreadable — quarantined as suite_rules.json.corrupt-$stamp")
             JSONObject()
         }
     }

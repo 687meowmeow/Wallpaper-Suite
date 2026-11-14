@@ -255,7 +255,11 @@ object DiscoverSearch {
         // v1.0.0: r18=2 means "mixed" (the API returns either).
         val band = styleBand(styleValue)
         val useSlider = sliderTagGroup(styleValue) != null
-        val params = StringBuilder("?r18=$r18Mode&size=regular")
+        // v0.8.25 (Nyanpasu merge): ask for BOTH sizes — the newest
+        // Nyanpasu requests regular+original and its picker scores the
+        // variants (quality floor + original-preference) instead of
+        // blindly taking "regular".
+        val params = StringBuilder("?r18=$r18Mode&size=regular&size=original")
         val slots = expandTags(primaryTags).take(primarySlotBudget(useSlider))
         slots.forEach { params.append("&tag=${encode(it)}") }
         // Soft tags: 38% chance to attach one hint (v1.0.0's chance logic;
@@ -285,13 +289,18 @@ object DiscoverSearch {
                 if (excludeAi) append("&excludeAI=true")
                 if (aspect) append("&aspectRatio=lt1")
             }
-            val data = LOLICON_MIRRORS.firstNotNullOfOrNull { base ->
-                httpGetJson(base + query)?.optJSONArray("data")
+            // v0.8.25 (Nyanpasu merge): the mirrors try in health order.
+            // v0.8.25 (Nyanpasu merge): the mirror ladder is resilient to
+            // transient IO (one short backoff) before moving on.
+            val data = DiscoverSourceHealth.rank(LOLICON_MIRRORS).firstNotNullOfOrNull { base ->
+                httpGetJsonResilient(base + query)?.optJSONArray("data")
             } ?: continue
-            // v1.0.0: iterate and pick a non-recent result (NO quality
-            // filter — the later versions' chooseBest()/score() is
-            // deliberately absent). The niche soft-pick applies when the
-            // user's tags match a niche registry entry.
+            // v0.8.25 (Nyanpasu merge): the NEWEST Nyanpasu picker —
+            // quality-scored variants (SearchImageQuality's floor: no
+            // gif/webm/mp4/zip, min 600px short side, ideal ~4MP,
+            // phone-ratio retention, portrait preference) with the niche
+            // soft-pref layered on top, then a quality-window random pick
+            // (variety without a bad draw). Never a full rejection.
             val picked = pickLoliconEntry(data, primaryTags, tried) ?: continue
             if (picked != null) return picked
         }
@@ -313,31 +322,61 @@ object DiscoverSearch {
         intentTags: List<String>,
         tried: Set<String>,
     ): String? {
-        val intentBlob = (intentTags).joinToString("|").lowercase()
-        val spec = matchNiche(intentBlob) ?: return pickAnyLolicon(data, tried)
-        val entries = ArrayList<Pair<JSONObject, Int>>(data.length())
+        // v0.8.25 (Nyanpasu merge): the newest picker — each entry's
+        // regular AND original variants are QUALITY-SCORED
+        // (Nyanpasu's SearchImageQuality, ported below as
+        // scoreImageVariant), the best-scoring variant wins, the niche
+        // soft-pref filters, and the final pick is random among the
+        // quality window. Falls back to the old any-pick when no entry
+        // passes the floor (variety beats rejection).
+        val intentBlob = intentTags.joinToString("|").lowercase()
+        val spec = matchNiche(intentBlob)
+        data class Scored(val url: String, val niche: Int, val quality: Int)
+        val scored = ArrayList<Scored>(data.length())
         for (i in 0 until data.length()) {
             val entry = data.optJSONObject(i) ?: continue
             val urls = entry.optJSONObject("urls") ?: continue
-            val reg = urls.optString("regular", "")
-            if (reg.isEmpty() || reg in tried) continue
             val tagStr = entry.optJSONArray("tags")?.let { arr ->
                 List(arr.length()) { arr.optString(it) }.joinToString(" ")
             } ?: ""
-            entries.add(entry to nicheScore(tagStr, spec))
+            val w = entry.optInt("width", 0)
+            val h = entry.optInt("height", 0)
+            val ext = entry.optString("ext", "")
+            // Both variants, scored — original first (the unmetered pick).
+            val variants = listOf(
+                urls.optString("original", "") to true,
+                urls.optString("regular", "") to false,
+            )
+            var best: Pair<String, Int>? = null
+            for ((u, isOriginal) in variants) {
+                if (u.isEmpty() || u in tried) continue
+                val s = scoreImageVariant(u, w, h, ext, isOriginal) ?: continue
+                if (best == null || s > best!!.second) best = u to s
+            }
+            val url = best?.first ?: continue
+            val niche = spec?.let { nicheScore(tagStr, it) } ?: 0
+            scored.add(Scored(url, niche, best!!.second))
         }
-        if (entries.isEmpty()) return null
-        entries.filter { it.second >= 1 }.takeIf { it.isNotEmpty() }?.let {
-            return it[Random.nextInt(it.size)].first
-                .optJSONObject("urls")?.optString("regular", "")
-        }
-        entries.filter { it.second >= 0 }.takeIf { it.isNotEmpty() }?.let {
-            return it[Random.nextInt(it.size)].first
-                .optJSONObject("urls")?.optString("regular", "")
-        }
-        return entries[Random.nextInt(entries.size)].first
-            .optJSONObject("urls")?.optString("regular", "")
+        if (scored.isEmpty()) return pickAnyLolicon(data, tried)
+        // The niche ladder (>= 1 preferred, >= 0 soft) — never a rejection.
+        // (No matching niche spec ⇒ every niche score is 0 ⇒ the >= 0 pool
+        // is the whole list, same as the old behavior.)
+        val nichePool = scored.filter { it.niche >= 1 }.takeIf { it.isNotEmpty() }
+            ?: scored.filter { it.niche >= 0 }.takeIf { it.isNotEmpty() }
+            ?: scored
+        // The quality window (Nyanpasu): random among the top scorers.
+        val bestScore = nichePool.maxOf { it.quality + it.niche * 15 }
+        val window = nichePool.filter { it.quality + it.niche * 15 >= bestScore - 12 }
+        return window[Random.nextInt(window.size)].url
     }
+
+    private fun scoreImageVariant(
+        url: String,
+        width: Int,
+        height: Int,
+        ext: String,
+        isOriginal: Boolean,
+    ): Int? = DiscoverSearchScore.scoreImageVariant(url, width, height, ext, isOriginal)
 
     private fun pickAnyLolicon(data: JSONArray, tried: Set<String>): String? {
         val urls = ArrayList<String>(data.length())
@@ -777,6 +816,29 @@ object DiscoverSearch {
     private fun hostOf(url: String): String =
         url.substringAfter("//").substringBefore('/')
 
+    /**
+     * v0.8.25 (Nyanpasu merge — AppHttpClient.getStringResilient): ONE
+     * short-backoff retry for transient connection failures (DNS jitter,
+     * a dropped idle connection). Attempts: 0ms, 350ms. Non-429 failures
+     * still mark the host for the session-health windows.
+     *
+     * Non-suspend (a blocking 350ms sleep) — every caller already runs
+     * on Dispatchers.IO.
+     */
+    private fun httpGetJsonResilient(url: String): JSONObject? {
+        val r = httpGetJson(url)
+        if (r != null) return r
+        // Only retry when the host isn't already blocked/cooled — a hard
+        // failure window is not "transient".
+        if (DiscoverSourceHealth.isSearchBlocked(url) ||
+            DiscoverSourceHealth.isRateLimited(url)) return null
+        try { Thread.sleep(350L) } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return null
+        }
+        return httpGetJson(url)
+    }
+
     private fun httpGetJson(url: String): JSONObject? {
         if (DiscoverSourceHealth.isSearchBlocked(url)) return null
         // v0.9.2: the 429 cool-down is checked here (the Inner functions
@@ -883,8 +945,13 @@ object DiscoverSearch {
                 candidates += "https://$proxy$path"
             }
         }
+        // v0.8.25 (Nyanpasu merge — ImageUrlFallback.candidates): the
+        // candidate list is HEALTH-RANKED (DiscoverSourceHealth.rank) —
+        // the healthiest host tries first instead of the fixed proxy
+        // order hammering a dead mirror before the good ones.
+        val ranked = DiscoverSourceHealth.rank(candidates)
         var lastError: Exception? = null
-        for (candidate in candidates) {
+        for (candidate in ranked) {
             try {
                 // v0.9.2 (the review): a URL that already failed this
                 // session is never retried, and a host with 3 consecutive
@@ -912,6 +979,7 @@ object DiscoverSearch {
                 // candidate meant a dead proxy chain burned 60s before the
                 // ladder moved on; 8s call / 6s read fails fast and lets
                 // the caller continue to the next image.
+                val fetchStarted = System.currentTimeMillis()
                 client.newBuilder()
                     .callTimeout(8, TimeUnit.SECONDS)
                     .readTimeout(6, TimeUnit.SECONDS)
@@ -921,7 +989,10 @@ object DiscoverSearch {
                         if (resp.isSuccessful) {
                             val bytes = resp.body?.bytes()
                             if (bytes != null && bytes.size > 1024) {
-                                DiscoverSourceHealth.markUrlOk(candidate)
+                                // v0.8.25 (Nyanpasu merge): the observed
+                                // latency feeds the host's EWMA (rank uses it).
+                                DiscoverSourceHealth.markUrlOk(candidate,
+                                    System.currentTimeMillis() - fetchStarted)
                                 return@withContext bytes
                             }
                         }

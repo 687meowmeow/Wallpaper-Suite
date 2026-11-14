@@ -116,6 +116,10 @@ object RandomPullEngine {
             )
             val bytes = DiscoverSearch.downloadImage(url)
             DiscoverPrefs.pushRecentUrl(context, url)
+            // v0.8.25: a slot pull is a DEMAND signal too — the adaptive
+            // preloader scales with rotation pace (a playlist full of
+            // slots pulling on an interval IS the spam case).
+            com.wepwawet.discover.DiscoverPreload.onConsumed(context)
 
             // Write the new file FIRST, then delete the old (a failure
             // mid-way keeps the previous slot file working).

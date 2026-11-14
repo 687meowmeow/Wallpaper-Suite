@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
@@ -133,6 +134,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onOpenLogs: () -> Unit,
     onApiKeySaved: ((key: String?) -> Unit)? = null,
+    onOpenActivity: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -257,6 +259,14 @@ fun SettingsScreen(
                     }
                 },
                 actions = {
+                    // v0.8.25: the playlist activity view (fired/skipped + why).
+                    if (onOpenActivity != null) {
+                        com.wepwawet.ui.components.SlimTopBarIcon(
+                            onClick = onOpenActivity,
+                            contentDescription = "Playlist activity",
+                            icon = androidx.compose.material.icons.Icons.Filled.History,
+                        )
+                    }
                     com.wepwawet.ui.components.SlimTopBarIcon(
                         onClick = onOpenLogs,
                         contentDescription = "Logs",

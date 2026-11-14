@@ -651,6 +651,9 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
             "home_state" to homeState,
             "lock_state" to lockState,
             "dual" to DiscoverPrefs.isDualMode(homeState, lockState))
+        // v0.8.25: a manual refresh is a DEMAND signal — the adaptive
+        // preloader raises its target + concurrency with the tapping pace.
+        DiscoverPreload.onManualDemand(context)
         scope.launch {
             try {
                 fetchAndShow(

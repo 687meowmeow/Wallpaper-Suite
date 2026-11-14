@@ -88,13 +88,32 @@ object RuleEngine {
         WepWawetLogger.appInfo("$TAG: event received",
             "event" to type,
             "rule_sets" to all.size,
+            "active" to activeId.takeLast(6),
             "extra_keys" to extra.keys.joinToString(","))
         for (pr in all) {
+            // v0.8.25 (ONLY THE INTENDED PLAYLIST RUNS): a playlist's rules
+            // fire only while THAT playlist is the active one — rules edited
+            // on a non-active playlist never rotate the wallpaper from
+            // under the active playlist. Manual runs (▶, tile, notification
+            // button) bypass onEvent and are unaffected.
+            if (pr.playlistId != activeId) {
+                val hasEnabled = pr.rules.any { it.enabled }
+                if (hasEnabled) {
+                    WepWawetLogger.appDebug("$TAG: rule set skipped — playlist not active",
+                        "playlist" to pr.playlistId.takeLast(6),
+                        "rules" to pr.rules.size)
+                    RuleActivityLog.record(context, "skipped", pr.playlistId, "",
+                        "Rules of this playlist didn't run — it isn't the active playlist (event: $type)")
+                }
+                continue
+            }
             val firedThisPlaylist = StringBuilder()
             for (rule in pr.rules) {
                 if (!rule.enabled) {
                     WepWawetLogger.appDebug("$TAG: rule skipped — disabled",
                         "rule" to rule.name, "playlist" to pr.playlistId)
+                    RuleActivityLog.record(context, "skipped", pr.playlistId, rule.name,
+                        "Disabled (event: $type)")
                     continue
                 }
                 if (!triggerMatches(context, rule, type, extra, pr.playlistId)) {
@@ -109,6 +128,8 @@ object RuleEngine {
                 ) {
                     WepWawetLogger.appInfo("$TAG: rule in cooldown — skipped",
                         "rule" to rule.name, "cooldown_min" to rule.cooldownMinutes)
+                    RuleActivityLog.record(context, "skipped", pr.playlistId, rule.name,
+                        "In cooldown (${rule.cooldownMinutes} min) — event $type")
                     continue
                 }
                 // Gate.
@@ -116,6 +137,8 @@ object RuleEngine {
                 if (gate != null && !evalCond(context, pr.playlistId, gate, RunContext(pr.playlistId, manual = false))) {
                     WepWawetLogger.appInfo("$TAG: gate blocked the rule",
                         "rule" to rule.name)
+                    RuleActivityLog.record(context, "skipped", pr.playlistId, rule.name,
+                        "Conditions not met (event: $type)")
                     continue
                 }
                 val result = try {
@@ -173,6 +196,8 @@ object RuleEngine {
             "rule" to rule.name,
             "playlist" to playlistId,
             "manual" to manual)
+        RuleActivityLog.record(context, "fired", playlistId, rule.name,
+            if (manual) "Run by hand" else "Triggered")
         val flow = execBlocks(context, ctx, rule.actions, depth)
         val result = buildString {
             append(if (ctx.lastPickOk) "applied a wallpaper" else "ran ${rule.actions.size} block(s)")
@@ -182,6 +207,9 @@ object RuleEngine {
             ctx.value("last")?.let { append(" — ${it.substringAfterLast('/')}") }
         }
         SuiteRulesStore.recordFire(context, playlistId, rule, result)
+        RuleActivityLog.record(context,
+            if (ctx.lastPickOk) "applied" else "info",
+            playlistId, rule.name, result)
         // The hold option: a wallpaper this rule applied isn't replaced by
         // normal rotation until the hold passes.
         if (rule.holdMinutes > 0 && ctx.lastPickOk) {
@@ -280,8 +308,21 @@ object RuleEngine {
                 m >= cond.minuteStart && m < cond.minuteEnd
             else m >= cond.minuteStart || m < cond.minuteEnd
         }
-        RuleModel.COND_DAY_OF_WEEK ->
-            cond.dayOfWeek < 0 || Calendar.getInstance().get(Calendar.DAY_OF_WEEK) - 1 == cond.dayOfWeek
+        RuleModel.COND_DAY_OF_WEEK -> {
+            // v0.8.25 (THE MONDAY-TESTS-SUNDAY FIX): the editor's picker is
+            // Mon..Sun (0..6) — same convention as the day-of-week TRIGGER
+            // (fixed for the trigger in 0.9.2's audit) — but this condition
+            // compared against `Calendar.DAY_OF_WEEK - 1`, which is 0=SUNDAY.
+            // A "Monday" condition therefore evaluated on SUNDAYS. Map the
+            // user's Mon-first index to the explicit Calendar constant.
+            if (cond.dayOfWeek < 0) true
+            else intArrayOf(
+                Calendar.MONDAY, Calendar.TUESDAY, Calendar.WEDNESDAY,
+                Calendar.THURSDAY, Calendar.FRIDAY, Calendar.SATURDAY,
+                Calendar.SUNDAY,
+            )[cond.dayOfWeek.coerceIn(0, 6)] ==
+                Calendar.getInstance().get(Calendar.DAY_OF_WEEK)
+        }
         RuleModel.COND_CHARGING -> isCharging(context)
         RuleModel.COND_BATTERY_BELOW -> batteryLevel(context) <= cond.batteryLevel
         RuleModel.COND_BATTERY_ABOVE -> batteryLevel(context) >= cond.batteryLevel
@@ -775,13 +816,38 @@ object RuleEngine {
             }
             else -> emptyList()
         }.let { list ->
-            // Apply the pick MODE ordering.
+            // Apply the pick MODE ordering. v0.8.25: "newest" sorts by the
+            // real modification time (file date, or the document's
+            // last_modified for content URIs) — the old filename-string
+            // sort ordered "IMG_9999" over "IMG_10000".
             when (pick) {
                 "inOrder" -> list
-                "newest" -> list.sortedByDescending { it.substringAfterLast('/') }
+                "newest" -> list.sortedByDescending { mtimeOf(context, it) }
                 else -> list
             }
         }
+    }
+
+    /** Best-effort mtime: file date, document last_modified, else 0. */
+    private fun mtimeOf(context: Context, path: String): Long = try {
+        if (path.startsWith("content://")) {
+            context.contentResolver.query(android.net.Uri.parse(path), null, null, null, null)
+                ?.use { c ->
+                    if (!c.moveToFirst()) return@use 0L
+                    for (name in listOf("last_modified", "lastModified", "last_modified_time")) {
+                        val i = c.getColumnIndex(name)
+                        if (i >= 0 && !c.isNull(i)) {
+                            val v = c.getLong(i)
+                            return@use if (v > 10_000_000_000L) v else v * 1000L
+                        }
+                    }
+                    0L
+                } ?: 0L
+        } else {
+            java.io.File(path).takeIf { it.exists() }?.lastModified() ?: 0L
+        }
+    } catch (e: Exception) {
+        0L
     }
 
     /** Pick from [candidates] per the block's mode and apply. */
@@ -807,10 +873,12 @@ object RuleEngine {
             else -> "random"
         }
         val current = WEWallpaperService.instance?.currentWallpaperFile()
-        var picked = pickFrom(candidates, mode, current, context, ctx)
+        var picked = pickFrom(candidates, mode, current, context, ctx, b.id)
         when (resolvedTarget(context, target)) {
             "bothDifferent" -> {
-                val second = pickFrom(candidates.filter { it != picked }, mode, current, context, ctx)
+                // The lock-screen second pick is random — the cursor must
+                // advance once per rule run, not twice.
+                val second = pickFrom(candidates.filter { it != picked }, "random", current, context, ctx, b.id)
                 if (second != null && second != picked) {
                     applyImagePath(context, ctx, b, picked, "home")
                     applyImagePath(context, ctx, b, second, "lock")
@@ -854,11 +922,25 @@ object RuleEngine {
         current: String?,
         context: Context,
         ctx: RunContext,
+        blockId: String,
     ): String {
         val pool = candidates.filter { it != current }.ifEmpty { candidates }
         return when (mode) {
-            "inOrder" -> pool[0]
-            "newest" -> pool.first()
+            // v0.8.25 (THE IN-ORDER OSCILLATION FIX): a PERSISTED per-block
+            // cursor advances +1 with wrap over the ordered candidates —
+            // the old `pool[0]` (first non-current) meant every run picked
+            // the first entry after the current one, bouncing between the
+            // first two forever.
+            "inOrder", "newest" -> {
+                val key = "pickcursor|${ctx.playlistId}|$blockId"
+                val prefs = stepPrefs(context)
+                var idx = (prefs.getInt(key, -1) + 1).mod(candidates.size)
+                if (candidates[idx] == current && candidates.size > 1) {
+                    idx = (idx + 1).mod(candidates.size)
+                }
+                prefs.edit().putInt(key, idx).apply()
+                candidates[idx]
+            }
             "avoidRecent" -> {
                 val recent = readRecentPicks(context, ctx.playlistId)
                 pool.firstOrNull { it !in recent } ?: pool[Random.nextInt(pool.size)]
@@ -957,8 +1039,12 @@ object RuleEngine {
             ctx.values["last"] = path
             ctx.values["block:${b.id}"] = path
             rememberRecentPick(context, ctx.playlistId, path)
+            RuleActivityLog.record(context, "applied", ctx.playlistId, "",
+                "Wallpaper applied — ${path.substringAfterLast('/').take(48)} ($target)")
             // v0.9.0 (rules): the "the wallpaper changed" trigger — our own
-            // apply (the system broadcast covers manual changes).
+            // apply (the system broadcast covers manual changes). The hub
+            // suppresses the SYSTEM broadcast that follows our own apply.
+            RuleTriggerHub.noteSelfWallpaperApply()
             RuleEvents.post(context, RuleModel.TRIG_WALLPAPER_CHANGED)
         }
     }
@@ -1023,6 +1109,8 @@ object RuleEngine {
             WepWawetLogger.appInfo("$TAG: playlist step skipped — $reason",
                 "step" to stepName,
                 "playlist" to ctx.playlistId)
+            RuleActivityLog.record(context, "skipped", ctx.playlistId, "",
+                "$stepName wallpaper skipped — $reason")
         }
         val svc = WEWallpaperService.instance
         if (svc == null) { skip("wallpaper service not running"); return }

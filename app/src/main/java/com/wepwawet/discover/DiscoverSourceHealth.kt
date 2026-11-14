@@ -24,6 +24,16 @@ import com.wepwawet.log.WepWawetLogger
  *    Retry-After (or [DEFAULT_RETRY_AFTER_MS]); it is not queried again
  *    until the window passes. (The log: api.lolicon.app answered 429
  *    twice in a row — hammering it only extends the block.)
+ *
+ * v0.8.25 (Nyanpasu merge — EndpointHealthTracker): hosts now also carry
+ * a LATENCY EWMA and a RELIABILITY EWMA, and [rank] orders candidate URLs
+ * by health (reliability − latency − failures; unknown hosts keep their
+ * incoming order) — the newest Nyanpasu ranks its mirror/proxy candidates
+ * this way instead of always trying them in a fixed order. A fully
+ * blocked candidate set gets ONE half-open probe (the least-recently
+ * blocked host) instead of hammering every route. Our blocks stay
+ * wall-clock windows (not their exponential backoff) — the goal here is
+ * skipping known-dead hosts this session, not punishing them.
  */
 object DiscoverSourceHealth {
 
@@ -42,6 +52,10 @@ object DiscoverSourceHealth {
     private val hostCoolingUntil = HashMap<String, Long>()
     /** The search side's older behavior: any failure skips the host 10 min. */
     private val searchFailureUntil = HashMap<String, Long>()
+    /** v0.8.25 (Nyanpasu merge): per-host latency EWMA (ms) + reliability EWMA. */
+    private val hostLatencyEwma = HashMap<String, Double>()
+    private val hostReliabilityEwma = HashMap<String, Double>()
+    private val hostSamples = HashMap<String, Int>()
 
     fun hostOf(url: String): String =
         url.substringAfter("//").substringBefore('/')
@@ -62,12 +76,31 @@ object DiscoverSourceHealth {
         markHostOk(url)
     }
 
+    /** Tests reset the session state. */
+    fun resetForTests() {
+        failedUrls.clear()
+        hostFailureCounts.clear()
+        hostBlockedUntil.clear()
+        hostCoolingUntil.clear()
+        searchFailureUntil.clear()
+        hostLatencyEwma.clear()
+        hostReliabilityEwma.clear()
+        hostSamples.clear()
+    }
+
+    /** v0.8.25 (Nyanpasu merge): a success with its observed latency. */
+    fun markUrlOk(url: String, elapsedMs: Long) {
+        failedUrls.remove(url)
+        markHostOk(url, elapsedMs)
+    }
+
     // ── Host health ─────────────────────────────────────────────────────
 
     fun markHostFailed(url: String) {
         val host = hostOf(url)
         val n = (hostFailureCounts[host] ?: 0) + 1
         hostFailureCounts[host] = n
+        noteSample(host, success = false, elapsedMs = 0)
         if (n >= BLOCK_AFTER) {
             hostBlockedUntil[host] = System.currentTimeMillis() + BLOCK_WINDOW_MS
             WepWawetLogger.appWarn("$TAG: host blocked for this window",
@@ -78,9 +111,61 @@ object DiscoverSourceHealth {
     }
 
     fun markHostOk(url: String) {
+        markHostOk(url, elapsedMs = 0)
+    }
+
+    /** v0.8.25 (Nyanpasu merge): a success with its latency feeds the EWMA. */
+    fun markHostOk(url: String, elapsedMs: Long) {
         val host = hostOf(url)
         hostFailureCounts.remove(host)
         hostBlockedUntil.remove(host)
+        noteSample(host, success = true, elapsedMs = elapsedMs)
+    }
+
+    private fun noteSample(host: String, success: Boolean, elapsedMs: Long) {
+        val samples = hostSamples[host] ?: 0
+        hostReliabilityEwma[host] =
+            if (samples == 0) (if (success) 1.0 else 0.0)
+            else (hostReliabilityEwma[host] ?: 0.5) * 0.72 + (if (success) 1.0 else 0.0) * 0.28
+        if (elapsedMs > 0) {
+            hostLatencyEwma[host] =
+                if (samples == 0 || hostLatencyEwma[host] == null) elapsedMs.toDouble()
+                else (hostLatencyEwma[host] ?: 0.0) * 0.7 + elapsedMs * 0.3
+        }
+        hostSamples[host] = samples + 1
+    }
+
+    /**
+     * v0.8.25 (Nyanpasu merge — EndpointHealthTracker.rank): order
+     * candidate URLs by health. Blocked hosts drop out while ANY healthy
+     * candidate remains; when every candidate is blocked, the
+     * least-recently-blocked host gets ONE half-open probe instead of the
+     * whole list being hammered.
+     */
+    @Synchronized
+    fun rank(urls: List<String>): List<String> {
+        if (urls.size <= 1) return urls
+        val now = System.currentTimeMillis()
+        val distinct = urls.distinct()
+        val indexed = distinct.withIndex().toList()
+        val healthy = indexed.filter {
+            val until = hostBlockedUntil[hostOf(it.value)] ?: 0L
+            until <= now
+        }
+        val pool = if (healthy.isNotEmpty()) healthy else {
+            // All blocked: one half-open probe (the soonest-to-unblock host).
+            listOfNotNull(indexed.minByOrNull {
+                hostBlockedUntil[hostOf(it.value)] ?: Long.MAX_VALUE
+            })
+        }
+        return pool.sortedWith(
+            compareByDescending<IndexedValue<String>> {
+                val host = hostOf(it.value)
+                (hostReliabilityEwma[host] ?: 0.5) * 100.0 -
+                    (hostLatencyEwma[host] ?: 0.0) / 250.0 -
+                    (hostFailureCounts[host] ?: 0) * 15.0
+            }.thenBy { it.index }
+        ).map { it.value }
     }
 
     fun isHostBlocked(url: String): Boolean =

@@ -72,7 +72,9 @@ object GroupBlocks {
      */
     fun newBlockEntry(
         group: String,
-        order: String = ORDER_MANUAL,
+        // v0.8.25 (review): the default block order is RANDOM — order is
+        // chosen when the user taps the group; manual is an explicit pick.
+        order: String = ORDER_RANDOM,
         manual: List<String> = emptyList(),
     ): SuitePlaylistStore.Entry = SuitePlaylistStore.Entry(
         filepath = marker(group),
@@ -179,7 +181,7 @@ object GroupBlocks {
         var ordered = orderMembers(context, entry, members)
         WepWawetLogger.engineDebug("GroupBlocks: block resolved",
             "group" to group,
-            "order" to (entry.blockOrder ?: ORDER_MANUAL),
+            "order" to (entry.blockOrder ?: ORDER_RANDOM),
             "members" to ordered.size)
         return ResolvedBlock(group, ordered)
     }
@@ -191,7 +193,9 @@ object GroupBlocks {
         members: LinkedHashMap<String, String>,
     ): List<Pair<String, String>> {
         val list = members.entries.map { it.key to it.value }
-        return when (entry.blockOrder ?: ORDER_MANUAL) {
+        // v0.8.25 (review): a block with no stored order resolves RANDOM
+        // (the new default), not manual.
+        return when (entry.blockOrder ?: ORDER_RANDOM) {
             ORDER_MANUAL -> {
                 // The stored manual order first (unknowns dropped), then
                 // any members added since, appended A→Z so a live-synced

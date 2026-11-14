@@ -30,6 +30,7 @@ import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Casino
@@ -43,6 +44,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -128,6 +130,7 @@ import kotlinx.coroutines.withContext
 fun PlaylistEditorScreen(
     playlistId: String,
     onBack: () -> Unit,
+    onOpenActivity: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
@@ -269,6 +272,13 @@ fun PlaylistEditorScreen(
                     }
                 },
                 actions = {
+                    // v0.8.25: the activity view — what fired, what was
+                    // skipped and why, live from the journal.
+                    com.wepwawet.ui.components.SlimTopBarIcon(
+                        onClick = onOpenActivity,
+                        contentDescription = "Activity",
+                        icon = Icons.Filled.History,
+                    )
                     if (!isActive) {
                         TextButton(onClick = {
                             // v0.9.2 (all controls live + logged): the store
@@ -290,33 +300,12 @@ fun PlaylistEditorScreen(
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            // ── Play order (compact, right under the top bar) ──
-            SingleChoiceSegmentedButtonRow(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-            ) {
-                SegmentedButton(
-                    selected = current.orderMode == SuitePlaylistStore.ORDER_RANDOM,
-                    onClick = {
-                        // v0.9.2: order mode is now READ by stepPlaylist —
-                        // logged so a device log shows the change.
-                        WepWawetLogger.appInfo("PlaylistEditor: order mode → random",
-                            "playlist" to current.id)
-                        save { orderMode = SuitePlaylistStore.ORDER_RANDOM }
-                    },
-                    shape = SegmentedButtonDefaults.itemShape(0, 2),
-                ) { Text("Random") }
-                SegmentedButton(
-                    selected = current.orderMode == SuitePlaylistStore.ORDER_ORDERED,
-                    onClick = {
-                        WepWawetLogger.appInfo("PlaylistEditor: order mode → in order",
-                            "playlist" to current.id)
-                        save { orderMode = SuitePlaylistStore.ORDER_ORDERED }
-                    },
-                    shape = SegmentedButtonDefaults.itemShape(1, 2),
-                ) { Text("In order") }
-            }
+            // v0.8.25 (review): the Random / In order toggle is GONE —
+            // order is set where it belongs: the default is Random; a
+            // group's own order is set by tapping the group; plain entries
+            // follow their list order (the drag) when a playlist was saved
+            // as ordered. New playlists default to Random
+            // (SuitePlaylistStore.Playlist.orderMode).
 
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
@@ -381,31 +370,33 @@ fun PlaylistEditorScreen(
                             onDragStart = { draggingPath = entry.filepath },
                             onDragEnd = { draggingPath = null },
                             onMoveTo = { target -> moveEntry(entry.filepath, target) },
+                            // The ⋮ menu (per row) — anchored INSIDE the row.
+                            menu = if (rowMenuFor == entry.filepath) {
+                                {
+                                    PlaylistRowMenu(
+                                        entry = entry,
+                                        onDismiss = { rowMenuFor = null },
+                                        onEdit = {
+                                            rowMenuFor = null
+                                            when {
+                                                RandomPullEngine.isSlot(entry.filepath) ->
+                                                    editingSlotMarker = entry.filepath
+                                                GroupBlocks.isGroupBlock(entry.filepath) ->
+                                                    editingBlockMarker = entry.filepath
+                                            }
+                                        },
+                                        onTrim = { rowMenuFor = null; trimTarget = entry },
+                                        onRemove = {
+                                            rowMenuFor = null
+                                            save {
+                                                val i = entries.indexOfFirst { it.filepath == entry.filepath }
+                                                if (i >= 0) entries.removeAt(i)
+                                            }
+                                        },
+                                    )
+                                }
+                            } else null,
                         )
-                        // The ⋮ menu (per row).
-                        if (rowMenuFor == entry.filepath) {
-                            PlaylistRowMenu(
-                                entry = entry,
-                                onDismiss = { rowMenuFor = null },
-                                onEdit = {
-                                    rowMenuFor = null
-                                    when {
-                                        RandomPullEngine.isSlot(entry.filepath) ->
-                                            editingSlotMarker = entry.filepath
-                                        GroupBlocks.isGroupBlock(entry.filepath) ->
-                                            editingBlockMarker = entry.filepath
-                                    }
-                                },
-                                onTrim = { rowMenuFor = null; trimTarget = entry },
-                                onRemove = {
-                                    rowMenuFor = null
-                                    save {
-                                        val i = entries.indexOfFirst { it.filepath == entry.filepath }
-                                        if (i >= 0) entries.removeAt(i)
-                                    }
-                                },
-                            )
-                        }
                     }
                 }
 
@@ -1075,6 +1066,10 @@ private fun PlaylistEntryRow(
     onDragStart: () -> Unit,
     onDragEnd: () -> Unit,
     onMoveTo: (Int) -> Unit,
+    /** v0.8.25 (anchored dropdowns): the ⋮ menu renders INSIDE the row's
+     *  trailing Box — anchored to the button that opened it, not to the
+     *  list item's top-start corner. */
+    menu: (@Composable () -> Unit)? = null,
 ) {
     val isRandom = RandomPullEngine.isSlot(entry.filepath)
     val isBlock = GroupBlocks.isGroupBlock(entry.filepath)
@@ -1179,7 +1174,7 @@ private fun PlaylistEntryRow(
                 else if (isBlock) {
                     val n = entry.blockManualMembers?.size
                     "Whole group · " + GroupBlocks.orderLabel(
-                        entry.blockOrder ?: GroupBlocks.ORDER_MANUAL) +
+                        entry.blockOrder ?: GroupBlocks.ORDER_RANDOM) +
                         (n?.let { " · $it members" } ?: "")
                 } else entry.type.ifEmpty { "wallpaper" },
                 style = MaterialTheme.typography.labelSmall,
@@ -1196,8 +1191,16 @@ private fun PlaylistEntryRow(
             )
             Spacer(Modifier.width(4.dp))
         }
-        IconButton(onClick = onOpenMenu) {
-            Icon(Icons.Filled.MoreVert, contentDescription = "More")
+        // v0.8.25 (anchored dropdowns): the ⋮ menu is hosted INSIDE this
+        // Box — a DropdownMenu anchors to its parent layout node, so the
+        // menu opens directly under the ⋮ button that triggered it
+        // (rendered as a list-item sibling it opened at the item's
+        // top-start corner instead).
+        Box {
+            IconButton(onClick = onOpenMenu) {
+                Icon(Icons.Filled.MoreVert, contentDescription = "More")
+            }
+            menu?.invoke()
         }
     }
 }
@@ -1645,9 +1648,12 @@ private fun TagChipField(
 }
 
 /**
- * The group-block editor: order chips (manual / newest / oldest / A-Z /
- * random) + the manual member order DRAGGED with the same handle approach
- * as the main list (v0.9.0 redesign: the up/down arrows are gone).
+ * v0.8.25 (THE GROUP-MENU REDESIGN): the group-block ordering editor is a
+ * NEAR-FULL-SCREEN dialog — a big preview row per member (thumbnail,
+ * title, drag handle), the order chips (default Random), and a
+ * drag-to-reorder manual list whose rows follow the finger (live
+ * reordering + a raised, highlighted dragged row, the same measured-travel
+ * crossing math the main playlist list uses).
  */
 @Composable
 private fun BlockEditorDialog(
@@ -1656,8 +1662,9 @@ private fun BlockEditorDialog(
     onSave: (order: String, manual: List<String>) -> Unit,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    // v0.8.25 (review): the default order is RANDOM.
     var order by remember(block.filepath) {
-        mutableStateOf(block.blockOrder ?: GroupBlocks.ORDER_MANUAL)
+        mutableStateOf(block.blockOrder ?: GroupBlocks.ORDER_RANDOM)
     }
     var members by remember(block.filepath) { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     var loaded by remember(block.filepath) { mutableStateOf(false) }
@@ -1676,7 +1683,6 @@ private fun BlockEditorDialog(
         loaded = true
     }
     val density = androidx.compose.ui.platform.LocalDensity.current
-    val rowH = with(density) { 44.dp.toPx() }
     var draggingIdx by remember { mutableStateOf(-1) }
 
     fun moveManual(from: Int, to: Int) {
@@ -1687,20 +1693,50 @@ private fun BlockEditorDialog(
         manual = list
     }
 
-    AlertDialog(
+    androidx.compose.ui.window.Dialog(
         onDismissRequest = onDismiss,
-        title = { Text("Group: ${block.groupRef ?: "?"}") },
-        text = {
-            Column {
-                Text(
-                    "The block stays linked to this group — members added or " +
-                        "removed later follow automatically. This sets the order.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false,
+        ),
+    ) {
+        Surface(
+            shape = RoundedCornerShape(22.dp),
+            color = MaterialTheme.colorScheme.surface,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(8.dp),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 18.dp, vertical = 14.dp),
+            ) {
+                // ── Header ──
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Group: ${block.groupRef ?: "?"}",
+                            style = MaterialTheme.typography.titleLarge,
+                        )
+                        Text(
+                            "The block stays linked to this group — members added or " +
+                                "removed later follow automatically. This sets the order.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Filled.Close, contentDescription = "Close")
+                    }
+                }
                 Spacer(Modifier.height(12.dp))
+
+                // ── Order chips ──
                 Text("Order", style = MaterialTheme.typography.labelMedium)
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(6.dp))
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -1713,92 +1749,138 @@ private fun BlockEditorDialog(
                         )
                     }
                 }
+                Spacer(Modifier.height(12.dp))
+
+                // ── The member list ──
                 if (order == GroupBlocks.ORDER_MANUAL) {
-                    Spacer(Modifier.height(12.dp))
                     Text(
                         "Manual order (${members.size}) — long-press a row and drag",
                         style = MaterialTheme.typography.labelMedium,
                     )
-                    Spacer(Modifier.height(4.dp))
-                    if (!loaded) {
-                        androidx.compose.material3.LinearProgressIndicator(
-                            modifier = Modifier.fillMaxWidth())
-                    } else {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 280.dp)
-                                .verticalScroll(rememberScrollState()),
-                        ) {
-                            if (members.isEmpty()) {
-                                Text(
-                                    "This group is empty — add wallpapers to it in " +
-                                        "the library first.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                            for ((mi, m) in members.withIndex()) {
-                                val path = manual.getOrNull(mi) ?: m.first
-                                val liveMi by androidx.compose.runtime.rememberUpdatedState(mi)
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(
-                                            if (draggingIdx == mi)
-                                                MaterialTheme.colorScheme.surfaceVariant
-                                            else androidx.compose.ui.graphics.Color.Transparent
-                                        )
-                                        .pointerInput(path) {
+                    Spacer(Modifier.height(8.dp))
+                } else {
+                    Text(
+                        "Preview (${members.size}) — drag order applies in Manual mode",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+                if (!loaded) {
+                    androidx.compose.material3.LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth())
+                } else if (members.isEmpty()) {
+                    Text(
+                        "This group is empty — add wallpapers to it in " +
+                            "the library first.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    // The manual list, live-reordering under the drag.
+                    val interactive = order == GroupBlocks.ORDER_MANUAL
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        items(manual.size, key = { manual[it] }) { mi ->
+                            val path = manual[mi]
+                            val title = members.firstOrNull { it.first == path }?.second
+                                ?: path.substringAfterLast('/')
+                            val liveMi by androidx.compose.runtime.rememberUpdatedState(mi)
+                            var measuredRowH by remember(path) { mutableStateOf(0f) }
+                            val rowH = if (measuredRowH > 0f) measuredRowH
+                            else with(density) { 72.dp.toPx() }
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (draggingIdx == mi)
+                                    MaterialTheme.colorScheme.primaryContainer
+                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                shadowElevation = if (draggingIdx == mi) 6.dp else 0.dp,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .onSizeChanged { size ->
+                                        measuredRowH = size.height.toFloat() +
+                                            with(density) { 6.dp.toPx() }
+                                    }
+                                    .then(
+                                        if (interactive) Modifier.pointerInput(path) {
                                             var totalDragPx = 0f
                                             detectDragGesturesAfterLongPress(
                                                 onDragStart = {
                                                     totalDragPx = 0f
-                                                    draggingIdx = mi
+                                                    draggingIdx = liveMi
                                                 },
                                                 onDrag = { change, dragAmount ->
                                                     change.consume()
                                                     totalDragPx += dragAmount.y
-                                                    val target =
-                                                        liveMi + (totalDragPx / rowH).toInt()
+                                                    val target = liveMi +
+                                                        (totalDragPx / rowH).toInt()
+                                                    // Live reorder — the
+                                                    // displayed rows follow
+                                                    // the drag.
                                                     moveManual(liveMi, target)
                                                 },
                                                 onDragEnd = { draggingIdx = -1 },
                                                 onDragCancel = { draggingIdx = -1 },
                                             )
-                                        }
-                                        .padding(vertical = 4.dp),
+                                        } else Modifier
+                                    ),
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 10.dp, vertical = 8.dp),
                                 ) {
+                                    PlaylistPickThumb(
+                                        filepath = path,
+                                        isContentUri = !path.startsWith("/"),
+                                        size = 56.dp,
+                                    )
+                                    Spacer(Modifier.width(12.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            title.ifEmpty { path.substringAfterLast('/') },
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        Text(
+                                            path.substringAfterLast('/').take(40),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
                                     Icon(
                                         Icons.Filled.DragHandle,
-                                        contentDescription = null,
+                                        contentDescription = "Drag to reorder",
                                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(18.dp),
-                                    )
-                                    Spacer(Modifier.width(6.dp))
-                                    Text(
-                                        m.second.ifEmpty { path.substringAfterLast('/') },
-                                        style = MaterialTheme.typography.bodySmall,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f),
+                                        modifier = Modifier.size(22.dp),
                                     )
                                 }
                             }
                         }
                     }
                 }
+
+                Spacer(Modifier.height(10.dp))
+                // ── Footer ──
+                Row(
+                    horizontalArrangement = Arrangement.End,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                    Spacer(Modifier.width(8.dp))
+                    Button(onClick = { onSave(order, manual) }) { Text("Save") }
+                }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = { onSave(order, manual) }) { Text("Save") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        },
-    )
+        }
+    }
 }
 
 // ═════════════════════════ Shared pieces ══════════════════════════════════

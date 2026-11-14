@@ -48,7 +48,8 @@ object RuleTriggerHub {
      *  was removed in API 34, the broadcast itself still fires. */
     private const val ACTION_WALLPAPER_CHANGED =
         "android.service.wallpaper.WALLPAPER_CHANGED"
-    private const val MAX_WAKE_MS = 30 * 60_000L
+    /** v0.8.25: the self-heal re-check cap (pure bound — never gates a fire). */
+    private const val MAX_WAKE_MS = 45 * 60_000L
 
     private val handler = Handler(Looper.getMainLooper())
     private var started = false
@@ -68,12 +69,23 @@ object RuleTriggerHub {
                         as? android.os.PowerManager)?.isPowerSaveMode == true
                     dispatch(ctx, if (on) RuleModel.TRIG_SAVER_ON else RuleModel.TRIG_SAVER_OFF)
                 }
-                // The system wallpaper changed (also fires for OUR applies —
-                // the engine posts a deduplicated internal event too).
-                // The SDK constant was removed in API 34+; the action still
-                // reaches dynamic receivers by its literal string.
-                ACTION_WALLPAPER_CHANGED ->
-                    dispatch(ctx, RuleModel.TRIG_WALLPAPER_CHANGED)
+                // The system wallpaper changed. The SDK constant was
+                // removed in API 34+; the action still reaches dynamic
+                // receivers by its literal string. OUR OWN applies also
+                // touch the system wallpaper sometimes (the live service
+                // re-binds) — the engine posts its OWN internal event for
+                // those, so the system broadcast right after an internal
+                // post is dropped (v0.8.25: the double-fire made a
+                // wallpaper-changed rule run twice per apply).
+                ACTION_WALLPAPER_CHANGED -> {
+                    val sinceSelf = System.currentTimeMillis() - lastSelfWallpaperApplyAt
+                    if (sinceSelf < 1500L) {
+                        WepWawetLogger.appDebug("$TAG: system wallpaper-changed " +
+                            "dropped — our own apply ($sinceSelf ms ago)")
+                    } else {
+                        dispatch(ctx, RuleModel.TRIG_WALLPAPER_CHANGED)
+                    }
+                }
                 Intent.ACTION_BATTERY_CHANGED -> {
                     val level = intent.getIntExtra("level", -1)
                     val scale = intent.getIntExtra("scale", 100)
@@ -95,6 +107,15 @@ object RuleTriggerHub {
     @Volatile
     private var lastBatteryPct = -1
 
+    /** v0.8.25: when OUR engine last applied a wallpaper (self-apply dedup). */
+    @Volatile
+    private var lastSelfWallpaperApplyAt = 0L
+
+    /** The engine calls this on every apply — its own internal event follows. */
+    fun noteSelfWallpaperApply() {
+        lastSelfWallpaperApplyAt = System.currentTimeMillis()
+    }
+
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var audioDeviceCallback: android.media.AudioDeviceCallback? = null
     private var orientationListener: android.hardware.display.DisplayManager.DisplayListener? =
@@ -114,11 +135,17 @@ object RuleTriggerHub {
             lastBatteryPct = RuleEngine.batteryLevel(context)
             lastOrientation = context.resources.configuration.orientation
             WepWawetLogger.appInfo("$TAG: hub started", "types" to types.size)
+            RuleActivityLog.record(context, "info", "", "",
+                "Trigger hub started (${types.size} trigger types in use)")
         }
+        // v0.8.25 (audit): the wake is re-armed on EVERY start — a rule edit
+        // that only changes a VALUE (15 min → 1 hour) keeps the same trigger
+        // TYPE SET, and the old early-return left the alarm aimed at the old
+        // schedule until the self-heal tick noticed, up to 45 minutes late.
+        scheduleNextWake()
         if (types == registeredTypes) return
         // Re-aggregate: unregister everything, register only what's used.
         reaggregate(context, types)
-        scheduleNextWake()
     }
 
     private fun reaggregate(context: Context, types: Set<String>) {
@@ -336,11 +363,18 @@ object RuleTriggerHub {
         } catch (e: Exception) {
             return null
         }
+        // v0.8.25 (audit): only the ACTIVE playlist's rules are scheduled —
+        // the engine's dispatch runs active-playlist rules only, so arming
+        // wakes for an inactive playlist's triggers is pure battery cost.
+        val activeId = try {
+            com.wepwawet.playlist.SuitePlaylistStore.activePlaylistId(context)
+        } catch (e: Exception) { "" }
         for (pr in used) {
+            if (pr.playlistId != activeId) continue
             for (rule in pr.rules) {
                 if (!rule.enabled) continue
                 for (t in rule.triggers) {
-                    val at = nextActivationOf(t, now) ?: continue
+                    val at = nextActivationOf(context, pr.playlistId, t, now) ?: continue
                     if (best == null || at < best) best = at
                 }
             }
@@ -348,7 +382,26 @@ object RuleTriggerHub {
         return best
     }
 
-    private fun nextActivationOf(t: Trigger, now: Long): Long? = when (t.type) {
+    /**
+     * The next activation moment of ONE trigger.
+     *
+     * v0.8.25 (THE INTERVAL-NEVER-FIRES FIX): INTERVAL now schedules from
+     * the trigger's own PERSISTED anchor — `anchor + N`, normalized forward
+     * to the latest passed boundary — instead of `now + N`. Combined with
+     * the old in-memory lastWake that advanced on every self-heal wake, the
+     * `now + N` form pushed every interval LONGER than the 30-minute
+     * self-heal cap permanently out of reach: each no-op wake moved the
+     * target a full interval ahead while the cap kept the alarm at 30
+     * minutes, so the gate never opened. Anchored scheduling also removes
+     * drift: a late alarm (Doze slack) fires, the anchor advances by whole
+     * intervals, and the schedule stays locked to the user's grid.
+     */
+    private fun nextActivationOf(
+        context: Context,
+        playlistId: String,
+        t: Trigger,
+        now: Long,
+    ): Long? = when (t.type) {
         RuleModel.TRIG_TIME_WINDOW -> {
             if (t.minuteStart == t.minuteEnd) null
             else nextMinuteOfDay(t.minuteStart, now)
@@ -356,8 +409,23 @@ object RuleTriggerHub {
         RuleModel.TRIG_TIME_OF_DAY -> nextMinuteOfDay(t.timeMinute, now)
         RuleModel.TRIG_DAY_OF_WEEK -> nextDayOfWeek(t.dayOfWeek, now)
         RuleModel.TRIG_DATE -> nextDate(t.dateEpochDay, now)
-        RuleModel.TRIG_INTERVAL -> now + t.intervalMinutes.coerceAtLeast(1) * 60_000L
+        RuleModel.TRIG_INTERVAL -> intervalNextFire(
+            context, "interval|$playlistId|${canon(t)}",
+            t.intervalMinutes.coerceAtLeast(1) * 60_000L, now)
         else -> null
+    }
+
+    /**
+     * The next interval boundary at or after [now], anchored to the
+     * persisted last-fire (normalized forward — whole missed boundaries
+     * collapse, so time offline never stacks catch-up fires and never
+     * shifts the grid). A never-fired interval starts counting NOW.
+     */
+    private fun intervalNextFire(context: Context, key: String, intervalMs: Long, now: Long): Long {
+        var anchor = lastIntervalFire(context, key)
+        if (anchor <= 0L) return now + intervalMs
+        while (anchor + intervalMs <= now) anchor += intervalMs
+        return anchor + intervalMs
     }
 
     private fun nextMinuteOfDay(minute: Int, now: Long): Long {
@@ -421,6 +489,11 @@ object RuleTriggerHub {
             val next = withContext(kotlinx.coroutines.Dispatchers.IO) {
                 nextTimeActivation(ctx, now)
             }
+            // v0.8.25 (audit): the cap is a pure SELF-HEAL bound — a
+            // no-op re-check every ≤45 minutes (DST, manual clock, rule
+            // edits while armed). The FIRE decision is anchor-driven (see
+            // fireDueTimeTriggers), so capping the alarm early can never
+            // gate a trigger the way it did for long intervals before.
             val delay = ((next ?: (now + MAX_WAKE_MS)) - now)
                 .coerceIn(1_000L, MAX_WAKE_MS)
             // v0.9.2 (THE WAKE-CAN'T-BE-TRUSTED FIX): AlarmManager instead
@@ -474,6 +547,7 @@ object RuleTriggerHub {
 
     /** The alarm fired (RuleAlarmReceiver) — run due triggers + re-arm. */
     suspend fun onAlarmWake(ctx: Context) {
+        RuleActivityLog.record(ctx, "info", "", "", "Wake alarm fired")
         fireDueTimeTriggers()
         scheduleNextWake()
     }
@@ -490,27 +564,57 @@ object RuleTriggerHub {
                 SuiteRulesStore.readAll(ctx)
             }
             val now = System.currentTimeMillis()
-            val lastWake = lastWakeAt
-            lastWakeAt = now
+            // v0.8.25 (THE LOST-TIMING FIX): lastWake is PERSISTED. The old
+            // in-memory stamp reset on every process death, so an alarm that
+            // fired right after a cold start (the common case — the manifest
+            // receiver boots the process) computed the trigger's next
+            // activation from NOW and missed the very fire it was armed for.
+            val lastWake = readLastWake(ctx).coerceAtMost(now)
+            writeLastWake(ctx, now)
+            val activeId = try {
+                com.wepwawet.playlist.SuitePlaylistStore.activePlaylistId(ctx)
+            } catch (e: Exception) { "" }
             for (pr in sets) {
+                // v0.8.25 (audit): only the ACTIVE playlist's rules run.
+                if (pr.playlistId != activeId) continue
                 for (rule in pr.rules) {
                     if (!rule.enabled) continue
                     for (t in rule.triggers) {
                         if (t.type !in RuleModel.TIME_TRIGGERS) continue
-                        val next = nextActivationOf(t, lastWake)
+                        val next = nextActivationOf(ctx, pr.playlistId, t, lastWake)
                         if (next != null && next <= now + 500) {
                             when (t.type) {
                                 RuleModel.TRIG_INTERVAL -> {
-                                    // The interval's own anchor: fire at most
-                                    // once per interval, not once per wake.
+                                    // v0.8.25: the anchor advances by WHOLE
+                                    // intervals — a fire re-anchors to the
+                                    // boundary that just passed, so a late
+                                    // (Doze-slacked) alarm never shifts the
+                                    // grid and missed boundaries never stack
+                                    // catch-up fires.
                                     val key = "interval|${pr.playlistId}|${canon(t)}"
-                                    val last = lastIntervalFire(ctx, key)
-                                    if (now - last >= t.intervalMinutes * 60_000L) {
+                                    val ms = t.intervalMinutes.coerceAtLeast(1) * 60_000L
+                                    var anchor = lastIntervalFire(ctx, key)
+                                    if (anchor <= 0L) {
+                                        // First schedule after (re)start: the
+                                        // interval counts from NOW, no fire.
                                         rememberIntervalFire(ctx, key, now)
+                                        continue
+                                    }
+                                    if (now >= anchor + ms) {
+                                        while (anchor + ms <= now) anchor += ms
+                                        rememberIntervalFire(ctx, key, anchor)
+                                        RuleActivityLog.record(ctx, "event",
+                                            pr.playlistId, rule.name,
+                                            "Every ${t.intervalMinutes} min trigger due")
                                         dispatch(ctx, t.type, mapOf("trigId" to canon(t)))
                                     }
                                 }
-                                else -> dispatch(ctx, t.type, mapOf("trigId" to canon(t)))
+                                else -> {
+                                    RuleActivityLog.record(ctx, "event",
+                                        pr.playlistId, rule.name,
+                                        "Time trigger due: $t.type")
+                                    dispatch(ctx, t.type, mapOf("trigId" to canon(t)))
+                                }
                             }
                         }
                     }
@@ -519,8 +623,14 @@ object RuleTriggerHub {
         }
     }
 
-    @Volatile
-    private var lastWakeAt = System.currentTimeMillis()
+    private fun readLastWake(context: Context): Long =
+        context.getSharedPreferences("suite_rules_runtime", Context.MODE_PRIVATE)
+            .getLong("lastWake", System.currentTimeMillis())
+
+    private fun writeLastWake(context: Context, at: Long) {
+        context.getSharedPreferences("suite_rules_runtime", Context.MODE_PRIVATE)
+            .edit().putLong("lastWake", at).apply()
+    }
 
     /** A trigger's canonical identity (event ↔ trigger matching). */
     fun canon(t: Trigger): String = listOf(

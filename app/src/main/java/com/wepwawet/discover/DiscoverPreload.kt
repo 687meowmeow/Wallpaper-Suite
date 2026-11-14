@@ -4,56 +4,236 @@ import android.content.Context
 import android.net.ConnectivityManager
 import com.wepwawet.log.WepWawetLogger
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * v0.8.19: kick the Discover preload queue ON APP START ("have them
- * preload on app start") — the first Discover visit of a session then
- * pops an ALREADY-DOWNLOADED image instead of hitting the network.
+ * v0.8.25: THE ADAPTIVE PRELOADER — replaces the fixed refill loop.
  *
- * The queue machinery itself lives in [DiscoverPrefs] (slots + signatures
- * + files); this coordinator just runs the same fetch-loop the Discover
- * screen's refillQueue runs, with the CURRENT Discover settings (tags,
- * style, tier, sources). Single-flight process-wide (a kick already
- * running is never doubled up); quiet — nothing is surfaced anywhere.
+ * The review's requirements, implemented:
+ *  • REFILL ON EVERY CONSUMPTION — [onConsumed] fires from every place a
+ *    queued image is popped (the Discover refresh, the rule pulls); the
+ *    queue tops back up in the background without the user ever waiting.
+ *  • ADAPT TO THE USER — every consumption and every manual refresh bumps
+ *    a demand counter; the TARGET queue depth and the download CONCURRENCY
+ *    scale with recent demand (spam Refresh → up to [MAX_TARGET] deep and
+ *    [MAX_CONCURRENCY] parallel downloads) and decay on the [TICK_MS]
+ *    idle tick back to the [BASE_TARGET]/1 baseline. Bounded on both axes.
+ *  • RESPECT the existing host-health and rate-limit handling — all
+ *    downloads go through [DiscoverSearch.searchOne] + [downloadImage],
+ *    which skip blocked hosts, honour 429 Retry-After cool-downs and
+ *    never re-download a failed URL (DiscoverSourceHealth/DiscoverDedup).
+ *  • SMOOTH — the queue is a set of small pref files; popping is instant;
+ *    downloads run on Dispatchers.IO; nothing touches the main thread.
+ *
+ * Single-flight per fill (a fill already in flight is never doubled up —
+ * the consumption/ticker calls re-run it); one idle-decay ticker per
+ * process (started with the first fill).
  */
 object DiscoverPreload {
 
     private const val TAG = "DiscoverPreload"
-    /** v0.9.2: straight download failures tolerated before the loop gives
-     *  up this run (each failure already marks its URL + host failed). */
-    private const val MAX_CONSECUTIVE_FAILURES = 8
-    private val kicking = AtomicBoolean(false)
+
+    /** The resting target the queue holds when nobody's tapping. */
+    private const val BASE_TARGET = 8
+    /** The demand-scaled ceiling ("button spam" mode). */
+    private const val MAX_TARGET = 24
+    /** Parallel download ceiling. */
+    private const val MAX_CONCURRENCY = 4
+    /** How much one consumption/refresh bumps the target (+2, up to the ceiling). */
+    private const val TARGET_STEP = 2
+    /** The demand decay tick. */
+    private const val TICK_MS = 15_000L
+    /** Hard bound on one fill run's downloads (all sources blocked etc.). */
+    private const val MAX_ATTEMPTS_PER_FILL = 24
+    /** Straight all-lane failures tolerated before a fill gives up. */
+    private const val MAX_CONSECUTIVE_FAILURES = 3
+
+    private val filling = AtomicBoolean(false)
+    private val tickerStarted = AtomicBoolean(false)
+    /** Recent demand: every consumption +1; decays -1 per tick. */
+    private val demand = AtomicInteger(0)
 
     /** One in-flight guard for logs/tests. */
-    fun isRunning(): Boolean = kicking.get()
+    fun isRunning(): Boolean = filling.get()
 
-    /**
-     * Top the queue up to [DiscoverPrefs.QUEUE_TARGET] images under the
-     * CURRENT Discover settings. Safe to call from anywhere (Application
-     * onCreate, the Discover screen); a run already in flight is a no-op.
-     */
-    fun kick(context: Context) {
-        if (!kicking.compareAndSet(false, true)) return
-        val appContext = context.applicationContext
+    /** The current adaptive target (tests + logs). */
+    fun currentTarget(): Int =
+        (BASE_TARGET + demand.get() * TARGET_STEP).coerceIn(BASE_TARGET, MAX_TARGET)
+
+    /** The current adaptive concurrency. */
+    fun currentConcurrency(): Int =
+        (1 + (demand.get() + 1) / 3).coerceIn(1, MAX_CONCURRENCY)
+
+    // ── The demand signals ─────────────────────────────────────────────
+
+    /** Call on EVERY image consumption (queue pop) — refill + scale up. */
+    fun onConsumed(context: Context) {
+        val d = demand.incrementAndGet()
+        WepWawetLogger.appDebug("$TAG: consumed — demand $d, target ${currentTarget()}")
+        kick(context)
+    }
+
+    /** Call on a manual refresh/search (demand without a queue pop). */
+    fun onManualDemand(context: Context) {
+        val d = demand.incrementAndGet()
+        WepWawetLogger.appDebug("$TAG: manual demand — demand $d")
+        kick(context)
+    }
+
+    /** The idle decay ticker (started once; pure in-memory counter). */
+    private fun ensureTicker(context: Context) {
+        if (!tickerStarted.compareAndSet(false, true)) return
         com.wepwawet.WepWawetApplication.appScope.launch {
-            try {
-                refill(appContext)
-            } finally {
-                kicking.set(false)
+            while (true) {
+                kotlinx.coroutines.delay(TICK_MS)
+                val d = demand.updateAndGet { if (it > 0) it - 1 else 0 }
+                WepWawetLogger.appDebug("$TAG: idle tick — demand $d, target ${currentTarget()}")
+                // Scale-down still tops the (smaller) queue up — a shallow
+                // queue after a spam burst settles toward BASE_TARGET.
+                kick(context)
             }
         }
     }
 
+    // ── The fill ────────────────────────────────────────────────────────
+
     /**
-     * v0.9.0: RETRY WHEN THE NETWORK ARRIVES. The app-start kick can race
-     * connectivity (cold boot, airplane mode just off) — every source
-     * fails, the loop logs its exit, and the queue stays empty until the
-     * user manually Refreshes. This registers ONE NetworkCallback that
-     * kicks the preload again the moment a network becomes available (and
-     * on every subsequent regaining — single-flight guards the overlap).
+     * Top the queue up to the CURRENT adaptive target under the CURRENT
+     * Discover settings. Safe to call from anywhere (Application onCreate,
+     * every consumption, the network callback); a fill already in flight
+     * is a no-op (the demand/ticker calls will re-run it).
+     */
+    fun kick(context: Context) {
+        if (!filling.compareAndSet(false, true)) return
+        ensureTicker(context)
+        val appContext = context.applicationContext
+        com.wepwawet.WepWawetApplication.appScope.launch {
+            try {
+                fill(appContext)
+            } finally {
+                filling.set(false)
+            }
+        }
+    }
+
+    private suspend fun fill(context: Context) {
+        try {
+            val strict = DiscoverPrefs.readStrictTags(context)
+            val soft = DiscoverPrefs.readSoftTags(context)
+            val style = DiscoverPrefs.readStyle(context)
+            val r18 = DiscoverPrefs.readR18(context)
+            val sources = DiscoverPrefs.readSources(context)
+            val signature = DiscoverPrefs.searchSignature(strict, soft, style, r18, sources)
+            val target = currentTarget()
+            val concurrency = currentConcurrency()
+            var consecutiveFailures = 0
+            var attempts = 0
+            var added = 0
+
+            while (DiscoverPrefs.queueDepth(context, signature) < target &&
+                attempts < MAX_ATTEMPTS_PER_FILL
+            ) {
+                val missing = target - DiscoverPrefs.queueDepth(context, signature)
+                if (missing <= 0) break
+                // Parallel bounded batch (concurrency 1 at rest — the
+                // single-lane behavior; up to MAX_CONCURRENCY under spam).
+                val batch = missing.coerceAtMost(concurrency)
+                val results = coroutineScope {
+                    (1..batch).map {
+                        async(Dispatchers.IO) {
+                            searchAndQueue(context, strict, soft, style, r18, sources, signature)
+                        }
+                    }.awaitAll()
+                }
+                attempts += batch
+                val appended = results.count { it }
+                added += appended
+                if (appended == 0) {
+                    consecutiveFailures++
+                    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+                        WepWawetLogger.appWarn(
+                            "$TAG: fill giving up this round — nothing appends",
+                            "attempts" to attempts,
+                            "added" to added,
+                            "depth" to DiscoverPrefs.queueDepth(context, signature))
+                        break
+                    }
+                    // All lanes failed this round (sources blocked / a dead
+                    // network) — one short backoff, then try again.
+                    kotlinx.coroutines.delay(1200L)
+                } else {
+                    consecutiveFailures = 0
+                }
+            }
+            WepWawetLogger.appInfo("$TAG: fill done",
+                "added" to added,
+                "depth" to DiscoverPrefs.queueDepth(context, signature),
+                "target" to target,
+                "concurrency" to concurrency,
+                "attempts" to attempts)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            WepWawetLogger.appWarn("$TAG: fill failed",
+                "exception" to e.javaClass.simpleName,
+                "message" to (e.message ?: ""))
+        }
+    }
+
+    /** One search → download → append lane. True when an image was queued. */
+    private suspend fun searchAndQueue(
+        context: Context,
+        strict: List<String>,
+        soft: List<String>,
+        style: Int,
+        r18: Int,
+        sources: Set<String>,
+        signature: String,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val url = try {
+            DiscoverSearch.searchOne(
+                context = context,
+                strictTags = strict,
+                softTags = soft,
+                styleValue = style,
+                r18Mode = r18,
+                // Exclude what's already queued too (a parallel lane may
+                // have just appended it; the dedup reserve is the backstop).
+                recentUrls = DiscoverPrefs.readRecentUrls(context) +
+                    DiscoverPrefs.readQueuedUrls(context),
+                sources = sources,
+            )
+        } catch (e: Exception) {
+            WepWawetLogger.appWarn("$TAG: lane search failed",
+                "exception" to e.javaClass.simpleName)
+            null
+        } ?: return@withContext false
+        val bytes = try {
+            DiscoverSearch.downloadImage(url)
+        } catch (e: Exception) {
+            // The URL/host is already marked failed in the session health
+            // tracker; the dedup handoff is dropped (id stays seen).
+            DiscoverDedup.abandon(url)
+            WepWawetLogger.appWarn("$TAG: lane download failed",
+                "exception" to e.javaClass.simpleName,
+                "url" to url.take(80))
+            return@withContext false
+        }
+        DiscoverPrefs.appendQueuedImage(context, url, bytes, signature)
+    }
+
+    // ── Network-arrival retry (kept from v0.9.0) ────────────────────────
+
+    /**
+     * Retry when the network arrives — the app-start kick races
+     * connectivity on cold boots. One NetworkCallback kicks the fill the
+     * moment a network becomes available.
      */
     fun ensureNetworkRetry(context: Context) {
         val appContext = context.applicationContext
@@ -74,110 +254,6 @@ object DiscoverPreload {
             WepWawetLogger.appInfo("$TAG: network retry armed")
         } catch (e: Exception) {
             WepWawetLogger.appWarn("$TAG: network retry registration failed",
-                "exception" to e.javaClass.name,
-                "message" to (e.message ?: ""))
-        }
-    }
-
-    private suspend fun refill(context: Context) {
-        try {
-            val strict = DiscoverPrefs.readStrictTags(context)
-            val soft = DiscoverPrefs.readSoftTags(context)
-            val style = DiscoverPrefs.readStyle(context)
-            val r18 = DiscoverPrefs.readR18(context)
-            val sources = DiscoverPrefs.readSources(context)
-            val signature = DiscoverPrefs.searchSignature(strict, soft, style, r18, sources)
-            var added = 0
-            // v0.9.2: download failures no longer stop the loop — this
-            // counter only ends it after MAX_CONSECUTIVE_FAILURES straight
-            // misses (a dead network), letting single failures pass.
-            var consecutiveFailures = 0
-            // v0.9.2: a hard attempt bound — dedup skips and failed
-            // downloads continue the loop, so the run needs an absolute cap.
-            var attempts = 0
-            while (DiscoverPrefs.queueDepth(context, signature) < DiscoverPrefs.QUEUE_TARGET &&
-                attempts++ < 24
-            ) {
-                val url = withContext(Dispatchers.IO) {
-                    // v0.9.0: the swallow that hid the "added=0" bug for
-                    // several versions — a silent search failure broke the
-                    // loop instantly and the only log said "done, added=0".
-                    // Every swallowed failure here is now LOUD.
-                    runCatching {
-                        DiscoverSearch.searchOne(
-                            context = context,
-                            strictTags = strict,
-                            softTags = soft,
-                            styleValue = style,
-                            r18Mode = r18,
-                            // v0.9.1: exclude what's already queued too.
-                            recentUrls = DiscoverPrefs.readRecentUrls(context) +
-                                DiscoverPrefs.readQueuedUrls(context),
-                            sources = sources,
-                        )
-                    }.onFailure {
-                        WepWawetLogger.appWarn("$TAG: preload search failed",
-                            "exception" to it.javaClass.name,
-                            "message" to (it.message ?: ""))
-                    }.getOrNull()
-                } ?: run {
-                    // v0.9.0: the first silent exit, LOGGED — the search
-                    // returned nothing (a failed tier ladder, e.g. no
-                    // source reachable on this network).
-                    WepWawetLogger.appWarn("$TAG: preload loop stopping — search returned nothing",
-                        "added_so_far" to added,
-                        "depth" to DiscoverPrefs.queueDepth(context, signature))
-                    null
-                } ?: break
-                val bytes = withContext(Dispatchers.IO) {
-                    runCatching { DiscoverSearch.downloadImage(url) }
-                        .onFailure {
-                            WepWawetLogger.appWarn("$TAG: preload download failed",
-                                "exception" to it.javaClass.name,
-                                "message" to (it.message ?: ""))
-                        }
-                        .getOrNull()
-                }
-                if (bytes == null || bytes.size <= 1024) {
-                    // v0.9.2 (THE PRELOAD-BREAKS-ON-FIRST-FAILURE FIX, from
-                    // the review): the loop used to BREAK here — one dead
-                    // pixiv proxy emptied the whole queue run ("app-start
-                    // preload done added=0 depth=0" twice in the log) while
-                    // healthy sources went unqueried. The failed URL/host is
-                    // marked in DiscoverSourceHealth (never retried this
-                    // session; the host blocks after 3) and the loop
-                    // CONTINUES to the next candidate. consecutiveFailures
-                    // caps the run so a fully-dead network still ends it.
-                    consecutiveFailures++
-                    WepWawetLogger.appWarn("$TAG: preload download failed — continuing",
-                        "bytes" to (bytes?.size ?: 0),
-                        "consecutive_failures" to consecutiveFailures,
-                        "url" to url.take(100))
-                    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-                        WepWawetLogger.appWarn(
-                            "$TAG: preload loop stopping — $consecutiveFailures straight failures",
-                            "added_so_far" to added,
-                            "depth" to DiscoverPrefs.queueDepth(context, signature))
-                        break
-                    }
-                    continue
-                }
-                consecutiveFailures = 0
-                val appended = withContext(Dispatchers.IO) {
-                    DiscoverPrefs.appendQueuedImage(context, url, bytes, signature)
-                }
-                if (!appended) continue
-                added++
-            }
-            WepWawetLogger.appInfo("$TAG: app-start preload done",
-                "added" to added,
-                "depth" to DiscoverPrefs.queueDepth(context, signature))
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // A background preload failure is never fatal — the Discover
-            // screen's own refill still runs when the user gets there.
-            WepWawetLogger.appWarn("$TAG: app-start preload failed",
                 "exception" to e.javaClass.name,
                 "message" to (e.message ?: ""))
         }

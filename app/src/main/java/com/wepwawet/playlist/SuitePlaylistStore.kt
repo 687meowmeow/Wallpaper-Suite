@@ -204,6 +204,34 @@ object SuitePlaylistStore {
         writeStore(context, store)
         WepWawetLogger.appInfo("SuitePlaylistStore: deleted", "id" to id)
         notifyService(context)
+        // v0.8.25 (audit): a deleted playlist's rules, runtime step state
+        // (cursor / bag / history / interval anchors) and the QS-tile +
+        // notification pins are ORPHANS otherwise — the hub would keep
+        // arming wakes for rules that can never run and the tile would
+        // point at nothing.
+        runCatching { com.wepwawet.rules.SuiteRulesStore.deletePlaylistRules(context, id) }
+        runCatching {
+            val prefs = context.getSharedPreferences(
+                "suite_rules_runtime", Context.MODE_PRIVATE)
+            val ed = prefs.edit()
+            // Every runtime key names its playlist (plcursor|<id>, plbag|<id>,
+            // plhistory|<id>, interval|<id>|…, recentPicks|<id>).
+            for (k in prefs.all.keys) {
+                if (k.contains(id)) ed.remove(k)
+            }
+            ed.apply()
+        }
+        runCatching {
+            // Drop the pins if they pointed at this playlist.
+            val pinned = com.wepwawet.rules.SuiteRulesStore.pinnedRuleForTile(context)
+            if (pinned?.first == id) {
+                com.wepwawet.rules.SuiteRulesStore.pinRuleForTile(context, null, null)
+            }
+            val notif = com.wepwawet.rules.SuiteRulesStore.notificationRule(context)
+            if (notif?.first == id) {
+                com.wepwawet.rules.SuiteRulesStore.setNotificationRule(context, null, null)
+            }
+        }
     }
 
     fun rename(context: Context, id: String, name: String) {
@@ -270,6 +298,16 @@ object SuitePlaylistStore {
         WepWawetLogger.appInfo("SuitePlaylistStore: active changed",
             "id" to (id ?: "none"))
         notifyService(context)
+        // v0.8.25 (settings take effect immediately): the ACTIVE playlist
+        // decides which rules may run — its change re-arms the hub's
+        // registrations and the next wake (a no-op re-aggregate when the
+        // trigger types didn't change, but the WAKE must be re-aimed at the
+        // new active playlist's schedule).
+        runCatching { com.wepwawet.rules.RuleTriggerHub.onRulesChanged(context) }
+            .onFailure {
+                WepWawetLogger.appWarn("SuitePlaylistStore: hub re-arm failed",
+                    "exception" to it.javaClass.simpleName)
+            }
         // v0.8.16: ACTIVATION MEANS THE LIVE WALLPAPER TAKES OVER. When
         // the WE engine is not running (a static/system wallpaper is set),
         // activating a playlist used to do NOTHING visible — the notify

@@ -491,6 +491,10 @@ object DiscoverPrefs {
                     .remove("discover_q_sig_$s").apply()
                 continue
             }
+            // v0.8.25 (refill on every consumption): the pop signals the
+            // ADAPTIVE preloader — the queue refills + the target scales
+            // with the tapping pace (bounded; app scope; never blocking).
+            DiscoverPreload.onConsumed(context)
             return try {
                 val bytes = f.readBytes()
                 p.edit().remove("discover_q_url_$s").remove("discover_q_at_$s")
