@@ -367,15 +367,23 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
         strictTags, softTags, styleValue, r18Mode, sources)
 
     val refilling = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+    var consecutiveRefillFailures = 0
     fun refillQueue() {
         if (!refilling.compareAndSet(false, true)) return
-        scope.launch {
+        // v0.9.2 (the review): the app scope, NOT the screen's
+        // rememberCoroutineScope — leaving the Discover tab cancelled the
+        // refill mid-download (LeftCompositionCancellationException in the
+        // log) and lost the queue work.
+        com.wepwawet.WepWawetApplication.appScope.launch {
             try {
                 val signature = currentSignature()
                 // v0.8.19: the queue target comes from the prefs
                 // constant (8 — see DiscoverPrefs.QUEUE_SIZE).
+                // v0.9.2: a hard attempt bound (failed downloads and
+                // dedup skips continue instead of breaking).
+                var attempts = 0
                 while (DiscoverPrefs.queueDepth(context, signature) <
-                    DiscoverPrefs.QUEUE_TARGET) {
+                    DiscoverPrefs.QUEUE_TARGET && attempts++ < 24) {
                     // v0.9.1: the refill excludes BOTH the recents AND the
                     // URLs already sitting in the queue — a random draw can
                     // repeat inside one refill loop, and duplicates in the
@@ -410,12 +418,22 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                             }
                             .getOrNull()
                     }
-                    if (nextBytes == null || nextBytes.size <= 1024) break
-                    withContext(Dispatchers.IO) {
+                    // v0.9.2: a failed download no longer kills the refill —
+                    // the URL/host is marked in the session health tracker
+                    // and the next candidate is fetched.
+                    if (nextBytes == null || nextBytes.size <= 1024) {
+                        consecutiveRefillFailures++
+                        if (consecutiveRefillFailures >= 6) break
+                        continue
+                    }
+                    consecutiveRefillFailures = 0
+                    val appended = withContext(Dispatchers.IO) {
                         DiscoverPrefs.appendQueuedImage(context, nextUrl, nextBytes, signature)
                     }
+                    if (!appended) continue
                     WepWawetLogger.appInfo("DiscoverScreen: preloaded image queued",
                         "bytes" to nextBytes.size,
+                        "id" to DiscoverDedup.canonicalId(nextUrl),
                         "depth" to DiscoverPrefs.queueDepth(context, signature))
                 }
             } finally {
@@ -763,9 +781,15 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
             SlimTopBar(
                 title = "Discover",
                 onBack = onBack,
-                // v0.9.1: the universal Home/Lock toggles, in the EXISTING
-                // top bar (right of the title) — no separate strip.
-                actions = { com.wepwawet.ui.components.ScreenToggles() },
+                // v0.9.2 (review): the toggles sit DIRECTLY RIGHT of the
+                // page name — in the title slot, not the action slot.
+                titleContent = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Discover", style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.width(8.dp))
+                        com.wepwawet.ui.components.ScreenToggles()
+                    }
+                },
             )
         },
         snackbarHost = { SnackbarHost(snackbar) },

@@ -221,6 +221,9 @@ fun PlaylistEditorScreen(
             if (from >= 0 && target != from && target in entries.indices) {
                 val moved = entries.removeAt(from)
                 entries.add(target.coerceIn(0, entries.size), moved)
+                WepWawetLogger.appInfo("PlaylistEditor: entry reordered",
+                    "entry" to moved.title.ifBlank { moved.filepath.takeLast(40) },
+                    "from" to from, "to" to target)
             }
         }
     }
@@ -268,6 +271,12 @@ fun PlaylistEditorScreen(
                 actions = {
                     if (!isActive) {
                         TextButton(onClick = {
+                            // v0.9.2 (all controls live + logged): the store
+                            // logs "active changed"; this line names the UI
+                            // action that caused it.
+                            WepWawetLogger.appInfo("PlaylistEditor: Set active tapped",
+                                "playlist" to current.id,
+                                "entries" to current.entries.size)
                             SuitePlaylistStore.setActive(context, current.id)
                             activeId = current.id
                         }) { Text("Set active") }
@@ -289,12 +298,22 @@ fun PlaylistEditorScreen(
             ) {
                 SegmentedButton(
                     selected = current.orderMode == SuitePlaylistStore.ORDER_RANDOM,
-                    onClick = { save { orderMode = SuitePlaylistStore.ORDER_RANDOM } },
+                    onClick = {
+                        // v0.9.2: order mode is now READ by stepPlaylist —
+                        // logged so a device log shows the change.
+                        WepWawetLogger.appInfo("PlaylistEditor: order mode → random",
+                            "playlist" to current.id)
+                        save { orderMode = SuitePlaylistStore.ORDER_RANDOM }
+                    },
                     shape = SegmentedButtonDefaults.itemShape(0, 2),
                 ) { Text("Random") }
                 SegmentedButton(
                     selected = current.orderMode == SuitePlaylistStore.ORDER_ORDERED,
-                    onClick = { save { orderMode = SuitePlaylistStore.ORDER_ORDERED } },
+                    onClick = {
+                        WepWawetLogger.appInfo("PlaylistEditor: order mode → in order",
+                            "playlist" to current.id)
+                        save { orderMode = SuitePlaylistStore.ORDER_ORDERED }
+                    },
                     shape = SegmentedButtonDefaults.itemShape(1, 2),
                 ) { Text("In order") }
             }
@@ -453,6 +472,9 @@ fun PlaylistEditorScreen(
                             running = runningRuleId == rule.id,
                             runResult = runResults[rule.id],
                             onToggle = { on ->
+                                WepWawetLogger.appInfo("PlaylistEditor: rule " +
+                                    (if (on) "enabled" else "disabled"),
+                                    "rule" to rule.name)
                                 saveRules {
                                     rules.firstOrNull { it.id == rule.id }?.enabled = on
                                 }
@@ -471,12 +493,16 @@ fun PlaylistEditorScreen(
                             },
                             onOpen = { editingRuleId = rule.id },
                             onDuplicate = {
+                                WepWawetLogger.appInfo("PlaylistEditor: rule duplicated",
+                                    "rule" to rule.name)
                                 saveRules {
                                     rules.add(RuleModel.copyRule(rule))
                                 }
                                 rulesData = SuiteRulesStore.readPlaylistRules(context, playlistId)
                             },
                             onDelete = {
+                                WepWawetLogger.appInfo("PlaylistEditor: rule deleted",
+                                    "rule" to rule.name)
                                 saveRules { rules.removeAll { it.id == rule.id } }
                                 rulesData = SuiteRulesStore.readPlaylistRules(context, playlistId)
                             },
@@ -1059,8 +1085,9 @@ private fun PlaylistEntryRow(
     // of the finger. onSizeChanged captures the real measured height; the
     // 64dp fallback covers the first frame.
     var measuredRowH by remember(entry.filepath) { mutableStateOf(0f) }
+    val density = androidx.compose.ui.platform.LocalDensity.current
     val rowH = if (measuredRowH > 0f) measuredRowH
-    else with(androidx.compose.ui.platform.LocalDensity.current) { 64.dp.toPx() }
+    else with(density) { 64.dp.toPx() }
     // Live values for the drag closure — the row's index CHANGES as the
     // live reorder moves it, and pointerInput (keyed on the path) must not
     // restart mid-gesture, so the closure reads these instead of captures.
@@ -1071,7 +1098,12 @@ private fun PlaylistEntryRow(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .onSizeChanged { size -> measuredRowH = size.height.toFloat() + 4f }
+            // v0.9.2 (review): the LazyColumn spacing is 4.DP — convert it
+            // with the density, not a raw +4 px.
+            .onSizeChanged { size ->
+                measuredRowH = size.height.toFloat() +
+                    with(density) { 4.dp.toPx() }
+            }
             .clip(RoundedCornerShape(10.dp))
             .background(
                 if (dragging) MaterialTheme.colorScheme.surfaceVariant

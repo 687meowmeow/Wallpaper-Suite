@@ -96,8 +96,22 @@ fun PlaylistsScreen(
             SlimTopBar(
                 title = "Playlists",
                 onBack = onBack,
-                // v0.9.1: the universal Home/Lock toggles.
-                actions = { com.wepwawet.ui.components.ScreenToggles() },
+                // v0.9.2 (review): the toggles sit DIRECTLY RIGHT of the
+                // page name — in the title slot, not the action slot.
+                titleContent = {
+                    androidx.compose.foundation.layout.Row(
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    ) {
+                        androidx.compose.material3.Text(
+                            "Playlists",
+                            style = androidx.compose.material3.MaterialTheme
+                                .typography.titleMedium,
+                        )
+                        androidx.compose.foundation.layout.Spacer(
+                            androidx.compose.ui.Modifier.width(8.dp))
+                        com.wepwawet.ui.components.ScreenToggles()
+                    }
+                },
             )
         },
     ) { padding ->

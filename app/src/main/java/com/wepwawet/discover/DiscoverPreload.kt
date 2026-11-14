@@ -22,6 +22,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 object DiscoverPreload {
 
     private const val TAG = "DiscoverPreload"
+    /** v0.9.2: straight download failures tolerated before the loop gives
+     *  up this run (each failure already marks its URL + host failed). */
+    private const val MAX_CONSECUTIVE_FAILURES = 8
     private val kicking = AtomicBoolean(false)
 
     /** One in-flight guard for logs/tests. */
@@ -85,7 +88,16 @@ object DiscoverPreload {
             val sources = DiscoverPrefs.readSources(context)
             val signature = DiscoverPrefs.searchSignature(strict, soft, style, r18, sources)
             var added = 0
-            while (DiscoverPrefs.queueDepth(context, signature) < DiscoverPrefs.QUEUE_TARGET) {
+            // v0.9.2: download failures no longer stop the loop — this
+            // counter only ends it after MAX_CONSECUTIVE_FAILURES straight
+            // misses (a dead network), letting single failures pass.
+            var consecutiveFailures = 0
+            // v0.9.2: a hard attempt bound — dedup skips and failed
+            // downloads continue the loop, so the run needs an absolute cap.
+            var attempts = 0
+            while (DiscoverPrefs.queueDepth(context, signature) < DiscoverPrefs.QUEUE_TARGET &&
+                attempts++ < 24
+            ) {
                 val url = withContext(Dispatchers.IO) {
                     // v0.9.0: the swallow that hid the "added=0" bug for
                     // several versions — a silent search failure broke the
@@ -118,7 +130,7 @@ object DiscoverPreload {
                     null
                 } ?: break
                 val bytes = withContext(Dispatchers.IO) {
-                    runCatching { DiscoverSearch.downloadImage(url) }.onFailure { WepWawetLogger.appWarn("DiscoverPreload: DiscoverSearch — best-effort call failed", "exception" to it.javaClass.simpleName) }
+                    runCatching { DiscoverSearch.downloadImage(url) }
                         .onFailure {
                             WepWawetLogger.appWarn("$TAG: preload download failed",
                                 "exception" to it.javaClass.name,
@@ -127,16 +139,34 @@ object DiscoverPreload {
                         .getOrNull()
                 }
                 if (bytes == null || bytes.size <= 1024) {
-                    // v0.9.0: the second silent exit, LOGGED — the download
-                    // failed or came back too small to be a real image.
-                    WepWawetLogger.appWarn("$TAG: preload loop stopping — download failed or image too small",
+                    // v0.9.2 (THE PRELOAD-BREAKS-ON-FIRST-FAILURE FIX, from
+                    // the review): the loop used to BREAK here — one dead
+                    // pixiv proxy emptied the whole queue run ("app-start
+                    // preload done added=0 depth=0" twice in the log) while
+                    // healthy sources went unqueried. The failed URL/host is
+                    // marked in DiscoverSourceHealth (never retried this
+                    // session; the host blocks after 3) and the loop
+                    // CONTINUES to the next candidate. consecutiveFailures
+                    // caps the run so a fully-dead network still ends it.
+                    consecutiveFailures++
+                    WepWawetLogger.appWarn("$TAG: preload download failed — continuing",
                         "bytes" to (bytes?.size ?: 0),
+                        "consecutive_failures" to consecutiveFailures,
                         "url" to url.take(100))
-                    break
+                    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+                        WepWawetLogger.appWarn(
+                            "$TAG: preload loop stopping — $consecutiveFailures straight failures",
+                            "added_so_far" to added,
+                            "depth" to DiscoverPrefs.queueDepth(context, signature))
+                        break
+                    }
+                    continue
                 }
-                withContext(Dispatchers.IO) {
+                consecutiveFailures = 0
+                val appended = withContext(Dispatchers.IO) {
                     DiscoverPrefs.appendQueuedImage(context, url, bytes, signature)
                 }
+                if (!appended) continue
                 added++
             }
             WepWawetLogger.appInfo("$TAG: app-start preload done",

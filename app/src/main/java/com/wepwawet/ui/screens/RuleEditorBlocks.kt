@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.layout.height
@@ -1107,6 +1108,12 @@ internal fun BlockCard(
     var dragCrossings by remember(block.id) { mutableStateOf(0) }
     val liveMove by androidx.compose.runtime.rememberUpdatedState(onMove)
     val density = androidx.compose.ui.platform.LocalDensity.current
+    // v0.9.2 (audit pass 3): the drag assumes a 64dp row, but block rows
+    // VARY (a 2-line summary is taller) — measure the real height like
+    // the playlist rows and count crossings by ACCUMULATED TRAVEL, not
+    // the finger's position inside the card (which stays near 0 as the
+    // card moves with the finger).
+    var measuredRowH by remember(block.id) { mutableStateOf(0f) }
 
     // v0.9.1: NOT a Card anymore (the review: "the rule editor's action
     // blocks are still Cards") — a slim, flat bordered SURFACE row: same
@@ -1125,13 +1132,21 @@ internal fun BlockCard(
         ),
         modifier = Modifier
             .fillMaxWidth()
+            .onSizeChanged { size ->
+                measuredRowH = size.height.toFloat() + with(density) { 4.dp.toPx() }
+            }
             .pointerInput(block.id) {
-                val rowH = with(density) { 64.dp.toPx() }
+                val rowH = with(density) { 68.dp.toPx() }
+                var travel = 0f
                 detectDragGesturesAfterLongPress(
-                    onDragStart = { dragCrossings = 0 },
+                    onDragStart = { dragCrossings = 0; travel = 0f },
                     onDrag = { change, dragAmount ->
                         change.consume()
-                        val target = (change.position.y / rowH).toInt()
+                        // The effective row height: the MEASURED height
+                        // once known, the 68dp estimate on the first frame.
+                        val effective = if (measuredRowH > 0f) measuredRowH else rowH
+                        travel += dragAmount.y
+                        val target = (travel / effective).toInt()
                         // One onMove(±1) per crossing keeps the parent's
                         // clamp in charge; the live move updates the list
                         // and the card's position follows.

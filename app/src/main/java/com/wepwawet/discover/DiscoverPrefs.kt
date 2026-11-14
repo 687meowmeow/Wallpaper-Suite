@@ -213,9 +213,11 @@ object DiscoverPrefs {
 
     fun readSources(context: Context): Set<String> {
         val saved = prefs(context).getStringSet(KEY_SOURCES, null) ?: return DEFAULT_SOURCES
-        // Empty set = everything (kept honest for anyone who ticked every
-        // box; an explicitly saved empty selection is treated as "all").
-        return saved.ifEmpty { ALL_SOURCES.toSet() }
+        // v0.9.2 (the review): an empty saved selection falls back to the
+        // DEFAULTS, not to "every source" — gelbooru answers 401 without
+        // credentials now, so it is only ever queried when the user
+        // explicitly ticks it in the source picker.
+        return saved.ifEmpty { DEFAULT_SOURCES }
     }
 
     fun writeSources(context: Context, sources: Set<String>) {
@@ -471,6 +473,18 @@ object DiscoverPrefs {
                     .remove("discover_q_sig_$s").apply()
                 continue
             }
+            // v0.9.2 (the review): the THIRD check point — a slot whose
+            // image was already shown under another url variant (its id
+            // is seen and this url holds no pending reservation) is
+            // dropped and the NEXT slot is tried.
+            if (!DiscoverDedup.claim(url)) {
+                queueFile(context, s).delete()
+                p.edit().remove("discover_q_url_$s").remove("discover_q_at_$s")
+                    .remove("discover_q_sig_$s").apply()
+                WepWawetLogger.appDebug("DiscoverPrefs: queue pop skipped a duplicate slot",
+                    "id" to DiscoverDedup.canonicalId(url))
+                continue
+            }
             val f = queueFile(context, s)
             if (!f.isFile) {
                 p.edit().remove("discover_q_url_$s").remove("discover_q_at_$s")
@@ -494,8 +508,14 @@ object DiscoverPrefs {
     }
 
     /** Add a downloaded image to the first free slot (oldest slot when full). */
-    fun appendQueuedImage(context: Context, url: String, bytes: ByteArray, signature: String) {
-        if (bytes.size <= 1024) return
+    fun appendQueuedImage(context: Context, url: String, bytes: ByteArray, signature: String): Boolean {
+        if (bytes.size <= 1024) return false
+        // v0.9.2 (the review): the canonical-ID gate at the SECOND of the
+        // three check points — a url whose id was seen under a DIFFERENT
+        // url (a variant/CDN copy that slipped past the search reserve)
+        // is skipped here and logged with its id. claim() consumes this
+        // flow's own reservation.
+        if (!DiscoverDedup.claim(url)) return false
         val p = prefs(context)
         // v0.9.1: DEDUPE — a random draw can repeat inside one refill loop;
         // without this the queue filled with N copies of the same image and
@@ -505,7 +525,7 @@ object DiscoverPrefs {
             if (p.getString("discover_q_url_$s", "") == url) {
                 WepWawetLogger.appDebug("DiscoverPrefs: queue dedup skipped a repeat",
                     "url" to url.take(80))
-                return
+                return false
             }
         }
         var slot = -1
@@ -522,17 +542,22 @@ object DiscoverPrefs {
             queueFile(context, oldest).delete()
             slot = oldest
         }
-        try {
+        return try {
             queueFile(context, slot).writeBytes(bytes)
             p.edit()
                 .putString("discover_q_url_$slot", url)
                 .putLong("discover_q_at_$slot", System.currentTimeMillis())
                 .putString("discover_q_sig_$slot", signature)
                 .apply()
+            true
         } catch (e: Exception) {
             queueFile(context, slot).delete()
             p.edit().remove("discover_q_url_$slot").remove("discover_q_at_$slot")
                 .remove("discover_q_sig_$slot").apply()
+            WepWawetLogger.appWarn("DiscoverPrefs: queue append failed",
+                "exception" to e.javaClass.simpleName,
+                "message" to (e.message ?: ""))
+            false
         }
     }
 }

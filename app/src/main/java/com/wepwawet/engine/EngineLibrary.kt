@@ -131,9 +131,14 @@ object EngineLibrary {
             try {
                 val engine = sceneLib(context)
                 for (wallpaper in engine.enumerateWallpapers()) {
-                    // v0.8.11: never surface the bundled sample wallpapers.
+                    // v0.9.2 (the review): officials are BACK IN the list —
+                    // the v0.8.11 skip removed them from the Library while
+                    // the count math still subtracted them (locals went
+                    // NEGATIVE: officials=9 downloads=6 locals=-9 total=6;
+                    // the Nov 9 build showed total=11 with them included).
                     if (wallpaper.isOfficial) {
                         officials++
+                        result.add(wallpaper)
                         continue
                     }
                     if (wallpaper.isError) {

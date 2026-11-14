@@ -61,6 +61,10 @@ object RuleEngine {
         /** Manual-run hook: a block started executing (flash its card). */
         val onHighlight: ((blockId: String) -> Unit)? = null,
         var lastPickOk: Boolean = false,
+        /** v0.9.2 (honest ▶ results): WHY the last pick/step didn't apply
+         *  (paused / held / empty / no service / read failure) — surfaced
+         *  in the run-now result instead of a lying "ran 1 block(s)". */
+        var blockReason: String? = null,
     ) {
         fun value(key: String): String? = values[key]
     }
@@ -79,11 +83,25 @@ object RuleEngine {
         val all = SuiteRulesStore.readAll(context)
         if (all.isEmpty()) return
         val activeId = SuitePlaylistStore.activePlaylistId(context)
+        // v0.9.2 (structured logging): EVERY trigger event gets a log line,
+        // so a log alone shows why a wallpaper did or didn't change.
+        WepWawetLogger.appInfo("$TAG: event received",
+            "event" to type,
+            "rule_sets" to all.size,
+            "extra_keys" to extra.keys.joinToString(","))
         for (pr in all) {
             val firedThisPlaylist = StringBuilder()
             for (rule in pr.rules) {
-                if (!rule.enabled) continue
-                if (!triggerMatches(context, rule, type, extra, pr.playlistId)) continue
+                if (!rule.enabled) {
+                    WepWawetLogger.appDebug("$TAG: rule skipped — disabled",
+                        "rule" to rule.name, "playlist" to pr.playlistId)
+                    continue
+                }
+                if (!triggerMatches(context, rule, type, extra, pr.playlistId)) {
+                    WepWawetLogger.appDebug("$TAG: rule skipped — no trigger match",
+                        "rule" to rule.name, "event" to type)
+                    continue
+                }
                 // Cooldown.
                 if (rule.cooldownMinutes > 0 &&
                     System.currentTimeMillis() - rule.lastFiredAt <
@@ -159,6 +177,8 @@ object RuleEngine {
         val result = buildString {
             append(if (ctx.lastPickOk) "applied a wallpaper" else "ran ${rule.actions.size} block(s)")
             if (flow == Flow.STOPPED) append(" (stopped early)")
+            // v0.9.2: the honest reason a pick didn't apply.
+            ctx.blockReason?.let { append(" — $it") }
             ctx.value("last")?.let { append(" — ${it.substringAfterLast('/')}") }
         }
         SuiteRulesStore.recordFire(context, playlistId, rule, result)
@@ -773,7 +793,11 @@ object RuleEngine {
         target: String,
     ) {
         if (candidates.isEmpty()) {
+            // v0.9.2: the honest ▶ reason — an empty group/set was named.
             ctx.lastPickOk = false
+            ctx.blockReason = "no candidates — the group/set is empty"
+            WepWawetLogger.appInfo("$TAG: pick skipped — empty candidates",
+                "block" to b.type)
             return
         }
         val mode = when (b.type) {
@@ -843,7 +867,34 @@ object RuleEngine {
         }
     }
 
-    /** Apply one picked path to the target screen(s). */
+    /**
+     * Apply one picked path to the target screen(s).
+     *
+     * v0.9.2 (THE "NEXT CANNOT DISPLAY MY WALLPAPERS" FIX, from the
+     * 2026-11-14 review): the old version read EVERY image with
+     * `java.io.File(path).readBytes()` — a guaranteed FileNotFoundException
+     * for the `content://com.android.externalstorage.documents/…` SAF
+     * URIs a linked folder's members are — and applied through
+     * WallpaperManager.setBitmap (FLAG_SYSTEM/FLAG_LOCK), which sets a
+     * STATIC system wallpaper and REPLACES the live wallpaper service the
+     * playlist runs on.
+     *
+     * The new path:
+     *  • HOME (or BOTH) — ALWAYS through the LIVE SERVICE's own loader:
+     *    the file is written as the engine's selected wallpaper and
+     *    `requestWallpaperReload()` loads it — exactly the
+     *    reloadActiveWallpaper path that has always worked (it handles
+     *    .mpkg packages, plain files AND content:// SAF URIs). The live
+     *    service keeps running; the playlist keeps its rotation state.
+     *  • LOCK — the one screen a third-party live wallpaper can never
+     *    own — gets the static WallpaperManager.setBitmap(FLAG_LOCK)
+     *    path. Its bytes are read through ContentResolver for content://
+     *    URIs and File for plain paths.
+     *  • BOTH-DIFFERENT — home via the service loader + a second image,
+     *    static, on the lock screen.
+     * The universal Home/Lock toggles drive `target` (resolvedTarget) —
+     * nothing here re-reads them.
+     */
     private suspend fun applyImagePath(
         context: Context,
         ctx: RunContext,
@@ -851,41 +902,61 @@ object RuleEngine {
         path: String,
         target: String,
     ) {
-        val ok = withContext(Dispatchers.IO) {
-            if (path.startsWith("content://") ||
-                listOf(".jpg", ".jpeg", ".png", ".webp", ".img", ".gif").any {
-                    path.lowercase().endsWith(it)
-                } || !path.contains(".mpkg")
-            ) {
-                // A static image: apply through the system wallpaper path
-                // (crop-free — the rule picked exactly what it wanted).
-                val bmp = com.wepwawet.discover.DiscoverApplier
-                    .decode(java.io.File(path).readBytes(), 2160)
-                if (bmp != null) {
-                    val home = target == "home" || target == "both"
-                    val lock = target == "lock" || target == "both"
-                    com.wepwawet.discover.DiscoverApplier.apply(context, bmp, home, lock).allOk
-                } else false
+        val wantHome = target == "home" || target == "both" || target == "bothDifferent"
+        val wantLock = target == "lock" || target == "both" || target == "bothDifferent"
+        ctx.blockReason = null
+        var homeOk = !wantHome
+        var lockOk = !wantLock
+        if (wantHome) {
+            val svc = WEWallpaperService.instance
+            if (svc == null) {
+                // v0.9.2: no fallback to a static set — that is the very
+                // call that replaced the live service. Report the honest
+                // reason instead (the ▶ result and the log both show it).
+                homeOk = false
+                ctx.blockReason = "wallpaper service not running"
+                WepWawetLogger.appWarn("$TAG: apply skipped — no live service",
+                    "path" to path.takeLast(56))
             } else {
-                // An engine wallpaper: the WE service loads it.
-                val svc = WEWallpaperService.instance
-                if (svc != null) {
+                withContext(Dispatchers.IO) {
                     io.wallpaperengine.weclient.WeEnginePrefs.storeString(
                         context, io.wallpaperengine.weclient.WeEnginePrefs
                             .PREF_KEY_SELECTED_WALLPAPER, path)
-                    svc.requestWallpaperReload()
-                    true
-                } else false
+                }
+                svc.requestWallpaperReload()
+                homeOk = true
+                WepWawetLogger.appInfo(
+                    "$TAG: wallpaper applied via live service loader",
+                    "path" to path.takeLast(56),
+                    "target" to target)
             }
         }
+        if (wantLock) {
+            lockOk = withContext(Dispatchers.IO) {
+                val bmp = readImageBytes(context, path)?.let {
+                    com.wepwawet.discover.DiscoverApplier.decode(it, 2160)
+                }
+                if (bmp == null) {
+                    ctx.blockReason = "could not read the image for the lock screen"
+                    WepWawetLogger.appWarn("$TAG: lock apply failed — unreadable image",
+                        "path" to path.takeLast(56))
+                    false
+                } else {
+                    val ok = com.wepwawet.discover.DiscoverApplier
+                        .apply(context, bmp, homeOn = false, lockOn = true).allOk
+                    if (ok) WepWawetLogger.appInfo(
+                        "$TAG: wallpaper applied to the lock screen (static)",
+                        "path" to path.takeLast(56))
+                    ok
+                }
+            }
+        }
+        val ok = homeOk && lockOk
         ctx.lastPickOk = ok
         if (ok) {
             ctx.values["last"] = path
             ctx.values["block:${b.id}"] = path
             rememberRecentPick(context, ctx.playlistId, path)
-            WepWawetLogger.appInfo("$TAG: wallpaper applied",
-                "path" to path.takeLast(56),
-                "target" to target)
             // v0.9.0 (rules): the "the wallpaper changed" trigger — our own
             // apply (the system broadcast covers manual changes).
             RuleEvents.post(context, RuleModel.TRIG_WALLPAPER_CHANGED)
@@ -893,14 +964,51 @@ object RuleEngine {
     }
 
     /**
+     * v0.9.2: read image bytes for ANY path the app uses — plain files
+     * and content:// SAF URIs (a linked folder's members are all
+     * `content://com.android.externalstorage.documents/…`, which
+     * `File(path).readBytes()` can never open).
+     */
+    private fun readImageBytes(context: Context, path: String): ByteArray? = try {
+        if (path.startsWith("content://")) {
+            context.contentResolver.openInputStream(android.net.Uri.parse(path))
+                ?.use { it.readBytes() }
+        } else {
+            java.io.File(path).takeIf { it.exists() }?.readBytes()
+        }
+    } catch (e: Exception) {
+        WepWawetLogger.appWarn("$TAG: image read failed",
+            "path" to path.takeLast(56),
+            "exception" to e.javaClass.simpleName,
+            "message" to (e.message ?: ""))
+        null
+    }
+
+    /**
      * next / previous / shuffle relative to the playlist's rotation order.
      *
-     * v0.9.0 redesign: this is the ONLY thing that advances a playlist —
-     * the "Every N" trigger runs it, the rotation itself no longer ticks.
-     * Random slots are real candidates (a picked slot PULLS a fresh image
-     * through its own settings); group blocks resolve to their members.
-     * A paused rotation or an active rule hold steps nothing. The target
-     * is the universal Home/Lock system, not the block's own field.
+     * v0.9.2 (THE "RANDOM / IN ORDER IS IGNORED" FIX, from the 2026-11-14
+     * review): stepPlaylist now READS playlist.orderMode and keeps a
+     * PERSISTED per-playlist cursor + history + random bag
+     * (suite_rules_runtime — they survive service restarts and reboots):
+     *
+     *  • IN ORDER — the persisted cursor advances +1 with wrap, following
+     *    the candidate list's order (each playlist entry in order; a group
+     *    block expands to its members in the block's own order).
+     *  • RANDOM — a shuffled BAG with no repeats until it is exhausted,
+     *    reshuffled then, and NEVER containing the current image.
+     *  • PREVIOUS — walks back through the persisted history.
+     *
+     * The cursor no longer derives from svc.currentWallpaperFile() — that
+     * value is stale for static images and left `idx = -1` (Next always
+     * landing on the first image). Every successful step updates the
+     * cursor + history atomically.
+     *
+     * v0.9.0 redesign notes that still hold: this is the ONLY thing that
+     * advances a playlist — the "Every N" trigger runs it; random slots
+     * are real candidates (a picked slot PULLS a fresh image through its
+     * own settings); a paused rotation or an active rule hold steps
+     * nothing; the target is the universal Home/Lock system.
      */
     private suspend fun stepPlaylist(
         context: Context,
@@ -908,40 +1016,187 @@ object RuleEngine {
         b: RuleModel.Block,
         dir: Int,
     ) {
+        val stepName = when { dir > 0 -> "next"; dir < 0 -> "previous"; else -> "shuffle" }
+        fun skip(reason: String) {
+            ctx.lastPickOk = false
+            ctx.blockReason = reason
+            WepWawetLogger.appInfo("$TAG: playlist step skipped — $reason",
+                "step" to stepName,
+                "playlist" to ctx.playlistId)
+        }
         val svc = WEWallpaperService.instance
-        if (svc?.isRotationPaused() == true) return
-        if (svc?.isRotationHeld() == true) return
-        val playlist = SuitePlaylistStore.read(context, ctx.playlistId) ?: return
+        if (svc == null) { skip("wallpaper service not running"); return }
+        if (svc.isRotationPaused()) { skip("rotation is paused"); return }
+        if (svc.isRotationHeld()) { skip("a rule is holding the current wallpaper"); return }
+        val playlist = SuitePlaylistStore.read(context, ctx.playlistId)
+        if (playlist == null) { skip("playlist not found"); return }
+        val paths = orderedStepCandidates(context, playlist)
+        if (paths.isEmpty()) { skip("playlist is empty"); return }
+        val current = svc.currentWallpaperFile()
+
+        // ── Pick per the order mode + direction ──
+        val picked: String? = when {
+            dir < 0 -> {
+                val history = readStepHistory(context, playlist.id)
+                val back = history.lastOrNull { it != current }
+                if (back == null) {
+                    skip("no previous wallpaper yet (history is empty)")
+                    null
+                } else back
+            }
+            playlist.orderMode == SuitePlaylistStore.ORDER_ORDERED -> {
+                val cursor = readStepCursor(context, playlist.id)
+                    .coerceIn(0, paths.size - 1)
+                // A cursor that points AT the current image advances to the
+                // NEXT one; a stale cursor (entries edited) just clamps.
+                var idx = cursor
+                if (paths[idx] == current) idx = (idx + 1).mod(paths.size)
+                paths[idx]
+            }
+            else -> {
+                // RANDOM — the bag (persisted, no repeats until exhausted,
+                // never the current image).
+                val bag = popBagNext(context, playlist.id, paths, current)
+                if (bag == null) {
+                    skip("random bag could not produce a new image")
+                    null
+                } else bag
+            }
+        }
+        if (picked == null) return
+
+        // ── Apply (a slot pulls a fresh image through its settings) ──
+        val applied: String? = if (RandomPullEngine.isSlot(picked)) {
+            val slot = playlist.entries.firstOrNull { it.filepath == picked }
+            if (slot == null) {
+                skip("random slot entry disappeared")
+                null
+            } else {
+                val pulled = withContext(Dispatchers.IO) {
+                    RandomPullEngine.pull(context, playlist, slot)
+                }
+                if (pulled == null) {
+                    skip("random slot pull failed")
+                    null
+                } else pulled
+            }
+        } else picked
+
+        if (applied == null) return
+        applyImagePath(context, ctx, b, applied, resolvedTarget(context, b.param3))
+        if (ctx.lastPickOk) {
+            recordStep(context, playlist.id, applied, paths, dir)
+            WepWawetLogger.appInfo("$TAG: playlist step applied",
+                "step" to stepName,
+                "order" to playlist.orderMode,
+                "picked" to applied.takeLast(56),
+                "target" to resolvedTarget(context, b.param3))
+        } else {
+            WepWawetLogger.appWarn("$TAG: playlist step picked but apply failed",
+                "step" to stepName,
+                "picked" to applied.takeLast(56),
+                "reason" to (ctx.blockReason ?: "unknown"))
+        }
+    }
+
+    /** The step candidate list: entries in order, group blocks resolved
+     *  in their block order, slots included as their markers. */
+    private suspend fun orderedStepCandidates(
+        context: Context,
+        playlist: SuitePlaylistStore.Playlist,
+    ): List<String> {
         val paths = ArrayList<String>()
         for (e in playlist.entries) {
             if (GroupBlocks.isGroupBlock(e.filepath)) {
                 paths.addAll(withContext(Dispatchers.IO) { GroupBlocks.resolve(context, e).paths })
             } else {
-                // Slots included — a landing pulls fresh.
                 paths.add(e.filepath)
             }
         }
-        if (paths.isEmpty()) return
-        val current = svc?.currentWallpaperFile()
-        val idx = current?.let { paths.indexOf(it) } ?: -1
-        val picked = when {
-            dir > 0 -> paths[(idx + 1).coerceAtLeast(0).mod(paths.size)]
-            dir < 0 -> paths[(idx - 1 + paths.size).mod(paths.size)]
-            else -> paths[Random.nextInt(paths.size)]
-        }
-        if (RandomPullEngine.isSlot(picked)) {
-            val slot = playlist.entries.firstOrNull { it.filepath == picked } ?: return
-            val pulled = withContext(Dispatchers.IO) {
-                RandomPullEngine.pull(context, playlist, slot)
-            }
-            if (pulled != null) {
-                applyImagePath(context, ctx, b, pulled, resolvedTarget(context, b.param3))
-            } else {
-                ctx.lastPickOk = false
-            }
+        return paths
+    }
+
+    // ── The persisted per-playlist step state (v0.9.2) ──────────────────
+    // Paths are joined with a newline separator (URIs can contain any
+    // other character).
+
+    private fun stepPrefs(context: Context) =
+        context.getSharedPreferences("suite_rules_runtime", Context.MODE_PRIVATE)
+
+    private fun readStepCursor(context: Context, playlistId: String): Int =
+        stepPrefs(context).getInt("plcursor|$playlistId", 0)
+
+    private fun readStepHistory(context: Context, playlistId: String): List<String> =
+        stepPrefs(context).getString("plhistory|$playlistId", "")
+            ?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
+
+    /** Persist the cursor + history after a successful step. */
+    private fun recordStep(
+        context: Context,
+        playlistId: String,
+        applied: String,
+        paths: List<String>,
+        dir: Int,
+    ) {
+        val prefs = stepPrefs(context)
+        val history = readStepHistory(context, playlistId).toMutableList()
+        if (dir < 0) {
+            // Previous walked back — everything after the re-shown image
+            // leaves the history so the NEXT Previous goes further back.
+            val at = history.indexOfLast { it == applied }
+            if (at >= 0) history.subList(at + 1, history.size).clear()
         } else {
-            applyImagePath(context, ctx, b, picked, resolvedTarget(context, b.param3))
+            history.add(applied)
+            while (history.size > 40) history.removeAt(0)
         }
+        val idx = paths.indexOf(applied)
+        prefs.edit()
+            .putString("plhistory|$playlistId", history.joinToString("\n"))
+            .apply()
+        if (idx >= 0) {
+            prefs.edit().putInt("plcursor|$playlistId", idx).apply()
+        }
+        // In-order mode: the cursor should point AT what's shown so the
+        // next step advances past it.
+        WepWawetLogger.appDebug("RuleEngine: step state persisted",
+            "playlist" to playlistId,
+            "cursor" to idx,
+            "history" to history.size)
+    }
+
+    /**
+     * Pop the next path from the persisted random bag — a shuffled copy of
+     * the candidates minus the current image, refilled when exhausted (or
+     * when the candidate membership changed since the bag was built).
+     */
+    private fun popBagNext(
+        context: Context,
+        playlistId: String,
+        paths: List<String>,
+        current: String?,
+    ): String? {
+        if (paths.isEmpty()) return null
+        if (paths.size == 1) return paths[0]
+        val prefs = stepPrefs(context)
+        val membership = paths.joinToString(",").hashCode().toString()
+        val bag = prefs.getString("plbag|$playlistId", "")
+            ?.split('\n')?.filter { it.isNotBlank() && it in paths } ?: emptyList()
+        val staleMembership = prefs.getString("plbagSig|$playlistId", "") != membership
+        var pool = if (bag.isEmpty() || staleMembership) {
+            (paths.filter { it != current }).shuffled(Random)
+        } else bag.toMutableList()
+        // The current image NEVER comes out of the bag.
+        pool = pool.filter { it != current }.toMutableList()
+        while (pool.isEmpty()) {
+            pool = (paths.filter { it != current }).shuffled(Random).toMutableList()
+            if (pool.isEmpty() && paths.isNotEmpty()) return paths[0]
+        }
+        val next = pool.removeAt(0)
+        prefs.edit()
+            .putString("plbag|$playlistId", pool.joinToString("\n"))
+            .putString("plbagSig|$playlistId", membership)
+            .apply()
+        return next
     }
 
     // Recent picks ("avoid the most recently shown").

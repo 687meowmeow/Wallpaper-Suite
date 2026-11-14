@@ -244,12 +244,19 @@ fun SettingsScreen(
             SlimTopBar(
                 title = "Settings",
                 onBack = onBack,
-                // v0.9.1: the universal Home/Lock toggles + the Logs
-                // button (always shown, v0.7.1; SlimTopBarIcon v0.8.15 —
-                // the bare 48dp IconButton was visibly larger than every
-                // other screen's 40dp top-bar action).
+                // v0.9.2 (review): the toggles sit DIRECTLY RIGHT of the
+                // page name — in the title slot. The Logs button (always
+                // shown, v0.7.1) stays in the action slot.
+                titleContent = {
+                    androidx.compose.foundation.layout.Row(
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    ) {
+                        Text("Settings", style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.width(8.dp))
+                        com.wepwawet.ui.components.ScreenToggles()
+                    }
+                },
                 actions = {
-                    com.wepwawet.ui.components.ScreenToggles()
                     com.wepwawet.ui.components.SlimTopBarIcon(
                         onClick = onOpenLogs,
                         contentDescription = "Logs",

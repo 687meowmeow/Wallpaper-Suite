@@ -74,6 +74,18 @@ class BootReceiver : BroadcastReceiver() {
             Intent.ACTION_BOOT_COMPLETED,
             Intent.ACTION_MY_PACKAGE_REPLACED -> {
                 startPairingService(context)
+                // v0.9.2: re-arm the RULES HUB + its AlarmManager wake —
+                // the alarm's PendingIntent survives reboot only as a
+                // manifest receiver; the hub registrations and the NEXT
+                // wake must be scheduled again after boot/update.
+                runCatching {
+                    com.wepwawet.rules.RuleTriggerHub.start(context)
+                    WepWawetLogger.appInfo("BootReceiver: rules hub restarted")
+                }.onFailure {
+                    WepWawetLogger.appWarn("BootReceiver: rules hub restart failed",
+                        "exception" to it.javaClass.simpleName,
+                        "message" to (it.message ?: ""))
+                }
             }
             else -> {
                 WepWawetLogger.proxyWarn("$TAG: unexpected action — ignoring",

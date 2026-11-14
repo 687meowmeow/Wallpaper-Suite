@@ -250,6 +250,14 @@
             `android:exported` to be explicitly set on all components with
             intent filters.)
         -->
+        <!-- v0.9.2: the time-trigger wake target — fired ONLY by the explicit
+             package-scoped PendingIntent from RuleTriggerHub.scheduleNextWake
+             (AlarmManager.setAndAllowWhileIdle). No intent-filter and
+             exported="false": nothing but our own alarm can reach it. -->
+        <receiver
+            android:name=".rules.RuleAlarmReceiver"
+            android:exported="false" />
+
         <receiver
             android:name=".pairing.BootReceiver"
             android:exported="true">

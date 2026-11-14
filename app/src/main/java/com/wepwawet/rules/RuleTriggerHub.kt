@@ -101,12 +101,6 @@ object RuleTriggerHub {
         null
     private var lastOrientation = -1
 
-    private val wakeRunnable = object : Runnable {
-        override fun run() {
-            fireDueTimeTriggers()
-            scheduleNextWake()
-        }
-    }
 
     /** Start (or re-aggregate) the hub for the trigger types rules use. */
     fun start(context: Context) {
@@ -153,10 +147,26 @@ object RuleTriggerHub {
             val filter = IntentFilter()
             for (a in actions) filter.addAction(a)
             try {
-                appCtx.registerReceiver(receiver, filter)
+                // v0.9.2 (THE HUB-NEVER-STARTS FIX): this filter can include
+                // the CUSTOM ACTION_WALLPAPER_CHANGED action, so Android 14+
+                // requires an export flag — without it registerReceiver
+                // throws SecurityException and EVERY system-broadcast
+                // trigger in the filter dies with it (screen/charger/battery
+                // triggers never fire). NOT_EXPORTED: system broadcasts are
+                // delivered to the receiver regardless of the flag; the
+                // custom action is only ever sent by the system
+                // (WallpaperManager), which reaches dynamic receivers too.
+                androidx.core.content.ContextCompat.registerReceiver(
+                    appCtx, receiver, filter,
+                    androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+                )
+                WepWawetLogger.appInfo("$TAG: broadcast receiver registered",
+                    "actions" to actions.joinToString(","),
+                    "flag" to "RECEIVER_NOT_EXPORTED")
             } catch (e: Exception) {
                 WepWawetLogger.appWarn("$TAG: receiver registration failed",
-                    "exception" to e.javaClass.simpleName)
+                    "exception" to e.javaClass.simpleName,
+                    "message" to (e.message ?: ""))
             }
         }
 
@@ -362,16 +372,26 @@ object RuleTriggerHub {
     }
 
     private fun nextDayOfWeek(day: Int, now: Long): Long {
+        // v0.9.2 (audit pass 2): the old `(day + 1) % 7 + firstDayOfWeek`
+        // mixed a 0-based user day with Calendar's 1-based constants and
+        // the LOCALE's first-day-of-week — correct only where the week
+        // starts on Sunday (a Sunday rule fired on Tuesday in Monday-first
+        // locales). The user's day 0..6 (Mon..Sun) maps to the explicit
+        // Calendar constant, and the walk advances by whole DAYS.
+        if (day !in 0..6) return now
+        val target = intArrayOf(
+            Calendar.MONDAY, Calendar.TUESDAY, Calendar.WEDNESDAY,
+            Calendar.THURSDAY, Calendar.FRIDAY, Calendar.SATURDAY, Calendar.SUNDAY,
+        )[day]
         val cal = Calendar.getInstance()
         cal.timeInMillis = now
-        if (day in 0..6) {
-            val target = (day + 1) % 7 + cal.firstDayOfWeek  // Calendar day constant
-            while (cal.get(Calendar.DAY_OF_WEEK) != target ||
-                (cal.get(Calendar.HOUR_OF_DAY) == 0 && cal.get(Calendar.MINUTE) < 1)
-            ) {
-                cal.add(Calendar.MINUTE, 1)
-                if (cal.timeInMillis > now + 8 * 24 * 60 * 60_000L) break
-            }
+        cal.set(Calendar.HOUR_OF_DAY, 0)
+        cal.set(Calendar.MINUTE, 0)
+        cal.set(Calendar.SECOND, 5)
+        cal.set(Calendar.MILLISECOND, 0)
+        if (cal.timeInMillis <= now) cal.add(Calendar.DAY_OF_YEAR, 1)
+        while (cal.get(Calendar.DAY_OF_WEEK) != target) {
+            cal.add(Calendar.DAY_OF_YEAR, 1)
         }
         return cal.timeInMillis
     }
@@ -395,9 +415,7 @@ object RuleTriggerHub {
     }
 
     private fun scheduleNextWake() {
-        handler.removeCallbacks(wakeRunnable)
         WepWawetApplication.appScope.launch {
-            // The schedule needs a context — grab one from the application.
             val ctx = WepWawetApplication.instance ?: return@launch
             val now = System.currentTimeMillis()
             val next = withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -405,8 +423,59 @@ object RuleTriggerHub {
             }
             val delay = ((next ?: (now + MAX_WAKE_MS)) - now)
                 .coerceIn(1_000L, MAX_WAKE_MS)
-            handler.postDelayed(wakeRunnable, delay)
+            // v0.9.2 (THE WAKE-CAN'T-BE-TRUSTED FIX): AlarmManager instead
+            // of Handler.postDelayed — the handler ran on the UPTIME clock
+            // and stopped in deep sleep, so interval/time triggers never
+            // fired while the device dozed. setAndAllowWhileIdle fires in
+            // doze (once per 9-minute idle window worst-case, immediately
+            // otherwise); RTC_WAKEUP uses the wall clock. The PendingIntent
+            // is explicit (component + package) — a manifest receiver with
+            // android:exported="false" and no filter. Re-armed on app
+            // start, boot (BootReceiver), and every rules change.
+            val at = now + delay
+            val am = ctx.getSystemService(Context.ALARM_SERVICE)
+                as? android.app.AlarmManager
+            if (am == null) {
+                WepWawetLogger.appWarn("$TAG: no AlarmManager — wake NOT armed")
+                return@launch
+            }
+            val pi = alarmPendingIntent(ctx)
+            runCatching {
+                am.cancel(pi)
+                if (android.os.Build.VERSION.SDK_INT >= 23) {
+                    am.setAndAllowWhileIdle(
+                        android.app.AlarmManager.RTC_WAKEUP, at, pi)
+                } else {
+                    @Suppress("DEPRECATION")
+                    am.setExact(android.app.AlarmManager.RTC_WAKEUP, at, pi)
+                }
+                WepWawetLogger.appInfo("$TAG: next wake armed",
+                    "at" to at,
+                    "in_ms" to delay,
+                    "driven_by" to "AlarmManager.setAndAllowWhileIdle")
+            }.onFailure {
+                WepWawetLogger.appWarn("$TAG: wake arming failed",
+                    "exception" to it.javaClass.simpleName,
+                    "message" to (it.message ?: ""))
+            }
         }
+    }
+
+    /** The alarm's explicit PendingIntent → the manifest RuleAlarmReceiver. */
+    private fun alarmPendingIntent(ctx: Context): android.app.PendingIntent {
+        val intent = Intent(ctx, RuleAlarmReceiver::class.java)
+            .setPackage(ctx.packageName)
+            .setAction("com.wepwawet.rules.WAKE_TICK")
+        return android.app.PendingIntent.getBroadcast(
+            ctx, 9101, intent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or
+                android.app.PendingIntent.FLAG_IMMUTABLE)
+    }
+
+    /** The alarm fired (RuleAlarmReceiver) — run due triggers + re-arm. */
+    suspend fun onAlarmWake(ctx: Context) {
+        fireDueTimeTriggers()
+        scheduleNextWake()
     }
 
     /**

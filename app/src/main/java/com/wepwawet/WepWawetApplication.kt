@@ -181,11 +181,45 @@ class WepWawetApplication : Application(), Configuration.Provider, ImageLoaderFa
         // source for every rule (one receiver set, one computed time wake,
         // re-aggregated whenever the rules change), plus the notification
         // rule-button receiver.
+        //
+        // v0.9.2 (THE HUB-NEVER-STARTS FIX, from the 2026-11-14 device log):
+        // the old single runCatching registered RuleButtonReceiver with a
+        // custom action and NO export flag — Android 14+ throws
+        // SecurityException ("One of RECEIVER_EXPORTED or RECEIVER_NOT_EXPORTED
+        // should be specified…"), and because the channel + hub start sat in
+        // the SAME runCatching, the exception silently skipped them too:
+        // zero `hub started` lines, zero `rule fired` lines, no interval
+        // trigger ever fired. Each step now has its OWN runCatching, and the
+        // receiver is registered with ContextCompat.RECEIVER_NOT_EXPORTED
+        // (the FIRE_RULE intent is package-explicit — see RuleEngine's
+        // buildRuleButtonNotification setPackage — so NOT_EXPORTED receives
+        // it; system broadcasts are delivered regardless of the flag).
         runCatching {
-            registerReceiver(
+            androidx.core.content.ContextCompat.registerReceiver(
+                this,
                 com.wepwawet.rules.RuleButtonReceiver(),
-                android.content.IntentFilter("com.wepwawet.rules.FIRE_RULE"))
+                android.content.IntentFilter("com.wepwawet.rules.FIRE_RULE"),
+                androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+            if (loggerOk) WepWawetLogger.appInfo(
+                "WepWawetApplication: rule-button receiver registered",
+                "flag" to "RECEIVER_NOT_EXPORTED")
+        }.onFailure { t ->
+            if (loggerOk) WepWawetLogger.appWarn(
+                "WepWawetApplication: rule-button receiver registration failed",
+                "exception" to t.javaClass.simpleName,
+                "message" to (t.message ?: ""))
+            else Log.e(TAG, "rule-button receiver registration failed", t)
+        }
+        runCatching {
             com.wepwawet.rules.RuleEngine.ensureChannel(this)
+        }.onFailure { t ->
+            if (loggerOk) WepWawetLogger.appWarn("rules channel creation failed",
+                "exception" to t.javaClass.simpleName,
+                "message" to (t.message ?: ""))
+            else Log.e(TAG, "rules channel creation failed", t)
+        }
+        runCatching {
             com.wepwawet.rules.RuleTriggerHub.start(this)
         }.onFailure { t ->
             if (loggerOk) WepWawetLogger.appWarn("rules hub start failed",

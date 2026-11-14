@@ -135,8 +135,19 @@ object SuitePlaylistStore {
                 StoreFile()
             }
         } catch (e: Exception) {
-            WepWawetLogger.appWarn("SuitePlaylistStore: read failed — resetting",
-                "exception" to e.javaClass.name)
+            // v0.9.2 (audit pass 1): a read failure must NOT silently reset
+            // to an empty store — the next writeStore would then WIPE every
+            // playlist the user has ("this playlist no longer exists"). The
+            // unreadable file is quarantined as a .corrupt-timestamp backup
+            // so this run starts empty but the data is recoverable, and the
+            // failure is LOUD.
+            val stamp = System.currentTimeMillis()
+            runCatching { file(context).copyTo(
+                File(context.filesDir, "suite_playlists.json.corrupt-$stamp"), overwrite = true) }
+            runCatching { file(context).delete() }
+            WepWawetLogger.appWarn("SuitePlaylistStore: read failed — file quarantined, starting empty",
+                "exception" to e.javaClass.name,
+                "backup" to "suite_playlists.json.corrupt-$stamp")
             StoreFile()
         }
     }
