@@ -46,8 +46,9 @@ android {
         // both breaks build reproducibility and needlessly busts the Gradle
         // + engine asset caches between otherwise-identical builds. The commit
         // time changes only when the source actually changes.
+        val assetVersionCode = versionCode
         buildConfigField("String", "ENGINE_ASSET_TIME",
-            "\"${getGitCommitEpochSeconds(versionCode)}\"")
+            "\"${getGitCommitEpochSeconds(assetVersionCode)}\"")
         // Multidex not needed since we don't have 65k+ methods, but explicit
         multiDexEnabled = true
         // Required for very large APKs that include assets > 200 MB
