@@ -1,6 +1,7 @@
 package com.wepwawet.discover
 
 import android.content.Context
+import android.net.ConnectivityManager
 import com.wepwawet.log.WepWawetLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch

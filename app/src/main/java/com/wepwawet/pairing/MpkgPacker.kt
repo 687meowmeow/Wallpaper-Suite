@@ -958,7 +958,7 @@ object MpkgPacker {
                                 "cap" to MAX_IN_PKG_VIDEO_BYTES)
                             null
                         } else {
-                            val (_, dataStart) = vfsData
+                            val (_, dataStart) = vfsData!!
                             java.io.FileOutputStream(tempSource).use { fos ->
                                 PkgReader.streamEntryData(pkgFile, dataStart,
                                     pending.vfs.offset, pending.vfs.size.toLong(), fos)

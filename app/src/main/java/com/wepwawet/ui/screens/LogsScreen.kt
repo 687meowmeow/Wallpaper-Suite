@@ -191,8 +191,12 @@ fun LogsScreen(onBack: () -> Unit) {
                             .append(") ===\n")
                         sb.append(text)
                         sb.append("\n=== end of engine log ===\n")
-                    }.onFailure { WepWawetLogger.appWarn("LogsScreen: appendEngineLogTail — reading the engine log failed", "exception" to it.javaClass.simpleName) }
-                }.onFailure { WepWawetLogger.appWarn("LogsScreen: downloadLogs — the runCatching block failed", "exception" to it.javaClass.simpleName, "message" to (it.message ?: "")) }
+                    }
+                }.onFailure {
+                    WepWawetLogger.appWarn("LogsScreen: appendEngineLogTail — reading the engine log failed",
+                        "exception" to it.javaClass.simpleName,
+                        "message" to (it.message ?: ""))
+                }
                 val text = sb.toString()
                 val uri = PublicDownloadsWriter.writeText(context, fileName, text)
                 withContext(Dispatchers.Main) {

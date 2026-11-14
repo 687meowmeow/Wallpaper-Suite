@@ -868,7 +868,7 @@ fun PlaylistEditorScreen(
             },
             onStarter = { starter ->
                 showTriggerSheet = false
-                saveRules { rules.add(starter()) }
+                saveRules { rules.add(starter.second()) }
                 rulesData = SuiteRulesStore.readPlaylistRules(context, playlistId)
             },
         )
@@ -1242,7 +1242,7 @@ private fun PlaylistRuleRow(
 private fun PlaylistTriggerSheet(
     onDismiss: () -> Unit,
     onPick: (String) -> Unit,
-    onStarter: ( Pair<String, () -> RuleModel.Rule> ) -> Unit,
+    onStarter: (starter: Pair<String, () -> RuleModel.Rule>) -> Unit,
 ) {
     var search by remember { mutableStateOf("") }
     ModalBottomSheet(onDismissRequest = onDismiss) {

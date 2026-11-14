@@ -557,7 +557,7 @@ fun InteractiveCropSurface(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .androidx.compose.ui.draw.clipToBounds()
+                .clipToBounds()
                 // ── Detector 1: the FRAME handles. A drag that starts on a
                 //    corner/edge of the frame RESIZES it (consumed, so
                 //    detector 2 leaves it alone). A drag anywhere else —

@@ -1199,7 +1199,7 @@ class WEWallpaperService : WallpaperService() {
             }
 
             wallpaper?.setVisibility(GLSurfaceView.VISIBLE)
-            parallaxController.linkWallpaper(videoWallpaperView)
+            wallpaperControls?.let { parallaxController.linkWallpaper(it) }
             wallpaperControls?.setLoadCallback {
                 wallpaperControls?.let { controls ->
                     applyProperties(controls.getWallpaperProperties())

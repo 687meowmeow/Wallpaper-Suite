@@ -36,7 +36,12 @@ import androidx.compose.material.icons.filled.FilterAlt
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material3.Surface
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlaylistAdd
@@ -1096,9 +1101,9 @@ internal fun BlockCard(
                 val rowH = with(density) { 64.dp.toPx() }
                 detectDragGesturesAfterLongPress(
                     onDragStart = { dragCrossings = 0 },
-                    onDrag = { change, drag ->
+                    onDrag = { change, dragAmount ->
                         change.consume()
-                        val target = (drag.position.y / rowH).toInt()
+                        val target = (change.position.y / rowH).toInt()
                         // One onMove(±1) per crossing keeps the parent's
                         // clamp in charge; the live move updates the list
                         // and the card's position follows.
