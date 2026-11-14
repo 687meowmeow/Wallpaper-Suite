@@ -197,50 +197,58 @@ class CrashHandler private constructor(
 
     // ====== Write to internal storage (always works) ======
 
-    private fun writeInternal(report: String, ts: Long) {
+    private fun writeInternal(report: String, @Suppress("UNUSED_PARAMETER") ts: Long) {
+        // v0.9.1: ONE file, period — crash-latest.txt only. The old scheme
+        // also wrote crash-<timestamp>.txt on every crash, so the pile grew
+        // forever ("make it stop making more than one crash txt file when
+        // it crashes"). The timestamped leftovers are swept here.
         val crashDir = java.io.File(appContext.filesDir, "wepwawet/crashes").apply { mkdirs() }
-        val crashFile = java.io.File(crashDir, "crash-$ts.txt")
-        crashFile.writeText(report)
-        // Also write a "latest" symlink-ish file so the user can always find the most recent
         runCatching {
-            java.io.File(crashDir, "crash-latest.txt").writeText(report)
+            crashDir.listFiles { f -> f.name.startsWith("crash-") && f.name != "crash-latest.txt" }
+                ?.forEach { f ->
+                    runCatching { f.delete() }.onFailure {
+                        WepWawetLogger.appDebug("Cleanup: old crash file delete failed",
+                            "exception" to it.javaClass.simpleName)
+                    }
+                }
         }
+        java.io.File(crashDir, "crash-latest.txt").writeText(report)
     }
 
     // ====== Write to public Downloads/WepWawet/ (user-visible) ======
 
-    private fun writePublicDownloads(context: Context, report: String, ts: Long) {
-        val fileName = "crash-$ts.txt"
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // Android 10+ — use MediaStore.Downloads collection (no permission needed)
-            writeViaMediaStore(context, fileName, report)
-        } else {
-            // Android 9 and below — legacy File API to public Downloads dir
-            writeLegacyDownloads(fileName, report)
-        }
-
-        // Also write a "latest" file in Downloads/WepWawet/ so user can find it quickly
+    private fun writePublicDownloads(context: Context, report: String, @Suppress("UNUSED_PARAMETER") ts: Long) {
+        // v0.9.1: ONE file, period — the user-visible
+        // Downloads/WepWawet/crash-latest.txt, overwritten every crash.
+        // The old scheme ALSO dropped crash-<timestamp>.txt on every crash
+        // ("make it stop making more than one crash txt file when it
+        // crashes"), so those rows are deleted (only OURS — we own the
+        // WepWawet/ directory) and never written again.
         val latestName = "crash-latest.txt"
-        runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                // v0.7.24 (H-A4 BUG FIX): the previous crash-latest.txt row
-                // was never deleted, so MediaStore auto-renamed every new
-                // write to "crash-latest (1).txt", "(2).txt", … — the user
-                // saw a growing pile of "latest" files while the actual
-                // crash-latest.txt stayed frozen at the first crash. Delete
-                // the existing row (only OURS — we own it) before inserting.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching {
                 val resolver = context.contentResolver
+                // Delete BOTH the latest row AND any legacy timestamped
+                // crash-*.txt rows (including MediaStore's auto-renamed
+                // "crash-latest (1).txt" copies from the v0.7.24 bug).
                 resolver.delete(
                     MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                    "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND " +
-                        "${MediaStore.MediaColumns.RELATIVE_PATH} = ?",
-                    arrayOf(latestName, "Download/WepWawet/"),
+                    "${MediaStore.MediaColumns.RELATIVE_PATH} = ?",
+                    arrayOf("Download/WepWawet/"),
                 )
-                writeViaMediaStore(context, latestName, report)
-            } else {
-                writeLegacyDownloads(latestName, report)
             }
+            writeViaMediaStore(context, latestName, report)
+        } else {
+            // Android 9 and below — legacy File API: delete every old
+            // crash-*.txt, then write the single latest.
+            runCatching {
+                val dir = java.io.File(
+                    android.os.Environment.getExternalStoragePublicDirectory(
+                        android.os.Environment.DIRECTORY_DOWNLOADS), "WepWawet")
+                dir.listFiles { f -> f.name.startsWith("crash-") }
+                    ?.forEach { f -> runCatching { f.delete() } }
+            }
+            writeLegacyDownloads(latestName, report)
         }
     }
 

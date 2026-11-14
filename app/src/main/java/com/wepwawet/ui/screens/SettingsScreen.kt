@@ -244,11 +244,12 @@ fun SettingsScreen(
             SlimTopBar(
                 title = "Settings",
                 onBack = onBack,
-                // Logs button (top-right) — always shown (v0.7.1).
-                // v0.8.15: SlimTopBarIcon — the bare 48dp IconButton was
-                // visibly larger than every other screen's 40dp top-bar
-                // action.
+                // v0.9.1: the universal Home/Lock toggles + the Logs
+                // button (always shown, v0.7.1; SlimTopBarIcon v0.8.15 —
+                // the bare 48dp IconButton was visibly larger than every
+                // other screen's 40dp top-bar action).
                 actions = {
+                    com.wepwawet.ui.components.ScreenToggles()
                     com.wepwawet.ui.components.SlimTopBarIcon(
                         onClick = onOpenLogs,
                         contentDescription = "Logs",

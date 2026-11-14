@@ -263,12 +263,11 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
     // (drag to move, pinch to zoom), and Set applies exactly the VISIBLE
     // region (WYSIWYG). A 42%-screen height sanity cap only letterboxes
     // absurdly wide aspects; the window itself keeps the phone ratio.
-    val phoneAspect = run {
-        val dm = context.resources.displayMetrics
-        val w = dm.widthPixels.toFloat()
-        val h = dm.heightPixels.toFloat()
-        if (w > 0f && h > 0f) w / h else 9f / 19.5f
-    }
+    // v0.9.1: the shared portrait-normalized PHYSICAL display ratio (see
+    // phoneDisplayAspectRatio) — the old displayMetrics read picked up the
+    // current window's rotation + insets, so the window was the wrong shape.
+    val phoneAspect =
+        com.wepwawet.ui.screens.phoneDisplayAspectRatio(context)
 
     // v0.8.20 (fixed window): the preview window's HEIGHT is FIXED —
     // 42% of the physical screen ("the image in discover is too big. it
@@ -377,6 +376,12 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                 // constant (8 — see DiscoverPrefs.QUEUE_SIZE).
                 while (DiscoverPrefs.queueDepth(context, signature) <
                     DiscoverPrefs.QUEUE_TARGET) {
+                    // v0.9.1: the refill excludes BOTH the recents AND the
+                    // URLs already sitting in the queue — a random draw can
+                    // repeat inside one refill loop, and duplicates in the
+                    // queue meant Refresh showed the same image repeatedly.
+                    val excluded = DiscoverPrefs.readRecentUrls(context) +
+                        DiscoverPrefs.readQueuedUrls(context)
                     val nextUrl = withContext(Dispatchers.IO) {
                         runCatching {
                             DiscoverSearch.searchOne(
@@ -385,7 +390,7 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                                 softTags = softTags,
                                 styleValue = styleValue,
                                 r18Mode = r18Mode,
-                                recentUrls = DiscoverPrefs.readRecentUrls(context),
+                                recentUrls = excluded,
                                 sources = sources,
                             )
                         }
@@ -397,18 +402,13 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                         .getOrNull()
                     } ?: break
                     val nextBytes = withContext(Dispatchers.IO) {
-                        runCatching { DiscoverSearch.downloadImage(nextUrl) }.onFailure { WepWawetLogger.appWarn("DiscoverScreen: DiscoverSearch — best-effort call failed", "exception" to it.javaClass.simpleName) }
-                        .onFailure {
-                            WepWawetLogger.appWarn("DiscoverScreen: queue prefetch download failed",
-                                "exception" to it.javaClass.simpleName,
-                                "message" to (it.message ?: ""))
-                        }
+                        runCatching { DiscoverSearch.downloadImage(nextUrl) }
                             .onFailure {
                                 WepWawetLogger.appWarn("DiscoverScreen: refillQueue — the preload download failed",
                                     "exception" to it.javaClass.simpleName,
                                     "message" to (it.message ?: ""))
                             }
-                        .getOrNull()
+                            .getOrNull()
                     }
                     if (nextBytes == null || nextBytes.size <= 1024) break
                     withContext(Dispatchers.IO) {
@@ -468,7 +468,9 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                     softTags = softTags,
                     styleValue = styleValue,
                     r18Mode = r18Mode,
-                    recentUrls = DiscoverPrefs.readRecentUrls(context),
+                    // v0.9.1: also skip what's already queued for later.
+                    recentUrls = DiscoverPrefs.readRecentUrls(context) +
+                        DiscoverPrefs.readQueuedUrls(context),
                     sources = sources,
                 )
             }
@@ -761,6 +763,9 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
             SlimTopBar(
                 title = "Discover",
                 onBack = onBack,
+                // v0.9.1: the universal Home/Lock toggles, in the EXISTING
+                // top bar (right of the title) — no separate strip.
+                actions = { com.wepwawet.ui.components.ScreenToggles() },
             )
         },
         snackbarHost = { SnackbarHost(snackbar) },
@@ -884,24 +889,51 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                                 },
                         )
                     }
-                    // Dual-mode preview switch (tap the label).
-                    if (DiscoverPrefs.isDualMode(homeState, lockState) &&
-                        previewLockBitmap != null
-                    ) {
-                        Text(
-                            if (previewingLock) "Lock preview — tap to switch"
-                            else "Home preview — tap to switch",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color.White,
-                            modifier = Modifier
-                                .align(Alignment.TopCenter)
-                                .padding(top = 8.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(Color.Black.copy(alpha = 0.55f))
-                                .clickable { previewingLock = !previewingLock }
-                                .padding(horizontal = 10.dp, vertical = 4.dp),
-                        )
+                    // v0.9.1: the target-screen pill — always visible over
+                    // the preview. Both ON → one image on both screens (no
+                    // action needed); exactly ONE on → "tap to switch"
+                    // flips WHICH screen gets it (the same quick hint the
+                    // old dual mode had); none on → a pointer to the toggles
+                    // (now in the top bar).
+                    val homeOn = homeState != DiscoverPrefs.SCREEN_OFF
+                    val lockOn = lockState != DiscoverPrefs.SCREEN_OFF
+                    val pillText = when {
+                        homeOn && lockOn -> "Setting Home + Lock"
+                        homeOn -> "Setting Home — tap to switch"
+                        lockOn -> "Setting Lock — tap to switch"
+                        else -> "Pick a screen in the top bar"
                     }
+                    Text(
+                        pillText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 8.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color.Black.copy(alpha = 0.55f))
+                            .clickable {
+                                when {
+                                    // Both on: nothing to switch (one image,
+                                    // both screens).
+                                    homeOn && lockOn -> {}
+                                    homeOn -> {
+                                        screens = DiscoverPrefs.SCREEN_OFF to
+                                            DiscoverPrefs.SCREEN_ON
+                                        DiscoverPrefs.writeScreens(
+                                            context, screens.first, screens.second)
+                                    }
+                                    lockOn -> {
+                                        screens = DiscoverPrefs.SCREEN_ON to
+                                            DiscoverPrefs.SCREEN_OFF
+                                        DiscoverPrefs.writeScreens(
+                                            context, screens.first, screens.second)
+                                    }
+                                    else -> {}
+                                }
+                            }
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                    )
                     // v0.8.21: the zoom badge is GONE ("remove the zoom
                     // number in the corner of it") — the window resets on
                     // every new image, and pan/zoom is clamped so it can
@@ -921,9 +953,9 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
             }
 
             // ===== Tools row =====
-            // v0.9.0 redesign: the Home/Lock tri-state toggles MOVED to the
-            // top of the app (UniversalScreenToggles in WepWawetNavHost) —
-            // one shared spot that governs every apply in the app.
+            // v0.9.1: the Home/Lock toggles live in each main screen's top
+            // bar (ScreenToggles) — one shared spot that governs every
+            // apply in the app.
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -934,6 +966,15 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                     Spacer(Modifier.width(6.dp))
                     Text("Undo")
                 }
+                // v0.9.1: the live queue depth — visible feedback that
+                // Refresh swaps instantly and that the preloaded images are
+                // actually NEW ones each time (the dedup fix).
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "${DiscoverPrefs.queueDepth(context, currentSignature())} preloaded",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
             // ===== Set / Refresh (v0.8.15: SEPARATE actions) =====

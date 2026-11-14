@@ -343,16 +343,48 @@ fun ImageEditorScreen(
 
 /** The preset aspect list — Free + this display's own ratio + classics. */
 fun cropPresets(context: android.content.Context): List<Pair<String, Float?>> {
-    val m = context.resources.displayMetrics
     return listOf(
         "Free" to null,
-        "Phone" to (m.widthPixels.toFloat() / m.heightPixels),
+        // v0.9.1: the Phone preset uses the display's REAL physical bounds
+        // (WindowMetrics), portrait-normalized — the old
+        // displayMetrics.widthPixels/heightPixels read the CURRENT window
+        // (landscape-locked editor → inverted ratio, and system-bar
+        // insets → off-ratio), so the preset cropped to the WRONG shape.
+        "Phone" to phoneDisplayAspectRatio(context),
         "1:1" to 1f,
         "4:3" to 4f / 3f,
         "3:4" to 3f / 4f,
         "16:9" to 16f / 9f,
         "9:16" to 9f / 16f,
     )
+}
+
+/**
+ * v0.9.1: this display's PHYSICAL aspect ratio, portrait-normalized —
+ * shorter side over longer side, so the Phone preset is the portrait
+ * screen shape no matter which orientation the editor currently runs in.
+ */
+fun phoneDisplayAspectRatio(context: android.content.Context): Float {
+    return try {
+        // API 30+: the maximum bounds = the full hardware display, without
+        // the current window's rotation or insets.
+        val wm = context.getSystemService(android.content.Context.WINDOW_SERVICE)
+            as? android.view.WindowManager
+        val bounds = wm?.maximumWindowMetrics?.bounds
+        if (bounds != null && bounds.width() > 0 && bounds.height() > 0) {
+            val w = bounds.width().toFloat()
+            val h = bounds.height().toFloat()
+            minOf(w, h) / maxOf(w, h)
+        } else {
+            @Suppress("DEPRECATION")
+            val m = context.resources.displayMetrics
+            minOf(m.widthPixels, m.heightPixels).toFloat() /
+                maxOf(m.widthPixels, m.heightPixels)
+        }
+    } catch (e: Exception) {
+        // A sane default: 9:19.5-class portrait phone.
+        9f / 19.5f
+    }
 }
 
 /**

@@ -92,7 +92,14 @@ fun PlaylistsScreen(
     }
 
     Scaffold(
-        topBar = { SlimTopBar(title = "Playlists", onBack = onBack) },
+        topBar = {
+            SlimTopBar(
+                title = "Playlists",
+                onBack = onBack,
+                // v0.9.1: the universal Home/Lock toggles.
+                actions = { com.wepwawet.ui.components.ScreenToggles() },
+            )
+        },
     ) { padding ->
         Column(
             modifier = Modifier

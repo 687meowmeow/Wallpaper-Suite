@@ -117,8 +117,27 @@ private object JavaSteamLogBridge : LogListener {
         }
     }
     override fun onLog(clazz: Class<*>, message: String?, throwable: Throwable?) {
-        // JavaSteam uses onLog for INFO-level messages
         val msg = message ?: ""
+        // v0.9.1 (the 2026-11-14 OOM crash log): the per-connection CDN
+        // chatter (CDNClientPool "Getting/Returning broken connection" +
+        // DepotDownloader "Downloading chunk …") is UNBOUNDED during a
+        // thrashing download — the crash log carried THOUSANDS of these
+        // lines (a 886KB report), each a formatted string + ring-buffer
+        // entry + file write while the heap was already exhausted. The
+        // first occurrence logs normally; repeats collapse to every 50th
+        // with a running count, same treatment as onError below.
+        if (clazz.simpleName == "CDNClientPool" || clazz.simpleName == "DepotDownloader") {
+            val count = repeatedInfoCounts
+                .merge("${clazz.simpleName}:${msg.take(48)}", 1, Int::plus) ?: 1
+            if (count == 1 || count % 50 == 0) {
+                WepWawetLogger.proxy("JavaSteam: ${clazz.simpleName}",
+                    "msg" to msg.take(200),
+                    "level" to "INFO",
+                    "repeat_count" to count,
+                    "throwable" to (throwable?.javaClass?.name))
+            }
+            return
+        }
         WepWawetLogger.proxy("JavaSteam: ${clazz.simpleName}",
             "msg" to msg.take(200),
             "level" to "INFO",
@@ -126,6 +145,9 @@ private object JavaSteamLogBridge : LogListener {
         // Detect known INFO-level messages that indicate progress
         // (none currently — INFO messages are mostly about connection state)
     }
+
+    /** v0.9.1: repeat-collapsing counters for the CDN INFO chatter. */
+    private val repeatedInfoCounts = java.util.concurrent.ConcurrentHashMap<String, Int>()
     override fun onError(clazz: Class<*>, message: String?, throwable: Throwable?) {
         val msg = message ?: ""
         // === v0.9.0: collapse REPEATED connection errors to a single line + ===

@@ -917,7 +917,10 @@ fun VideoTrimScreen(
                                     if (isLibraryMode) {
                                         // === v0.9.0 LIBRARY mode: trim → import into ===
                                         // === this app's engine library.           ===
-                                        val trimmedFile = File(context.cacheDir, "${itemId}_trimmed.mp4")
+                                        // v0.9.1: trim() the id — the crash log
+                                        // showed "cache/ <id>_trimmed.mp4" (a
+                                        // leading space) as a real path.
+                                        val trimmedFile = File(context.cacheDir, "${itemId.trim()}_trimmed.mp4")
                                         trimStatus = "Clipping ${formatTime(startMs)}–${formatTime(endMs)}…"
                                         val trimSuccess = VideoTrimmer.trim(videoFile, trimmedFile, startMs, endMs)
                                         if (!isActive) return@withContext
@@ -943,8 +946,18 @@ fun VideoTrimScreen(
                                                         publishedfileid = itemId, title = itemTitle),
                                                     type = com.wepwawet.data.model.WallpaperType.VIDEO,
                                                 ))
-                                        if (trimSuccess) runCatching { trimmedFile.delete() }.onFailure { WepWawetLogger.appWarn("VideoTrimScreen: trimmedFile — best-effort call failed", "exception" to it.javaClass.simpleName) }
-                                        runCatching { videoFile.delete() }.onFailure { WepWawetLogger.appWarn("VideoTrimScreen: videoFile — best-effort call failed", "exception" to it.javaClass.simpleName) }
+                                        // v0.9.1 (THE TRIM FAILURE FIX): these
+                                        // manual deletes raced the ASYNC import —
+                                        // importVideoToLibrary packs the file in
+                                        // WorkshopDownloadJob's own scope, and the
+                                        // trim screen deleted BOTH files the
+                                        // moment the call returned, so the pack
+                                        // hit "videoFile not found: …_trimmed.mp4"
+                                        // on every library clip. importVideoToLibrary
+                                        // already deletes its source after the
+                                        // import (deleteSource = true), and
+                                        // onVideoConsumedByTrimScreen clears the
+                                        // pending video — no deletes from here.
                                         com.wepwawet.pairing.WorkshopDownloadJob
                                             .onVideoConsumedByTrimScreen(itemId)
                                         WepWawetLogger.workshop("VideoTrimScreen: clip + library import complete",
@@ -953,7 +966,7 @@ fun VideoTrimScreen(
                                             "range" to "${formatTime(startMs)}-${formatTime(endMs)}")
                                         success = true
                                     } else {
-                                        val trimmedFile = File(context.cacheDir, "${itemId}_trimmed.mp4")
+                                        val trimmedFile = File(context.cacheDir, "${itemId.trim()}_trimmed.mp4")
                                         trimStatus = "Trimming ${formatTime(startMs)}–${formatTime(endMs)}…"
                                         val trimSuccess = VideoTrimmer.trim(videoFile, trimmedFile, startMs, endMs)
                                         // v0.7.23 BUG VT-2: check if cancelled after trim
@@ -962,7 +975,7 @@ fun VideoTrimScreen(
                                         trimStatus = if (trimSuccess) "Packing trimmed video…"
                                         else "Trim failed (${VideoTrimmer.lastFailure ?: "unknown error"}) — packing full video…"
 
-                                        val mpkgFile = File(context.cacheDir, "${itemId}_${System.currentTimeMillis()}_send.mpkg")
+                                        val mpkgFile = File(context.cacheDir, "${itemId.trim()}_${System.currentTimeMillis()}_send.mpkg")
                                         val item = WorkshopItemTyped(
                                             item = WorkshopItem(publishedfileid = itemId, title = itemTitle),
                                             type = WallpaperType.VIDEO,
@@ -1059,7 +1072,7 @@ fun VideoTrimScreen(
                                             .onVideoConsumedByTrimScreen(itemId)
                                         success = true
                                     } else {
-                                        val mpkgFile = File(context.cacheDir, "${itemId}_${System.currentTimeMillis()}_send.mpkg")
+                                        val mpkgFile = File(context.cacheDir, "${itemId.trim()}_${System.currentTimeMillis()}_send.mpkg")
                                         val item = WorkshopItemTyped(
                                             item = WorkshopItem(publishedfileid = itemId, title = itemTitle),
                                             type = WallpaperType.VIDEO,

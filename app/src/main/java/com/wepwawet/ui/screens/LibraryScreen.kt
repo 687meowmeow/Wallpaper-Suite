@@ -3,6 +3,7 @@ import kotlin.math.abs
 
 import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
+import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -10,7 +11,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -191,6 +191,10 @@ fun LibraryScreen(
     var groupTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
     // Rename/delete dialog for a group (long-press a group chip).
     var manageGroupName by remember { mutableStateOf<String?>(null) }
+    // v0.9.1 (double-tap menu): the last chip tap's clock, for the
+    // double-tap window (see the group FilterChip's onClick).
+    var lastChipTapGroup by remember { mutableStateOf<String?>(null) }
+    var lastChipTapAt by remember { mutableStateOf(0L) }
     // v0.8.19: hold-drag group chip REORDERING ("hold to drag them to move
     // their position at the top"). A long-press on a group chip arms the
     // drag for THAT chip; dragging then slides it across the row (the
@@ -911,13 +915,14 @@ fun LibraryScreen(
                                 }
                             }
                         }
-                        SlimTopBarIcon(
-                            onClick = onOpenDownloads,
-                            contentDescription = "Downloads",
-                            icon = Icons.Filled.Download,
-                        )
-                        // v0.8.13: the playlists button is GONE from here —
-                        // Playlists is a bottom-navigation tab now.
+                        // v0.9.1: the Downloads icon is GONE from the
+                        // Wallpapers page ("remove the downloads icon from
+                        // the topbar on the wallpapers page and only that
+                        // page") — the downloads screen stays reachable via
+                        // the Workshop tab's top bar.
+                        // v0.9.1: the universal Home/Lock toggles sit right
+                        // of the title on every main screen.
+                        com.wepwawet.ui.components.ScreenToggles()
                         SlimTopBarIcon(
                             onClick = onOpenSettings,
                             contentDescription = "Settings",
@@ -999,6 +1004,31 @@ fun LibraryScreen(
                             // the drag must NOT toggle the filter — the
                             // drag flag swallows this one click.
                             if (dragGroupName != null) { dragGroupName = null; return@FilterChip }
+                            // v0.9.1 (double-tap menu): a DOUBLE TAP opens
+                            // the manage menu. The v0.9.0 attempt put
+                            // detectTapGestures(onDoubleTap) OUTSIDE the
+                            // FilterChip — but the chip's internal clickable
+                            // CONSUMES every tap, so the outer detector never
+                            // saw a completed second tap and the menu never
+                            // appeared. The chip's own onClick is the ONLY
+                            // reliable tap handler, so the double-tap lives
+                            // HERE: two taps within 320ms open the menu; the
+                            // second tap toggling the filter back cancels
+                            // the first toggle only on a SLOW second tap.
+                            val now = SystemClock.elapsedRealtime()
+                            if (group == lastChipTapGroup && now - lastChipTapAt < 320L) {
+                                lastChipTapGroup = null
+                                // Undo the FIRST tap's filter toggle so the
+                                // double-tap only opens the menu.
+                                activeGroup = if (activeGroup == group) null else group
+                                manageGroupName = group
+                                WepWawetLogger.engineDebug(
+                                    "LibraryScreen: group menu opened (double tap)",
+                                    "group" to group)
+                                return@FilterChip
+                            }
+                            lastChipTapGroup = group
+                            lastChipTapAt = now
                             activeTags = emptySet()
                             animatedActive = false
                             activeGroup = if (activeGroup == group) null else group
@@ -1020,19 +1050,6 @@ fun LibraryScreen(
                         // of filtering, and its per-event step math never
                         // crossed a chip width, so dragging did nothing.
                         modifier = Modifier
-                            // v0.9.0 redesign: DOUBLE TAP opens the manage
-                            // menu (rename / delete / link to folder) — the
-                            // old hold-still path is gone; a double tap's
-                            // two single-tap toggles cancel out, so the
-                            // filter stays put.
-                            .pointerInput(group) {
-                                detectTapGestures(onDoubleTap = {
-                                    manageGroupName = group
-                                    WepWawetLogger.engineDebug(
-                                        "LibraryScreen: group menu opened (double tap)",
-                                        "group" to group)
-                                })
-                            }
                             .pointerInput(group, groups.size) {
                                 var startIndex = -1
                                 var totalDragPx = 0f

@@ -52,7 +52,6 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.DropdownMenu
@@ -60,7 +59,6 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SegmentedButton
@@ -357,8 +355,13 @@ internal fun TriggerTypeSheet(
     onPick: (String) -> Unit,
 ) {
     var search by remember { mutableStateOf("") }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+    // v0.9.1: a centered DIALOG, not a ModalBottomSheet (the review: the
+    // bottom sheets are gone) — same searchable, grouped list.
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add a trigger") },
+        text = {
+            Column {
             OutlinedTextField(
                 value = search,
                 onValueChange = { search = it },
@@ -371,6 +374,7 @@ internal fun TriggerTypeSheet(
             Column(
                 Modifier
                     .fillMaxWidth()
+                    .heightIn(max = 420.dp)
                     .verticalScroll(rememberScrollState()),
             ) {
                 for ((cat, types) in TRIGGER_CATEGORIES) {
@@ -396,10 +400,12 @@ internal fun TriggerTypeSheet(
                         )
                     }
                 }
-                Spacer(Modifier.height(32.dp))
+                Spacer(Modifier.height(8.dp))
             }
-        }
-    }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 /**
@@ -605,8 +611,13 @@ internal fun BlockTypeSheet(
     onPick: (String) -> Unit,
 ) {
     var search by remember { mutableStateOf("") }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+    // v0.9.1: a centered DIALOG, not a ModalBottomSheet — same searchable,
+    // grouped list with the icon rows.
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add a block") },
+        text = {
+            Column {
             OutlinedTextField(
                 value = search,
                 onValueChange = { search = it },
@@ -619,6 +630,7 @@ internal fun BlockTypeSheet(
             Column(
                 Modifier
                     .fillMaxWidth()
+                    .heightIn(max = 420.dp)
                     .verticalScroll(rememberScrollState()),
             ) {
                 for ((cat, blocks) in BLOCK_CATEGORIES) {
@@ -662,10 +674,12 @@ internal fun BlockTypeSheet(
                         }
                     }
                 }
-                Spacer(Modifier.height(32.dp))
+                Spacer(Modifier.height(8.dp))
             }
-        }
-    }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 /** The SHORT name of a block type (the sheet rows show icon + name + the
@@ -1094,7 +1108,21 @@ internal fun BlockCard(
     val liveMove by androidx.compose.runtime.rememberUpdatedState(onMove)
     val density = androidx.compose.ui.platform.LocalDensity.current
 
-    Card(
+    // v0.9.1: NOT a Card anymore (the review: "the rule editor's action
+    // blocks are still Cards") — a slim, flat bordered SURFACE row: same
+    // interactions (long-press-drag reorders, the field dialogs, the run
+    // highlight) with much less chrome, matching the playlist's dense
+    // entry rows.
+    Surface(
+        tonalElevation = 0.dp,
+        shape = RoundedCornerShape(10.dp),
+        color = if (highlight) MaterialTheme.colorScheme.primaryContainer
+        else MaterialTheme.colorScheme.surface.copy(alpha = 0.55f),
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            if (highlight) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.outlineVariant,
+        ),
         modifier = Modifier
             .fillMaxWidth()
             .pointerInput(block.id) {
@@ -1116,12 +1144,6 @@ internal fun BlockCard(
                     },
                 )
             },
-        colors = CardDefaults.cardColors(
-            containerColor = if (highlight)
-                MaterialTheme.colorScheme.primaryContainer
-            else MaterialTheme.colorScheme.surfaceVariant,
-        ),
-        shape = RoundedCornerShape(12.dp),
     ) {
         Column(Modifier.padding(vertical = 6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {

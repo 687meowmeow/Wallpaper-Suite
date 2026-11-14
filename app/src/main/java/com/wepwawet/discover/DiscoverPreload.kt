@@ -98,7 +98,9 @@ object DiscoverPreload {
                             softTags = soft,
                             styleValue = style,
                             r18Mode = r18,
-                            recentUrls = DiscoverPrefs.readRecentUrls(context),
+                            // v0.9.1: exclude what's already queued too.
+                            recentUrls = DiscoverPrefs.readRecentUrls(context) +
+                                DiscoverPrefs.readQueuedUrls(context),
                             sources = sources,
                         )
                     }.onFailure {

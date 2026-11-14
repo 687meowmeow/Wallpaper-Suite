@@ -268,24 +268,16 @@ fun WepWawetNavHost() {
             }
         },
     ) { padding ->
-    // v0.9.0 redesign: THE UNIVERSAL Home/Lock toggles sit at the top of
-    // the app on the main tabs ("The Lock and Home toggles should be
-    // universal and sit at the top of the app"). Every apply path in the
-    // app — image wallpapers, live wallpapers, rules, Discover — follows
-    // them (RuleEngine.resolvedTarget + the Discover/Library appliers).
-    androidx.compose.foundation.layout.Column(
+    // v0.9.1: the universal Home/Lock toggles moved INTO each main screen's
+    // existing top bar (right of the title) — the v0.9.0 separate strip
+    // shifted every screen down. See ScreenToggles.
+    NavHost(
+        navController = nav,
+        startDestination = "library",
         modifier = Modifier
             .fillMaxSize()
             .padding(padding),
     ) {
-        if (showBottomBar) {
-            com.wepwawet.ui.components.UniversalScreenToggles()
-        }
-        NavHost(
-            navController = nav,
-            startDestination = "library",
-            modifier = Modifier.weight(1f),
-        ) {
 
         // v0.8.0: the library is the main page — the device's wallpaper
         // collection (engine-enumerated) + manual import. The Workshop /
@@ -296,7 +288,7 @@ fun WepWawetNavHost() {
             LibraryScreen(
                 onOpenSettings = { nav.navigate("settings") },
                 onOpenDownloads = { nav.navigate("downloads") },
-                onOpenWorkshopItem = { itemId -> nav.navigate("detail/$itemId") },
+                onOpenWorkshopItem = { itemId -> nav.navigate("detail/${itemId.trim()}") },
                 onOpenWallpaper = { wallpaper ->
                     com.wepwawet.engine.PreviewRequestHolder.set(wallpaper)
                     nav.navigate("preview")
@@ -333,7 +325,7 @@ fun WepWawetNavHost() {
             WallpaperPreviewScreen(
                 wallpaper = wallpaper,
                 onBack = { nav.popBackStack() },
-                onOpenWorkshop = { itemId -> nav.navigate("detail/$itemId") },
+                onOpenWorkshop = { itemId -> nav.navigate("detail/${itemId.trim()}") },
                 onOpenSettings = { nav.navigate("settings") },
                 onOpenPlaylists = { nav.navigate("playlists") },
             )
@@ -369,7 +361,7 @@ fun WepWawetNavHost() {
 
         composable("workshop") {
             WorkshopBrowserScreen(
-                onItemClick = { id -> nav.navigate("detail/$id") },
+                onItemClick = { id -> nav.navigate("detail/${id.trim()}") },
                 onOpenDownloads = { nav.navigate("downloads") },
                 onOpenSettings = { nav.navigate("settings") },
                 onOpenFavorites = { nav.navigate("favorites") },
@@ -394,7 +386,7 @@ fun WepWawetNavHost() {
                     "steam_id" to steamId)
             }
             WorkshopBrowserScreen(
-                onItemClick = { id -> nav.navigate("detail/$id") },
+                onItemClick = { id -> nav.navigate("detail/${id.trim()}") },
                 onOpenDownloads = { nav.navigate("downloads") },
                 onOpenSettings = { nav.navigate("settings") },
                 onOpenFavorites = { nav.navigate("favorites") },
@@ -416,7 +408,7 @@ fun WepWawetNavHost() {
             }
             DownloadManagerScreen(
                 onBack = { nav.popBackStack() },
-                onItemClick = { itemId -> nav.navigate("detail/$itemId") },
+                onItemClick = { itemId -> nav.navigate("detail/${itemId.trim()}") },
             )
         }
 
@@ -437,8 +429,11 @@ fun WepWawetNavHost() {
                 repo = repo,
                 onCreatorClick = { steamId -> nav.navigate("creator/$steamId") },
                 onVideoTrim = { _, title, id ->
+                    // v0.9.1: trim() the id — a stray space produced a
+                    // "cache/ <id>_trimmed.mp4" path that broke the clip.
+                    val cleanId = id.trim()
                     val encodedTitle = java.net.URLEncoder.encode(title, "UTF-8")
-                    nav.navigate("videoTrim/$id/$encodedTitle")
+                    nav.navigate("videoTrim/$cleanId/$encodedTitle")
                 },
             )
         }
@@ -552,7 +547,6 @@ fun WepWawetNavHost() {
                     .pendingVideoModeFor(trimItemId),
             )
         }
-    }
     } // NavHost
-    } // v0.9.0: the Column holding the toggles + NavHost
+    } // Scaffold content
 }

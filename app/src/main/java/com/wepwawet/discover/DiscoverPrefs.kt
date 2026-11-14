@@ -37,8 +37,14 @@ object DiscoverPrefs {
     // migrated on first read (see readRecentUrlsList).
     private const val KEY_RECENT_URLS = "recent_urls"
     private const val KEY_RECENT_URLS_SET = "recent_urls_set"
-    /** Max remembered recent URLs (v1.0.0's cap). */
-    private const val RECENT_URLS_LIMIT = 10
+    /**
+     * Max remembered recent URLs. v1.0.0's cap was 10 — with a modest tag
+     * pool the search drew all-recent within 8 attempts and fell into the
+     * "all recent — reuse last draw" fallback, so Discover KEPT SHOWING
+     * THE SAME IMAGES (v0.9.1 review). 40 breaks that cycle while the
+     * fallback still guarantees an image is always handed out.
+     */
+    private const val RECENT_URLS_LIMIT = 40
     // v0.8.18: which booru sources Discover searches ("add the ability to
     // choose the booru sources for the discover page").
     private const val KEY_SOURCES = "booru_sources"
@@ -62,6 +68,15 @@ object DiscoverPrefs {
     const val SCREEN_OFF = 0
     const val SCREEN_PINK = 1
     const val SCREEN_BLUE = 2
+
+    /**
+     * v0.9.1: the ON value for the universal binary toggles (stored as the
+     * legacy PINK slot so every reader keeps working untouched). The
+     * pink/blue tri-state is RETIRED — readScreens migrates any stored
+     * blue to plain ON, so dual mode (two different images) can never
+     * trigger again: both screens ON always means ONE image on both.
+     */
+    const val SCREEN_ON = SCREEN_PINK
 
     const val SCHEDULE_OFF = "off"
     const val SCHEDULE_DAILY_7 = "daily7"
@@ -247,10 +262,15 @@ object DiscoverPrefs {
             writeScreens(context, migrated.first, migrated.second)
             return migrated
         }
-        val home = prefs(context).getInt(KEY_HOME_STATE, SCREEN_PINK).coerceIn(0, 2)
-        val lock = prefs(context).getInt(KEY_LOCK_STATE, SCREEN_PINK).coerceIn(0, 2)
-        return home to lock
+        // v0.9.1: BINARY — a stored blue migrates to plain ON here, so the
+        // universal toggles and every apply path only ever see OFF or ON.
+        val home = prefs(context).getInt(KEY_HOME_STATE, SCREEN_ON).coerceIn(0, 2)
+        val lock = prefs(context).getInt(KEY_LOCK_STATE, SCREEN_ON).coerceIn(0, 2)
+        return home.toOnOff() to lock.toOnOff()
     }
+
+    /** Blue → ON (the tri-state's dual mode is retired). */
+    private fun Int.toOnOff(): Int = if (this > SCREEN_OFF) SCREEN_ON else SCREEN_OFF
 
     fun writeScreens(context: Context, homeState: Int, lockState: Int) {
         prefs(context).edit()
@@ -291,6 +311,16 @@ object DiscoverPrefs {
      */
     fun readRecentUrls(context: Context): Set<String> =
         readRecentUrlsList(context).toSet()
+
+    /** v0.9.1: every URL currently sitting in the preload queue. */
+    fun readQueuedUrls(context: Context): Set<String> {
+        val p = prefs(context)
+        val out = HashSet<String>()
+        for (s in 0 until QUEUE_SIZE) {
+            p.getString("discover_q_url_$s", "")?.let { if (it.isNotBlank()) out.add(it) }
+        }
+        return out
+    }
 
     /** The ordered recent-URL list (oldest first, newest last). */
     fun readRecentUrlsList(context: Context): List<String> {
@@ -467,6 +497,17 @@ object DiscoverPrefs {
     fun appendQueuedImage(context: Context, url: String, bytes: ByteArray, signature: String) {
         if (bytes.size <= 1024) return
         val p = prefs(context)
+        // v0.9.1: DEDUPE — a random draw can repeat inside one refill loop;
+        // without this the queue filled with N copies of the same image and
+        // Refresh popped the same picture over and over ("keeps showing the
+        // same 5 images"). A URL already queued (any signature) is skipped.
+        for (s in 0 until QUEUE_SIZE) {
+            if (p.getString("discover_q_url_$s", "") == url) {
+                WepWawetLogger.appDebug("DiscoverPrefs: queue dedup skipped a repeat",
+                    "url" to url.take(80))
+                return
+            }
+        }
         var slot = -1
         for (s in 0 until QUEUE_SIZE) {
             if (p.getString("discover_q_url_$s", "").isNullOrBlank()) { slot = s; break }

@@ -53,7 +53,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -80,6 +79,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -417,6 +417,8 @@ fun PlaylistEditorScreen(
                     }
                 } else {
                     // First match wins / every match runs — only with 2+.
+                    // v0.9.1: a real segmented control (two selectable chips),
+                    // not a text button that flips its own label.
                     if (rulesData.rules.size >= 2) {
                         item(key = "changes-mode") {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -425,15 +427,23 @@ fun PlaylistEditorScreen(
                                     style = MaterialTheme.typography.bodySmall,
                                     modifier = Modifier.weight(1f),
                                 )
-                                TextButton(onClick = {
-                                    saveRules { mode = if (mode == "first") "all" else "first" }
-                                    rulesData = SuiteRulesStore.readPlaylistRules(context, playlistId)
-                                }) {
-                                    Text(
-                                        if (rulesData.mode == "first") "First match wins"
-                                        else "Every match runs"
-                                    )
-                                }
+                                FilterChip(
+                                    selected = rulesData.mode != "all",
+                                    onClick = {
+                                        saveRules { mode = "first" }
+                                        rulesData = SuiteRulesStore.readPlaylistRules(context, playlistId)
+                                    },
+                                    label = { Text("First match wins") },
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                FilterChip(
+                                    selected = rulesData.mode == "all",
+                                    onClick = {
+                                        saveRules { mode = "all" }
+                                        rulesData = SuiteRulesStore.readPlaylistRules(context, playlistId)
+                                    },
+                                    label = { Text("Every match runs") },
+                                )
                             }
                         }
                     }
@@ -668,7 +678,16 @@ fun PlaylistEditorScreen(
                             columns = GridCells.Fixed(4),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(400.dp),
+                                // v0.9.1: the grid FLEXES (weight 1f) instead
+                                // of a fixed 400dp — with the dialog capped at
+                                // 640dp the fixed grid + search + chips + rows
+                                // + buttons summed past the cap and the Add
+                                // buttons ended up cut off ("there is no way
+                                // to add wallpapers to a playlist you can
+                                // only select them"). The Column in this
+                                // dialog must wrap in weight-able scope — it
+                                // does (the Surface fills the dialog).
+                                .weight(1f),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
@@ -1034,8 +1053,14 @@ private fun PlaylistEntryRow(
     val isRandom = RandomPullEngine.isSlot(entry.filepath)
     val isBlock = GroupBlocks.isGroupBlock(entry.filepath)
     val blockGroup = entry.groupRef ?: GroupBlocks.groupName(entry.filepath)
-    val density = androidx.compose.ui.platform.LocalDensity.current
-    val rowH = with(density) { 58.dp.toPx() }
+    // v0.9.1 (drag drift): the row height is MEASURED, not assumed. The old
+    // hardcoded 58dp was ~10% off the real ~64dp row (38dp thumb + 12dp
+    // vertical padding + 4dp list spacing), so the dragged row raced ahead
+    // of the finger. onSizeChanged captures the real measured height; the
+    // 64dp fallback covers the first frame.
+    var measuredRowH by remember(entry.filepath) { mutableStateOf(0f) }
+    val rowH = if (measuredRowH > 0f) measuredRowH
+    else with(androidx.compose.ui.platform.LocalDensity.current) { 64.dp.toPx() }
     // Live values for the drag closure — the row's index CHANGES as the
     // live reorder moves it, and pointerInput (keyed on the path) must not
     // restart mid-gesture, so the closure reads these instead of captures.
@@ -1046,6 +1071,7 @@ private fun PlaylistEntryRow(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
+            .onSizeChanged { size -> measuredRowH = size.height.toFloat() + 4f }
             .clip(RoundedCornerShape(10.dp))
             .background(
                 if (dragging) MaterialTheme.colorScheme.surfaceVariant
@@ -1056,6 +1082,7 @@ private fun PlaylistEntryRow(
                 // Long-press-drag = reorder (the LibraryScreen group-chip
                 // approach): the TOTAL vertical travel maps to the target
                 // index, one row height per crossing, reordering live.
+                // v0.9.1: +4px per crossing = the LazyColumn spacing.
                 var totalDragPx = 0f
                 detectDragGesturesAfterLongPress(
                     onDragStart = {
@@ -1237,7 +1264,6 @@ private fun PlaylistRuleRow(
  * default action "Next wallpaper" and opens it for editing. Starters are
  * offered at the bottom.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PlaylistTriggerSheet(
     onDismiss: () -> Unit,
@@ -1245,8 +1271,13 @@ private fun PlaylistTriggerSheet(
     onStarter: (starter: Pair<String, () -> RuleModel.Rule>) -> Unit,
 ) {
     var search by remember { mutableStateOf("") }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+    // v0.9.1: a centered DIALOG, not a ModalBottomSheet (the review: the
+    // bottom sheets are gone) — same searchable, grouped list + starters.
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add automation") },
+        text = {
+            Column {
             OutlinedTextField(
                 value = search,
                 onValueChange = { search = it },
@@ -1311,10 +1342,12 @@ private fun PlaylistTriggerSheet(
                         Text(pair.first, style = MaterialTheme.typography.bodyLarge)
                     }
                 }
-                Spacer(Modifier.height(32.dp))
+                Spacer(Modifier.height(8.dp))
             }
-        }
-    }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 /** The trigger groups for the add-automation sheet. */

@@ -743,6 +743,8 @@ fun WorkshopBrowserScreen(
                 title = "Workshop",
                 onBack = onBack,
                 actions = {
+                    // v0.9.1: the universal Home/Lock toggles.
+                    com.wepwawet.ui.components.ScreenToggles()
                     // Pairing (Bluetooth) button — only visible while the
                     // pairing subsystem is enabled in Settings ("Send to
                     // phone" toggle).
