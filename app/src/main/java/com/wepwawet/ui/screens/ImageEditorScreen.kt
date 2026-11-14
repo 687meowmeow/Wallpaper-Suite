@@ -251,7 +251,9 @@ fun ImageEditorScreen(
                         selected = activePreset == index,
                         onClick = {
                             activePreset = index
-                            rect = fitPresetRect(rect, presets[index].second)
+                            rect = fitPresetRect(
+                                rect, presets[index].second,
+                                bmp.width.toFloat() / bmp.height)
                         },
                         label = { Text(label) },
                     )
@@ -579,7 +581,9 @@ fun BitmapCropDialog(
                         selected = activePreset == index,
                         onClick = {
                             activePreset = index
-                            rect = fitPresetRect(rect, presets[index].second)
+                            rect = fitPresetRect(
+                                rect, presets[index].second,
+                                bitmap.width.toFloat() / bitmap.height)
                         },
                         label = { Text(label) },
                     )
@@ -628,15 +632,29 @@ fun BitmapCropDialog(
 
 // ── Geometry helpers ──────────────────────────────────────────────────────
 
-/** The largest rect with `ratio` that fits inside the image, centered on
- *  the current crop's center (full image for ratio == null). */
-private fun fitPresetRect(current: Rect, ratio: Float?): Rect {
+/**
+ * The largest rect with `ratio` (a PIXEL width/height ratio, e.g. the
+ * Phone preset) that fits inside the image, centered on the current
+ * crop's center (full image for ratio == null).
+ *
+ * v0.8.22 CRITICAL FIX ("the crop to phones aspect ratio still doesnt
+ * work. the aspect ratio is wrong"): the old math used the ratio
+ * DIRECTLY in fraction space (w/h = ratio), which is only right for a
+ * SQUARE image. The final PIXEL aspect of the crop is (fracW·bmpW)/
+ * (fracH·bmpH) — so the fraction-space ratio must be
+ * ratio·bmpH/bmpW = ratio/imgAspect. On a 1920×1080 image the Phone
+ * preset (≈0.46) produced a crop with a 0.82 pixel aspect — visibly
+ * wrong on every non-square image.
+ */
+private fun fitPresetRect(current: Rect, ratio: Float?, imgAspect: Float): Rect {
     if (ratio == null) return Rect(0f, 0f, 1f, 1f)
+    // pixel ratio → fraction-space ratio (see the doc above).
+    val fracRatio = ratio / imgAspect.coerceAtLeast(0.01f)
     var w = 1f
-    var h = w / ratio
+    var h = w / fracRatio
     if (h > 1f) {
         h = 1f
-        w = h * ratio
+        w = h * fracRatio
     }
     val cx = (current.left + current.right) / 2f
     val cy = (current.top + current.bottom) / 2f
@@ -756,12 +774,64 @@ private fun dragRect(
             rr = fingerX.coerceIn(l + minPx, dispW)
             b = fingerY.coerceIn(t + minPx, dispH)
         }
-        // Edge handles are FREE-mode only (a locked ratio can't resize
-        // one axis alone).
-        CropHandle.L -> if (ratio == null) l = fingerX.coerceIn(0f, (rr - minPx).coerceAtLeast(0f))
-        CropHandle.R -> if (ratio == null) rr = fingerX.coerceIn((l + minPx).coerceAtMost(dispW), dispW)
-        CropHandle.T -> if (ratio == null) t = fingerY.coerceIn(0f, (b - minPx).coerceAtLeast(0f))
-        CropHandle.B -> if (ratio == null) b = fingerY.coerceIn((t + minPx).coerceAtMost(dispH), dispH)
+        // Edge handles: FREE mode resizes the one axis alone. v0.8.22: a
+        // LOCKED ratio now ALSO resizes via the edges ("you cant drag the
+        // borders" — the locked mode used to ignore edge drags entirely):
+        // the box keeps the ratio, the opposite edge stays anchored, and
+        // the perpendicular axis stays centered on the current center
+        // (clamped into the image).
+        CropHandle.L -> if (ratio == null) {
+            l = fingerX.coerceIn(0f, (rr - minPx).coerceAtLeast(0f))
+        } else {
+            var w = (rr - fingerX).coerceIn(minPx, rr.coerceAtLeast(minPx))
+            var h = (w / ratio).coerceAtMost(dispH)
+            if (h * ratio <= dispW) w = h * ratio
+            val cy = (t + b) / 2f
+            var nt = cy - h / 2f
+            var nb = nt + h
+            if (nt < 0f) { nt = 0f; nb = h }
+            if (nb > dispH) { nb = dispH; nt = nb - h }
+            l = rr - w; t = nt; b = nb
+        }
+        CropHandle.R -> if (ratio == null) {
+            rr = fingerX.coerceIn((l + minPx).coerceAtMost(dispW), dispW)
+        } else {
+            var w = (fingerX - l).coerceIn(minPx, (dispW - l).coerceAtLeast(minPx))
+            var h = (w / ratio).coerceAtMost(dispH)
+            if (h * ratio <= dispW) w = h * ratio
+            val cy = (t + b) / 2f
+            var nt = cy - h / 2f
+            var nb = nt + h
+            if (nt < 0f) { nt = 0f; nb = h }
+            if (nb > dispH) { nb = dispH; nt = nb - h }
+            rr = l + w; t = nt; b = nb
+        }
+        CropHandle.T -> if (ratio == null) {
+            t = fingerY.coerceIn(0f, (b - minPx).coerceAtLeast(0f))
+        } else {
+            var h = (b - fingerY).coerceIn(minPx, b.coerceAtLeast(minPx))
+            var w = (h * ratio).coerceAtMost(dispW)
+            if (w / ratio <= dispH) h = w / ratio
+            val cx = (l + rr) / 2f
+            var nl = cx - w / 2f
+            var nr = nl + w
+            if (nl < 0f) { nl = 0f; nr = w }
+            if (nr > dispW) { nr = dispW; nl = nr - w }
+            t = b - h; l = nl; rr = nr
+        }
+        CropHandle.B -> if (ratio == null) {
+            b = fingerY.coerceIn((t + minPx).coerceAtMost(dispH), dispH)
+        } else {
+            var h = (fingerY - t).coerceIn(minPx, (dispH - t).coerceAtLeast(minPx))
+            var w = (h * ratio).coerceAtMost(dispW)
+            if (w / ratio <= dispH) h = w / ratio
+            val cx = (l + rr) / 2f
+            var nl = cx - w / 2f
+            var nr = nl + w
+            if (nl < 0f) { nl = 0f; nr = w }
+            if (nr > dispW) { nr = dispW; nl = nr - w }
+            b = t + h; l = nl; rr = nr
+        }
         CropHandle.NONE -> Unit
     }
     return Rect(

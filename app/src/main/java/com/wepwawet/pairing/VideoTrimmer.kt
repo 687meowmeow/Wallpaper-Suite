@@ -46,6 +46,16 @@ object VideoTrimmer {
     private const val TAG = "VideoTrimmer"
 
     /**
+     * v0.8.22: WHY the last trim failed (null = the last one succeeded) —
+     * the UI surfaces it ("The video clipping failed with the error in the
+     * image" showed only a generic failure). Volatile: written on IO
+     * threads, read on the main thread right after a false return.
+     */
+    @Volatile
+    var lastFailure: String? = null
+        private set
+
+    /**
      * Trim a video file to the specified time range.
      *
      * @param inputFile Source video file (MP4, WebM, etc.)
@@ -55,22 +65,31 @@ object VideoTrimmer {
      * @return true on success, false on failure (output file removed)
      */
     fun trim(inputFile: File, outputFile: File, startMs: Long, endMs: Long): Boolean {
+        lastFailure = null
         if (!inputFile.exists()) {
+            lastFailure = "The video file is missing"
             WepWawetLogger.proxyError("$TAG: input file does not exist",
                 "input" to inputFile.absolutePath)
             return false
         }
         if (startMs < 0 || endMs <= startMs) {
+            lastFailure = "The trim range is empty"
             WepWawetLogger.proxyError("$TAG: invalid trim range",
                 "start_ms" to startMs, "end_ms" to endMs)
             return false
         }
-        // Cap endMs to video duration
+        // Cap endMs to video duration (−1 = unknown → no cap; the copy loop
+        // stops at end-of-stream anyway). v0.8.22: the old hard cap on an
+        // UNKNOWN duration (0) rejected every trim of a file whose container
+        // lacks track durations.
         val duration = getDurationMs(inputFile)
-        val cappedEnd = if (endMs > duration) duration else endMs
+        val cappedEnd = if (duration in 0..endMs) duration else endMs
         if (cappedEnd <= startMs) {
+            lastFailure = "The trim range is past the end of the video " +
+                "(${formatRange(duration)})"
             WepWawetLogger.proxyError("$TAG: trim range is zero or negative after capping",
-                "start_ms" to startMs, "capped_end_ms" to cappedEnd)
+                "start_ms" to startMs, "capped_end_ms" to cappedEnd,
+                "duration_ms" to duration)
             return false
         }
 
@@ -101,6 +120,7 @@ object VideoTrimmer {
                 }
             }
             if (trackInfos.isEmpty()) {
+                lastFailure = "No playable video/audio tracks in this file"
                 WepWawetLogger.proxyError("$TAG: no video/audio tracks found",
                     "track_count" to extractor.trackCount)
                 return false
@@ -220,6 +240,7 @@ object VideoTrimmer {
             // v0.7.4 fix 4: a zero-sample output is a structurally invalid MP4
             // (muxer.stop() would throw anyway) — fail cleanly instead.
             if (samplesCopied == 0) {
+                lastFailure = "No video frames fell inside the trim range"
                 WepWawetLogger.proxyError("$TAG: no samples in trim range — failing",
                     "start_ms" to startMs,
                     "snap_ms" to (snapUs / 1000),
@@ -239,6 +260,7 @@ object VideoTrimmer {
                 "trim_duration_ms" to (cappedEnd - snapUs / 1000))
             true
         } catch (e: Exception) {
+            lastFailure = e.message ?: e.javaClass.simpleName
             WepWawetLogger.proxyError("$TAG: trim failed",
                 "exception" to e.javaClass.name,
                 "message" to (e.message ?: ""))
@@ -254,29 +276,57 @@ object VideoTrimmer {
         }
     }
 
+    /** "1:23" for status messages. */
+    private fun formatRange(ms: Long): String {
+        val s = ms / 1000
+        return "%d:%02d".format(s / 60, s % 60)
+    }
+
     /**
-     * Get the duration of a video file in milliseconds.
+     * The duration of a video file in milliseconds, or −1 when unknown.
+     *
+     * v0.8.22: KEY_DURATION on the track formats is CONTAINER-DEPENDENT —
+     * plenty of files (transcoded/odd-brand MP4s, WebM variants) simply
+     * don't carry it, and the old code returned 0. trim() then capped
+     * endMs to 0 and failed EVERY clip with "trim range is zero or
+     * negative after capping" (the on-screen "Clip failed — adding full
+     * video"). MediaMetadataRetriever's container-level duration is the
+     * fallback; unknown durations are now −1 and trim() skips the cap.
      */
     fun getDurationMs(file: File): Long {
         val extractor = MediaExtractor()
-        return try {
+        var durationMs = -1L
+        try {
             extractor.setDataSource(file.absolutePath)
-            var maxDuration = 0L
+            var maxDurationUs = 0L
             for (i in 0 until extractor.trackCount) {
                 val format = extractor.getTrackFormat(i)
                 if (format.containsKey(android.media.MediaFormat.KEY_DURATION)) {
                     val dur = format.getLong(android.media.MediaFormat.KEY_DURATION)
-                    if (dur > maxDuration) maxDuration = dur
+                    if (dur > maxDurationUs) maxDurationUs = dur
                 }
             }
-            maxDuration / 1000 // μs → ms
+            if (maxDurationUs > 0) durationMs = maxDurationUs / 1000 // μs → ms
         } catch (e: Exception) {
-            0L
+            // fall through to the retriever below
         } finally {
             // v0.7.25 (audit M-V5): release EXACTLY ONCE, in finally — the old
             // code released in the try block AND again in the catch, so a
             // throwing first release triggered a double release.
             runCatching { extractor.release() }
+        }
+        if (durationMs > 0) return durationMs
+        // Container-level fallback.
+        val retriever = android.media.MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(file.absolutePath)
+            (retriever.extractMetadata(
+                android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull() ?: -1L)
+        } catch (e: Exception) {
+            -1L
+        } finally {
+            runCatching { retriever.release() }
         }
     }
 }

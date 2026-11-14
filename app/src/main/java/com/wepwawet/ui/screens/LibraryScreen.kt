@@ -10,7 +10,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -213,9 +212,12 @@ fun LibraryScreen(
     // local SAF media is excluded).
     var animatedActive by remember { mutableStateOf(false) }
 
-    // ===== FOLDERS =====
+    // ===== FOLDERS (v0.8.22: the SCAN ENGINE for linked groups — no chips) =====
+    // A folder only exists as a GROUP's link now (see LibraryPrefs.GroupInfo);
+    // this list feeds the live scans below.
     var folders by remember { mutableStateOf<List<ImageFolderAssets.SavedFolder>>(emptyList()) }
-    var activeFolder by remember { mutableStateOf<String?>(null) }
+    // group name → linked tree URI ("" entries = unlinked groups are absent).
+    var groupFolders by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     // v0.8.13: restore-once guard — the saved group/folder/tag selection
     // is re-applied the first time reload() has populated groups+folders.
     var filterRestored by remember { mutableStateOf(false) }
@@ -225,12 +227,14 @@ fun LibraryScreen(
     var allFolderImages by remember {
         mutableStateOf<List<Pair<ImageFolderAssets.SavedFolder, ImageFolderAssets.ImageEntry>>>(emptyList())
     }
-    var removeFolderTarget by remember { mutableStateOf<ImageFolderAssets.SavedFolder?>(null) }
     // v0.8.18: the "+" / "＋ Folder" menu ("make the create folder button
     // come up with menu asking if you want to use an already existing or
     // make one") and the shared create-folder flow.
     var showPlusMenu by remember { mutableStateOf(false) }
     var plusMenuForImport by remember { mutableStateOf(false) }
+    // v0.8.22: the group a pending folder pick/create LINKS to (from the
+    // manage menu's "Link to folder"); null = the active group / auto-name.
+    var linkFolderForGroup by remember { mutableStateOf<String?>(null) }
     // v0.8.21: the "＋" chip's own dropdown (Make group / Add image
     // folder); the folder dialog itself stays for the existing-or-create
     // choice. Making a group is a name dialog — empty groups ARE valid
@@ -270,6 +274,7 @@ fun LibraryScreen(
             pinned = LibraryPrefs.readPinned(context)
             groups = LibraryPrefs.readGroups(context)
             groupOf = LibraryPrefs.readGroupOf(context)
+            groupFolders = LibraryPrefs.readGroupFolders(context)
             // v0.8.16: edited images resolve to their cropped copies.
             cropOverrides = withContext(Dispatchers.IO) {
                 ImageCropStore.read(context).mapValues { it.value.cropFilePath }
@@ -288,6 +293,7 @@ fun LibraryScreen(
             pinned = LibraryPrefs.readPinned(context)
             groups = LibraryPrefs.readGroups(context)
             groupOf = LibraryPrefs.readGroupOf(context)
+            groupFolders = LibraryPrefs.readGroupFolders(context)
             // v0.8.16: edited images resolve to their cropped copies.
             cropOverrides = ImageCropStore.read(context).mapValues { it.value.cropFilePath }
             // True download-completion times (itemId → epoch millis) — the
@@ -333,16 +339,41 @@ fun LibraryScreen(
 
     // v0.8.12: the folder picker — adds a folder (persistable read+write
     // grant kept so Discover's "Save to folder" can write into it later).
+    // v0.8.22: a picked folder becomes the LINK of the ACTIVE group (or a
+    // fresh linked group when no group is active) — folders have no
+    // standalone chips anymore.
+    fun folderPicked(uri: android.net.Uri, forGroup: String?) {
+        ImageFolderAssets.takePersistableGrants(context, uri)
+        ImageFolderAssets.addFolder(context, uri.toString())
+        val group = forGroup ?: run {
+            // Auto-name the new group after the folder (de-conflicted).
+            var name = ImageFolderAssets.folderDisplayName(uri.toString())
+                .ifBlank { "Folder" }.trim().take(30)
+            val taken = LibraryPrefs.readGroups(context).toMutableSet()
+            if (name in taken) {
+                var n = 2
+                while ("$name ($n)" in taken) n++
+                name = "$name ($n)".take(30)
+            }
+            LibraryPrefs.createGroup(context, name)
+            name
+        }
+        LibraryPrefs.setGroupFolder(context, group, uri.toString())
+        if (activeGroup != group) activeGroup = group
+        WepWawetLogger.appInfo("LibraryScreen: folder linked to group",
+            "group" to group,
+            "uri" to uri.toString().take(120))
+        refreshPrefs()
+        scheduleReload()
+    }
+
     val folderPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         if (uri != null) {
-            ImageFolderAssets.takePersistableGrants(context, uri)
-            ImageFolderAssets.addFolder(context, uri.toString())
-            activeFolder = uri.toString()
-            WepWawetLogger.appInfo("LibraryScreen: folder picked",
-                "uri" to uri.toString().take(120))
-            scheduleReload()
+            val target = linkFolderForGroup ?: activeGroup
+            linkFolderForGroup = null
+            folderPicked(uri, target)
         }
     }
 
@@ -356,7 +387,8 @@ fun LibraryScreen(
     ) { result ->
         val uris = urisFromGetContentResult(result.resultCode, result.data)
         if (uris.isNotEmpty()) {
-            val target = activeFolder
+            // v0.8.22: import into the ACTIVE group's linked folder.
+            val target = activeGroup?.let { groupFolders[it] }
             if (target != null) {
                 scope.launch {
                     val (copied, failed) = withContext(Dispatchers.IO) {
@@ -386,12 +418,16 @@ fun LibraryScreen(
         val saved = LibraryPrefs.readSavedLibraryFilter(context) ?: return@LaunchedEffect
         if (saved.first != null && saved.first in groups) activeGroup = saved.first
         animatedActive = saved.second
-        if (saved.third != null && folders.any { it.treeUri == saved.third }) {
-            activeFolder = saved.third
+        // v0.8.22: a saved FOLDER selection (pre-merge) maps to the group
+        // its folder linked into — nothing the user had open is lost.
+        if (saved.third != null && activeGroup == null) {
+            groupFolders.entries.firstOrNull { it.value == saved.third }?.let {
+                activeGroup = it.key
+            }
         }
         activeTags = saved.fourth
         WepWawetLogger.engineDebug("LibraryScreen: restored last filter",
-            "group" to (saved.first ?: "none"),
+            "group" to (activeGroup ?: "none"),
             "animated" to saved.second,
             "folder" to (saved.third?.takeLast(40) ?: "none"),
             "tags" to saved.fourth.size)
@@ -399,10 +435,10 @@ fun LibraryScreen(
 
     // v0.8.13: persist the open filter on every change so the app starts
     // where the user left off ("remember what group you had open").
-    LaunchedEffect(activeGroup, animatedActive, activeFolder, activeTags, filterRestored) {
+    LaunchedEffect(activeGroup, animatedActive, activeTags, filterRestored) {
         if (!filterRestored) return@LaunchedEffect
         LibraryPrefs.saveLibraryFilter(
-            context, activeGroup, animatedActive, activeFolder, activeTags)
+            context, activeGroup, animatedActive, null, activeTags)
     }
 
     /**
@@ -662,11 +698,18 @@ fun LibraryScreen(
         sorted.sortedByDescending { it.filePath in pinned }
     }
 
-    val visibleFolderImages = remember(allFolderImages, activeFolder, filterText) {
-        val src = if (activeFolder != null) {
-            allFolderImages.filter { it.first.treeUri == activeFolder }
-        } else {
+    // v0.8.22: the image slice of the grid. All view = every scanned
+    // image; a GROUP view = the group's manual image members PLUS its
+    // linked folder's live scan ("a linked group should show a live scan
+    // of that directory ... combined with anything manually added").
+    val activeGroupLink = activeGroup?.let { groupFolders[it] }
+    val visibleFolderImages = remember(allFolderImages, activeGroup, activeGroupLink, filterText) {
+        val src = if (activeGroup == null) {
             allFolderImages
+        } else {
+            allFolderImages.filter {
+                groupOf[it.second.uri] == activeGroup || it.first.treeUri == activeGroupLink
+            }
         }
         src.filter { query.isEmpty() || it.second.displayName.lowercase(Locale.ROOT).contains(query) }
     }
@@ -678,7 +721,7 @@ fun LibraryScreen(
     // and the folder view stays images-only. Pinned items of BOTH kinds
     // float above everything in All/groups.
     val gridItems = remember(
-        sortedWallpapers, visibleFolderImages, activeFolder, activeGroup, activeTags,
+        sortedWallpapers, visibleFolderImages, activeGroup, activeTags,
         animatedActive, pinned, addedDatesDownloads, addedDatesImages, groupOf,
     ) {
         val images = visibleFolderImages.map {
@@ -687,25 +730,30 @@ fun LibraryScreen(
                 addedDatesImages[it.second.uri] ?: it.second.lastModified)
         }
         when {
-            activeFolder != null ->
-                // Folder view: only the folder's images.
-                images.sortedWith(libraryItemComparator(sortMethod))
-            animatedActive || activeTags.isNotEmpty() ->
-                // Engine-concept views: wallpapers only.
-                sortedWallpapers.map { LibraryItem.Wall(it, addedDateOf(it)) }
-            else -> {
-                // All / manual groups: merge wallpapers + images under one
-                // sort; in a group view only that group's items (wallpaper
-                // paths and image uris share the same group registry).
-                val groupImages =
-                    if (activeGroup == null) images
-                    else images.filter { groupOf[it.entry.uri] == activeGroup }
+            activeGroup != null -> {
+                // Group view: the group's wallpapers + images (manual
+                // members + the linked folder's live scan) under one sort.
+                val groupImages = images
                 val pinnedWalls = sortedWallpapers.filter { it.filePath in pinned }
                     .map { LibraryItem.Wall(it, addedDateOf(it)) }
                 val pinnedImages = groupImages.filter { it.entry.uri in pinned }
                 val rest = (sortedWallpapers.filter { it.filePath !in pinned }
                     .map { LibraryItem.Wall(it, addedDateOf(it)) } +
                     groupImages.filter { it.entry.uri !in pinned })
+                    .sortedWith(libraryItemComparator(sortMethod))
+                pinnedWalls + pinnedImages + rest
+            }
+            animatedActive || activeTags.isNotEmpty() ->
+                // Engine-concept views: wallpapers only.
+                sortedWallpapers.map { LibraryItem.Wall(it, addedDateOf(it)) }
+            else -> {
+                // All view: merge wallpapers + images under one sort.
+                val pinnedWalls = sortedWallpapers.filter { it.filePath in pinned }
+                    .map { LibraryItem.Wall(it, addedDateOf(it)) }
+                val pinnedImages = images.filter { it.entry.uri in pinned }
+                val rest = (sortedWallpapers.filter { it.filePath !in pinned }
+                    .map { LibraryItem.Wall(it, addedDateOf(it)) } +
+                    images.filter { it.entry.uri !in pinned })
                     .sortedWith(libraryItemComparator(sortMethod))
                 pinnedWalls + pinnedImages + rest
             }
@@ -753,15 +801,19 @@ fun LibraryScreen(
                     onBack = null,
                     actions = {
                         // v0.8.18: the "+" is context-sensitive — while a
-                        // folder chip is active it ADDS IMAGES TO THAT
-                        // FOLDER (GET_CONTENT chooser → copy into the
-                        // tree); otherwise importing an image asks you to
-                        // CHOOSE OR MAKE A FOLDER first (mpkg/video imports
-                        // stay reachable via "Import other files…").
+                        // v0.8.22: the top-bar "+" ADDS IMAGES to the ACTIVE
+                        // GROUP — with a linked folder it imports straight
+                        // into that folder (GET_CONTENT chooser → copy into
+                        // the tree); a group without a link opens the
+                        // choose/create/import menu, whose folder choice
+                        // LINKS the folder to that group (files land there
+                        // from then on). With no group active it opens the
+                        // same menu (mpkg/video imports stay reachable via
+                        // "Import other files").
                         SlimTopBarIcon(
                             onClick = {
-                                val folder = activeFolder
-                                if (folder != null) {
+                                val link = activeGroup?.let { groupFolders[it] }
+                                if (link != null) {
                                     try {
                                         folderImagePicker.launch(
                                             getContentChooserIntent(
@@ -779,8 +831,8 @@ fun LibraryScreen(
                                     showPlusMenu = true
                                 }
                             },
-                            contentDescription = if (activeFolder != null)
-                                "Add images to folder" else "Import wallpapers",
+                            contentDescription = if (activeGroup != null)
+                                "Add images to group" else "Import wallpapers",
                             icon = Icons.Filled.Add,
                         )
                         SlimTopBarIcon(
@@ -890,11 +942,10 @@ fun LibraryScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 FilterChip(
-                    selected = activeGroup == null && activeFolder == null &&
+                    selected = activeGroup == null &&
                         activeTags.isEmpty() && !animatedActive,
                     onClick = {
                         activeGroup = null
-                        activeFolder = null
                         activeTags = emptySet()
                         animatedActive = false
                     },
@@ -908,7 +959,6 @@ fun LibraryScreen(
                     selected = animatedActive,
                     onClick = {
                         activeGroup = null
-                        activeFolder = null
                         activeTags = emptySet()
                         animatedActive = !animatedActive
                         WepWawetLogger.engineDebug("LibraryScreen: animated group toggled",
@@ -924,7 +974,13 @@ fun LibraryScreen(
                     },
                 )
                 for ((groupIndex, group) in groups.withIndex()) {
-                    val count = groupOf.count { it.value == group }
+                    // v0.8.22: the chip count = manual members + the linked
+                    // folder's scanned images.
+                    val link = groupFolders[group]
+                    val count = groupOf.count { it.value == group } +
+                        if (link != null) allFolderImages.count {
+                            it.first.treeUri == link
+                        } else 0
                     FilterChip(
                         selected = activeGroup == group,
                         onClick = {
@@ -932,7 +988,6 @@ fun LibraryScreen(
                             // the drag must NOT toggle the filter — the
                             // drag flag swallows this one click.
                             if (dragGroupName != null) { dragGroupName = null; return@FilterChip }
-                            activeFolder = null
                             activeTags = emptySet()
                             animatedActive = false
                             activeGroup = if (activeGroup == group) null else group
@@ -1021,36 +1076,18 @@ fun LibraryScreen(
                         label = { Text("$group ($count)") },
                         leadingIcon = {
                             Icon(
-                                Icons.Filled.Folder,
+                                if (groupFolders[group] != null) Icons.Filled.FolderOpen
+                                else Icons.Filled.Folder,
                                 contentDescription = null,
                                 modifier = Modifier.size(16.dp),
                             )
                         },
                     )
                 }
-                for (folder in folders) {
-                    FilterChip(
-                        selected = activeFolder == folder.treeUri,
-                        onClick = {
-                            activeGroup = null
-                            activeTags = emptySet()
-                            animatedActive = false
-                            activeFolder =
-                                if (activeFolder == folder.treeUri) null else folder.treeUri
-                        },
-                        modifier = Modifier.pointerInput(folder.treeUri) {
-                            detectTapGestures(onLongPress = { removeFolderTarget = folder })
-                        },
-                        label = { Text(folder.name) },
-                        leadingIcon = {
-                            Icon(
-                                Icons.Filled.FolderOpen,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                            )
-                        },
-                    )
-                }
+                // v0.8.22: FOLDER CHIPS ARE GONE — folders live as group
+                // LINKS now (merge a group with "Link to folder" from its
+                // long-press menu; every pre-merge folder chip migrated
+                // into a linked group, so nothing was lost).
                 // v0.8.13: workshop-tag filter — ONE chip opening the sheet
                 // (was: every tag rendered inline here, cluttering the top).
                 FilterChip(
@@ -1068,13 +1105,12 @@ fun LibraryScreen(
                         )
                     },
                 )
-                // v0.8.21: ONE plain "＋" chip ("the plus chip is + + which
-                // is stupid and takes up space" — the old chip rendered BOTH
-                // an Add icon and a "＋" label). It drops down a real
-                // Material menu with EXACTLY two options, no ellipses ("the
-                // menu that appears has ... at the end of every option"):
-                // Make group, or Add image folder. The folder option then
-                // asks existing-or-create (the FolderAddMenuDialog flow).
+                // v0.8.22: ONE plain "＋" chip with ONE option — "Make
+                // group": a NAME-ONLY group, no directory made ("The chip '+'
+                // should create a group with just a name, with no directory
+                // made"). Device folders are attached afterwards from the
+                // group's OWN long-press menu ("Link to folder" — new device
+                // folder with the .nomedia toggle, or an existing one).
                 Box {
                     FilterChip(
                         selected = false,
@@ -1093,17 +1129,6 @@ fun LibraryScreen(
                                 showMakeGroup = true
                             },
                         )
-                        DropdownMenuItem(
-                            text = { Text("Add image folder") },
-                            leadingIcon = {
-                                Icon(Icons.Filled.CreateNewFolder, contentDescription = null)
-                            },
-                            onClick = {
-                                showPlusDropdown = false
-                                plusMenuForImport = false
-                                showPlusMenu = true
-                            },
-                        )
                     }
                 }
             }
@@ -1114,7 +1139,13 @@ fun LibraryScreen(
                         CircularProgressIndicator()
                     }
                 }
-                activeFolder != null && gridItems.isEmpty() -> {
+                activeGroup != null && gridItems.isEmpty() -> {
+                    // v0.8.22: an empty GROUP view — the group exists but
+                    // has no wallpapers and (if linked) its folder has no
+                    // images. Offer the two real next steps: link a device
+                    // folder (its images then appear here live), or import
+                    // images into the link.
+                    val groupLink = groupFolders[activeGroup]
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
@@ -1122,33 +1153,44 @@ fun LibraryScreen(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center,
                     ) {
-                        Text("No images in this folder",
-                            style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "\"$activeGroup\" is empty",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            "Supported: JPG, PNG, WebP, GIF.",
+                            if (groupLink != null)
+                                "Supported: JPG, PNG, WebP, GIF. Use the + at the top to " +
+                                    "add images to this group's folder."
+                            else
+                                "Add wallpapers with their own hold menu, or link a device " +
+                                    "folder (hold the group chip) — its images appear here.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                         )
-                        Spacer(Modifier.height(16.dp))
-                        OutlinedButton(onClick = {
-                            // v0.8.18 (review B15): the old empty catch
-                            // swallowed picker-launch failures completely —
-                            // the button just did nothing on OEMs whose
-                            // folder picker is unavailable. Log it and tell
-                            // the user, like every other picker launch does.
-                            try {
-                                folderPicker.launch(null)
-                            } catch (t: Throwable) {
-                                WepWawetLogger.appWarn("LibraryScreen: folder picker failed to launch",
-                                    "exception" to t.javaClass.name,
-                                    "message" to (t.message ?: ""))
-                                scope.launch {
-                                    snackbar.showSnackbar("Couldn't open the folder picker")
+                        if (groupLink == null) {
+                            Spacer(Modifier.height(16.dp))
+                            OutlinedButton(onClick = {
+                                // v0.8.18 (review B15): the old empty catch
+                                // swallowed picker-launch failures completely —
+                                // the button just did nothing on OEMs whose
+                                // folder picker is unavailable. Log it and tell
+                                // the user, like every other picker launch does.
+                                try {
+                                    folderPicker.launch(null)
+                                } catch (t: Throwable) {
+                                    WepWawetLogger.appWarn(
+                                        "LibraryScreen: folder picker failed to launch",
+                                        "exception" to t.javaClass.name,
+                                        "message" to (t.message ?: ""))
+                                    scope.launch {
+                                        snackbar.showSnackbar("Couldn't open the folder picker")
+                                    }
                                 }
+                            }) {
+                                Text("Link a folder")
                             }
-                        }) {
-                            Text("Add another folder")
                         }
                     }
                 }
@@ -1169,7 +1211,7 @@ fun LibraryScreen(
                         Text(
                             if (filterText.isBlank())
                                 "Browse the Workshop tab, import files with the + button, " +
-                                    "or add a folder of your own images with the ＋ Folder chip."
+                                    "or make a group with the ＋ chip and link a device folder to it."
                             else "Try a different search or change the filter.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1214,7 +1256,7 @@ fun LibraryScreen(
                                     entry = item.entry,
                                     // The folder badge marks folder images
                                     // inside the All view.
-                                    showFolderBadge = activeFolder == null,
+                                    showFolderBadge = activeGroup == null,
                                     isPinned = item.entry.uri in pinned,
                                     // v0.8.16: render the crop when saved.
                                     displayUri = cropOverrides[item.entry.uri],
@@ -1658,9 +1700,13 @@ fun LibraryScreen(
         )
     }
 
-    // Rename / delete a group (long-press a group chip).
+    // Rename / delete a group + link/unlink its folder (long-press a
+    // group chip). v0.8.22: "Long-pressing a group chip should add a
+    // 'Link to folder' option that asks whether to make a new device
+    // folder (with the .nomedia toggle) or choose an existing one."
     manageGroupName?.let { group ->
         var renameTo by remember(group) { mutableStateOf(group) }
+        val linked = groupFolders[group]
         AlertDialog(
             onDismissRequest = { manageGroupName = null },
             title = { Text("Group \"$group\"") },
@@ -1674,6 +1720,18 @@ fun LibraryScreen(
                     )
                     Spacer(Modifier.height(12.dp))
                     Text(
+                        if (linked != null)
+                            "Linked folder: ${ImageFolderAssets.folderDisplayName(linked)} — " +
+                                "its images are scanned live into this group."
+                        else
+                            "No folder linked. A linked folder's images are scanned live " +
+                                "into this group (files added from other apps appear " +
+                                "automatically).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
                         "Deleting the group keeps its wallpapers — they just return to \"All\".",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1681,24 +1739,51 @@ fun LibraryScreen(
                 }
             },
             confirmButton = {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                ) {
                     TextButton(
                         onClick = {
                             if (LibraryPrefs.renameGroup(context, group, renameTo)) {
                                 if (activeGroup == group) activeGroup = renameTo.trim().take(30)
                                 groups = LibraryPrefs.readGroups(context)
+                                groupFolders = LibraryPrefs.readGroupFolders(context)
                                 groupOf = LibraryPrefs.readGroupOf(context)
                             }
                             manageGroupName = null
                         },
                     ) { Text("Rename") }
+                    if (linked != null) {
+                        TextButton(
+                            onClick = {
+                                // Unlink: the scan stops, the files stay.
+                                LibraryPrefs.setGroupFolder(context, group, null)
+                                groups = LibraryPrefs.readGroups(context)
+                                groupFolders = LibraryPrefs.readGroupFolders(context)
+                                manageGroupName = null
+                                scope.launch { snackbar.showSnackbar("Folder unlinked") }
+                                scheduleReload()
+                            },
+                        ) { Text("Unlink folder") }
+                    } else {
+                        TextButton(
+                            onClick = {
+                                linkFolderForGroup = group
+                                manageGroupName = null
+                                showPlusMenu = true
+                            },
+                        ) { Text("Link to folder") }
+                    }
                     TextButton(
                         onClick = {
                             LibraryPrefs.deleteGroup(context, group)
                             if (activeGroup == group) activeGroup = null
                             groups = LibraryPrefs.readGroups(context)
+                            groupFolders = LibraryPrefs.readGroupFolders(context)
                             groupOf = LibraryPrefs.readGroupOf(context)
                             manageGroupName = null
+                            scheduleReload()
                         },
                     ) { Text("Delete group") }
                 }
@@ -1709,61 +1794,20 @@ fun LibraryScreen(
         )
     }
 
-    // ===== v0.8.13: the workshop-tag filter sheet =====
-    if (showTagSheet) {
-        LibraryTagFilterSheet(
-            tagCounts = libraryTagCounts,
-            activeTags = activeTags,
-            onApply = { picked ->
-                activeTags = picked
-                if (picked.isNotEmpty()) {
-                    activeGroup = null
-                    activeFolder = null
-                    animatedActive = false
-                }
-                showTagSheet = false
-                WepWawetLogger.engineDebug("LibraryScreen: tag filter applied",
-                    "tags" to picked.size)
-            },
-            onDismiss = { showTagSheet = false },
-        )
-    }
-
-    // ===== Remove-folder dialog (long-press a folder chip) =====
-    removeFolderTarget?.let { folder ->
-        // v0.8.18 (v19 round): the built-in Suite folder is retired, so
-        // every removable chip here is a plain user folder.
-        AlertDialog(
-            onDismissRequest = { removeFolderTarget = null },
-            title = { Text("Remove folder?") },
-            text = {
-                Text("\"${folder.name}\" disappears from this page. Its files stay on " +
-                    "your device; wallpapers already set from it keep working.")
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        ImageFolderAssets.removeFolder(context, folder.treeUri)
-                        if (activeFolder == folder.treeUri) activeFolder = null
-                        removeFolderTarget = null
-                        // v0.8.18 (review B12): debounced — the removal
-                        // changed disk-visible folder state.
-                        scheduleReload()
-                    },
-                ) { Text("Remove") }
-            },
-            dismissButton = {
-                TextButton(onClick = { removeFolderTarget = null }) { Text("Cancel") }
-            },
-        )
-    }
-
-    // v0.8.18: the "+" / "＋ Folder" MENU — choose an existing folder,
-    // create a new one (with the hidden-from-gallery option), and for the
-    // top-bar "+" also the general file import.
+    // The "Link to folder" choice (from the manage menu): make a new
+    // device folder (with the .nomedia toggle) or choose an existing one.
+    // Rides on the existing showPlusMenu dialog; the picked/created folder
+    // links to linkFolderForGroup (or the active group / an auto-named
+    // group when launched from the top-bar +).
     if (showPlusMenu) {
         FolderAddMenuDialog(
-            onDismiss = { showPlusMenu = false },
+            title = if (linkFolderForGroup != null) "Link to folder"
+            else if (activeGroup != null) "Add images to group"
+            else "Add image folder",
+            onDismiss = {
+                showPlusMenu = false
+                linkFolderForGroup = null
+            },
             onChooseExisting = {
                 showPlusMenu = false
                 try {
@@ -1780,6 +1824,7 @@ fun LibraryScreen(
             onImportOther = if (plusMenuForImport) {
                 {
                     showPlusMenu = false
+                    linkFolderForGroup = null
                     try {
                         importLauncher.launch(
                             getContentChooserIntent(
@@ -1804,19 +1849,40 @@ fun LibraryScreen(
         )
     }
 
-    // v0.8.18: the shared create-folder flow (parent picker → name +
-    // hidden-from-gallery → subfolder registered as a library folder).
+    // ===== v0.8.13: the workshop-tag filter sheet =====
+    if (showTagSheet) {
+        LibraryTagFilterSheet(
+            tagCounts = libraryTagCounts,
+            activeTags = activeTags,
+            onApply = { picked ->
+                activeTags = picked
+                if (picked.isNotEmpty()) {
+                    activeGroup = null
+                    animatedActive = false
+                }
+                showTagSheet = false
+                WepWawetLogger.engineDebug("LibraryScreen: tag filter applied",
+                    "tags" to picked.size)
+            },
+            onDismiss = { showTagSheet = false },
+        )
+    }
+
+    // v0.8.18/22: the shared create-folder flow (parent picker → name +
+    // hidden-from-gallery toggle → subfolder) — the created folder LINKS to
+    // the group that asked for it (linkFolderForGroup), the active group,
+    // or a fresh auto-named group.
     if (showCreateFolder) {
         CreateFolderFlow(
             visible = true,
             onDismiss = { showCreateFolder = false },
             onCreated = { dirUri ->
                 showCreateFolder = false
-                activeFolder = dirUri
+                folderPicked(android.net.Uri.parse(dirUri),
+                    linkFolderForGroup ?: activeGroup)
+                linkFolderForGroup = null
                 WepWawetLogger.appInfo("LibraryScreen: folder created",
                     "uri" to dirUri.takeLast(48))
-                // v0.8.18 (review B12): debounced reload (disk state changed).
-                scheduleReload()
             },
         )
     }
@@ -2221,6 +2287,20 @@ internal object LibraryPrefs {
      * alphabetical display order; groups created afterwards append.
      */
     fun readGroups(context: android.content.Context): List<String> {
+        // v0.8.22: the one-time folders→groups merge runs before ANY group
+        // listing (library chips, the playlist picker, Discover's save
+        // dialog) so no caller ever sees the pre-merge split.
+        ensureFoldersMergedIntoGroups(context)
+        return readGroupsRaw(context)
+    }
+
+    /**
+     * The ordered group list WITHOUT the merge pass — private: callers use
+     * [readGroups]. The merge itself must read groups through THIS (it
+     * runs from inside readGroups — calling readGroups there would
+     * recurse forever).
+     */
+    private fun readGroupsRaw(context: android.content.Context): List<String> {
         val prefs = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
         val ordered = prefs.getString(KEY_GROUPS_ORDER, null)
         if (ordered != null) {
@@ -2312,6 +2392,11 @@ internal object LibraryPrefs {
                 edit.putString(key, trimmed)
             }
         }
+        // v0.8.22: the linked folder follows the rename.
+        prefs.getString(KEY_GROUP_FOLDER_PREFIX + oldName, null)?.let { link ->
+            edit.remove(KEY_GROUP_FOLDER_PREFIX + oldName)
+                .putString(KEY_GROUP_FOLDER_PREFIX + trimmed, link)
+        }
         edit.apply()
         return true
     }
@@ -2330,7 +2415,11 @@ internal object LibraryPrefs {
                 edit.remove(key)
             }
         }
+        // v0.8.22: a linked group takes its folder link with it (the
+        // folder's files stay on disk; the scan just stops).
+        edit.remove(KEY_GROUP_FOLDER_PREFIX + name)
         edit.apply()
+        dropFolderIfUnlinked(context)
     }
 
     fun readGroupOf(context: android.content.Context): Map<String, String> {
@@ -2350,6 +2439,112 @@ internal object LibraryPrefs {
             prefs.edit().remove(KEY_GROUP_OF_PREFIX + filePath).apply()
         } else {
             prefs.edit().putString(KEY_GROUP_OF_PREFIX + filePath, group).apply()
+        }
+    }
+
+    // ══ v0.8.22: UNIFIED GROUPS — folders merged INTO groups ══════════
+    // "Merge the app's separate folders and groups into one thing called
+    // a group, and remove the folder chips and the folder-creation flow as
+    // separate features." A group is a name + optional members, PLUS an
+    // optional LINKED device folder: a linked group's grid is the live
+    // scan of that directory (files added from other apps appear
+    // automatically on every library reload) combined with anything
+    // manually added to the group. Folders no longer exist as standalone
+    // chips — only as group links.
+
+    private const val KEY_GROUP_FOLDER_PREFIX = "group_folder_of:"
+    private const val KEY_FOLDERS_MERGED = "folders_merged_into_groups"
+
+    /** A group + its optional linked folder ("" = none). */
+    data class GroupInfo(val name: String, val folderUri: String?)
+
+    /** The tree URI linked to [group], or null. */
+    fun groupFolderOf(context: android.content.Context, group: String): String? =
+        context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+            .getString(KEY_GROUP_FOLDER_PREFIX + group, null)
+            ?.takeIf { it.isNotBlank() }
+
+    /** Every group WITH its linked-folder state (the unified group list). */
+    fun readGroupsInfo(context: android.content.Context): List<GroupInfo> =
+        readGroups(context).map { GroupInfo(it, groupFolderOf(context, it)) }
+
+    /** Every group's linked folder (groups without a link are absent). */
+    fun readGroupFolders(context: android.content.Context): Map<String, String> {
+        val prefs = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+        val result = mutableMapOf<String, String>()
+        for ((key, value) in prefs.all) {
+            if (key.startsWith(KEY_GROUP_FOLDER_PREFIX) && value is String &&
+                value.isNotBlank()
+            ) {
+                result[key.removePrefix(KEY_GROUP_FOLDER_PREFIX)] = value
+            }
+        }
+        return result
+    }
+
+    /**
+     * Link (or unlink with null) a device folder to [group]. Unlinking
+     * drops the folder from the scan registry once NO group links it (its
+     * files stay on disk untouched).
+     */
+    fun setGroupFolder(context: android.content.Context, group: String, treeUri: String?) {
+        val prefs = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+        if (treeUri == null) {
+            prefs.edit().remove(KEY_GROUP_FOLDER_PREFIX + group).apply()
+            dropFolderIfUnlinked(context)
+        } else {
+            prefs.edit().putString(KEY_GROUP_FOLDER_PREFIX + group, treeUri).apply()
+        }
+    }
+
+    /** Remove a folder from the scan registry when no group links it. */
+    private fun dropFolderIfUnlinked(context: android.content.Context) {
+        val linked = readGroupFolders(context).values.toSet()
+        for (folder in ImageFolderAssets.readFolders(context)) {
+            if (folder.treeUri !in linked) {
+                ImageFolderAssets.removeFolder(context, folder.treeUri)
+            }
+        }
+    }
+
+    /**
+     * v0.8.22 one-time migration: every existing FOLDER becomes a GROUP
+     * with that folder linked (name de-conflicted against existing groups;
+     * position after the old groups), so nothing is lost and folder chips
+     * simply become group chips. The folders themselves stay registered in
+     * ImageFolderAssets — that object is the linked-scan engine now, not a
+     * standalone UI feature.
+     */
+    private fun ensureFoldersMergedIntoGroups(context: android.content.Context) {
+        val prefs = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_FOLDERS_MERGED, false)) return
+        // readGroupsRaw, NOT readGroups — this runs from inside readGroups;
+        // the public one would recurse forever.
+        val existing = readGroupsRaw(context).toMutableList()
+        val taken = existing.toMutableSet()
+        var migrated = 0
+        val edit = prefs.edit()
+        for (folder in ImageFolderAssets.readFolders(context)) {
+            // A unique group name from the folder's display name.
+            var name = folder.name.ifBlank { "Folder" }.trim().take(30)
+            if (name in taken) {
+                var n = 2
+                while ("$name ($n)" in taken) n++
+                name = "$name ($n)".take(30)
+            }
+            taken.add(name)
+            existing.add(name)
+            edit.putString(KEY_GROUP_FOLDER_PREFIX + name, folder.treeUri)
+            migrated++
+        }
+        if (migrated > 0) {
+            edit.putString(KEY_GROUPS_ORDER, org.json.JSONArray(existing).toString())
+            edit.putStringSet(KEY_GROUPS, existing.toSet())
+        }
+        edit.putBoolean(KEY_FOLDERS_MERGED, true).apply()
+        if (migrated > 0) {
+            WepWawetLogger.appInfo("LibraryPrefs: folders merged into groups",
+                "migrated" to migrated)
         }
     }
 

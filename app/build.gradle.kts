@@ -815,8 +815,60 @@ android {
         //     FULL entry list including every slot's settings, and the
         //     interval is excluded (it steers future ticks; including it
         //     rotated the wallpaper on every slider finish).
-        versionCode = 139
-        versionName = "0.8.21-alpha"
+        // v0.8.22-alpha (the crash + every remaining finding):
+        //   THE CRASH (crash-1794614521923.txt: IndexOutOfBoundsException
+        //     Index 1 out of bounds for length 1) and EVERY "playlist
+        //     not live" report share one ROOT CAUSE: the editor's save()
+        //     mutated the very instance held by the playlist STATE, then
+        //     re-read from disk — a structurally EQUAL value, and
+        //     mutableStateOf uses structural equality, so NOTHING ever
+        //     recomposed. Buttons looked dead ("if you change from random
+        //     to in order it doesnt update you have to close out of it
+        //     and go back"), and row actions kept STALE captured indices
+        //     (tapping remove on a stale row = the crash). save() now
+        //     mutates a FRESH instance — every push shows instantly; all
+        //     row actions also re-resolve their targets by key.
+        //   VIDEO CLIP FAILURE ("The video clipping failed with the error
+        //     in the image"): KEY_DURATION on track formats is
+        //     container-dependent — a file without it reported duration 0,
+        //     the end was capped to 0, and EVERY clip failed. Duration now
+        //     falls back to MediaMetadataRetriever, unknown durations
+        //     skip the cap, and trim failures carry their REASON into the
+        //     UI (VideoTrimmer.lastFailure).
+        //   TRIM AFTER ADDING ("there should be an option to trim a video
+        //     wallpaper after adding"): video entries get a trim action —
+        //     the trim screen in playlist mode writes the clip to app
+        //     storage and re-points the entry (the original file is kept).
+        //   DISCOVER PAN/ZOOM ("it doesnt zoom into the center and you can
+        //     move it to where the image is cutoff by the border"): zoom
+        //     now anchors at the WINDOW CENTER (the pan scales with the
+        //     zoom), and the render re-clamps the pan from the drawn size
+        //     so blank window space is impossible by construction.
+        //   CROP EDITOR ("you cant drag the borders and the crop to phones
+        //     aspect ratio still doesnt work. the aspect ratio is wrong"):
+        //     the preset math used the pixel ratio directly in fraction
+        //     space — only correct for square images (up to 0.83 aspect
+        //     error on landscape images; verified exact now), and locked
+        //     ratios ignored edge drags entirely. Both fixed; the math is
+        //     verified by simulation (scripts/verify_math.py).
+        //   UNIFIED GROUPS ("Merge the app's separate folders and groups
+        //     into one thing called a group, and remove the folder chips
+        //     and the folder-creation flow as separate features"): a group
+        //     is a name + manual members + an optional LINKED device
+        //     folder. The "＋" chip makes a name-only group (no directory
+        //     made). Long-pressing a group chip offers "Link to folder" —
+        //     make a new device folder (with the .nomedia toggle) or
+        //     choose an existing one — and "Unlink folder". A linked
+        //     group shows the LIVE SCAN of its directory (files added from
+        //     other apps appear automatically on every reload) combined
+        //     with its manual members. Every existing group AND folder
+        //     chip migrated into this single system without losing
+        //     anything (folders auto-became linked groups; a saved folder
+        //     filter restores to its group). The Discover tab's save flow
+        //     is group-based too, and the playlist add-picker's group
+        //     filter includes linked scans.
+        versionCode = 140
+        versionName = "0.8.22-alpha"
         // Native ABI filter — only build for arm64-v8a (WE app targets Snapdragon 8 Gen 2+)
         ndk {
             abiFilters += "arm64-v8a"

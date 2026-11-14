@@ -85,6 +85,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.filled.Casino
+import androidx.compose.material.icons.filled.ContentCut
 import com.wepwawet.discover.DiscoverPrefs
 
 /**
@@ -150,10 +151,60 @@ fun PlaylistEditorScreen(
     }
 
     fun save(mutate: SuitePlaylistStore.Playlist.() -> Unit) {
-        current.mutate()
-        SuitePlaylistStore.upsert(context, current)
-        // Re-read so the UI reflects the persisted object.
+        // v0.8.22 CRITICAL FIX (the crash + every "not live" report): the
+        // old body mutated `current` — the VERY INSTANCE held by the
+        // `playlist` state — in place, then re-read from disk. The re-read
+        // is structurally EQUAL to the (already mutated) state value, and
+        // mutableStateOf uses structural equality, so the assignment
+        // changed NOTHING: no recomposition ever ran, the editor's rows
+        // and buttons kept their STALE captured indices (tapping remove on
+        // a stale row → IndexOutOfBoundsException: "Index 1 out of bounds
+        // for length 1"), and every control looked dead until the screen
+        // was closed and reopened ("when you push a button it shows the
+        // change" — it never did). The mutation now runs on a FRESH
+        // instance, so the new state value genuinely differs and the UI
+        // updates the instant any button is pushed.
+        val next = SuitePlaylistStore.read(context, playlistId) ?: return
+        next.mutate()
+        SuitePlaylistStore.upsert(context, next)
         playlist = SuitePlaylistStore.read(context, playlistId)
+    }
+
+    // v0.8.22: TRIM A VIDEO WALLPAPER AFTER ADDING ("there should be an
+    // option to trim a video wallpaper after adding") — the video entry
+    // being trimmed in the full-screen overlay below.
+    var trimTarget by remember { mutableStateOf<SuitePlaylistStore.Entry?>(null) }
+
+    // The trim overlay takes over the whole screen (back = discard, the
+    // entry is untouched; Save Clip re-points the ENTRY at the clip — the
+    // original file is kept for other playlists).
+    trimTarget?.let { target ->
+        VideoTrimScreen(
+            videoFile = java.io.File(target.filepath),
+            itemTitle = target.title.ifBlank { "Video" },
+            itemId = "playlist",
+            onBack = { trimTarget = null },
+            onSendComplete = { trimTarget = null },
+            mode = "playlist",
+            onClipSaved = { clip ->
+                val oldPath = target.filepath
+                save {
+                    val i = entries.indexOfFirst { it.filepath == oldPath }
+                    if (i >= 0) {
+                        val e = entries[i]
+                        val title =
+                            if (e.title.endsWith(" (clip)")) e.title
+                            else "${e.title.ifBlank { "Video" }} (clip)"
+                        entries[i] = e.copy(filepath = clip.absolutePath, title = title)
+                    }
+                }
+                WepWawetLogger.appInfo("PlaylistEditor: entry trimmed",
+                    "old" to oldPath.takeLast(48),
+                    "clip" to clip.name)
+                trimTarget = null
+            },
+        )
+        return
     }
 
     Scaffold(
@@ -313,25 +364,49 @@ fun PlaylistEditorScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
+                        // v0.8.22: TRIM a video wallpaper after adding.
+                        if (!isRandom && isTrimVideoFile(entry.filepath)) {
+                            IconButton(onClick = { trimTarget = entry }) {
+                                Icon(
+                                    Icons.Filled.ContentCut,
+                                    contentDescription = "Trim video",
+                                )
+                            }
+                        }
+                        // v0.8.22: every row action re-resolves the entry
+                        // by its filepath INSIDE save (never a captured
+                        // index) — a stale captured index is what produced
+                        // "Index 1 out of bounds for length 1".
                         IconButton(
-                            onClick = { save { entries.removeAt(index) } },
+                            onClick = {
+                                save {
+                                    val i = entries.indexOfFirst { it.filepath == entry.filepath }
+                                    if (i >= 0) entries.removeAt(i)
+                                }
+                            },
                         ) {
                             Icon(Icons.Filled.Close, contentDescription = "Remove")
                         }
                         IconButton(
                             onClick = {
-                                if (index > 0) save {
-                                    val moved = entries.removeAt(index)
-                                    entries.add(index - 1, moved)
+                                save {
+                                    val i = entries.indexOfFirst { it.filepath == entry.filepath }
+                                    if (i > 0) {
+                                        val moved = entries.removeAt(i)
+                                        entries.add(i - 1, moved)
+                                    }
                                 }
                             },
                             enabled = index > 0,
                         ) { Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Move up") }
                         IconButton(
                             onClick = {
-                                if (index < current.entries.size - 1) save {
-                                    val moved = entries.removeAt(index)
-                                    entries.add(index + 1, moved)
+                                save {
+                                    val i = entries.indexOfFirst { it.filepath == entry.filepath }
+                                    if (i in 0 until entries.size - 1) {
+                                        val moved = entries.removeAt(i)
+                                        entries.add(i + 1, moved)
+                                    }
                                 }
                             },
                             enabled = index < current.entries.size - 1,
@@ -399,7 +474,14 @@ fun PlaylistEditorScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        IconButton(onClick = { save { timeRules.removeAt(ruleIndex) } }) {
+                        // v0.8.22: bounds-checked inside save (stale-index-proof).
+                        IconButton(onClick = {
+                            save {
+                                if (ruleIndex in timeRules.indices) {
+                                    timeRules.removeAt(ruleIndex)
+                                }
+                            }
+                        }) {
                             Icon(
                                 Icons.Filled.Delete,
                                 contentDescription = "Delete rule",
@@ -425,19 +507,24 @@ fun PlaylistEditorScreen(
         val title: String,
         val type: String,
         val isContentUri: Boolean,
+        // v0.8.22: the source folder for folder images (group-link filter).
+        val folderUri: String? = null,
     )
 
     if (showAddPicker) {
         var folderImages by remember {
-            mutableStateOf<List<ImageFolderAssets.ImageEntry>>(emptyList())
+            mutableStateOf<List<Pair<String, ImageFolderAssets.ImageEntry>>>(emptyList())
         }
         // v0.8.16: search + group filter ("in the playlists menu the add
         // should have a search and you should also be able to select a
-        // group. this should look good").
+        // group. this should look good"). v0.8.22: a group filter also
+        // matches its LINKED folder's images (the unified group = manual
+        // members + the linked folder's live scan).
         var pickerSearch by remember { mutableStateOf("") }
         var pickerGroup by remember { mutableStateOf<String?>(null) }
         val groups = remember { LibraryPrefs.readGroups(context) }
         val groupOf = remember { LibraryPrefs.readGroupOf(context) }
+        val groupFolders = remember { LibraryPrefs.readGroupFolders(context) }
         LaunchedEffect(Unit) {
             libraryWallpapers = withContext(Dispatchers.IO) {
                 EngineLibrary.enumerateWallpapers(context)
@@ -445,6 +532,7 @@ fun PlaylistEditorScreen(
             folderImages = withContext(Dispatchers.IO) {
                 ImageFolderAssets.readFolders(context).flatMap { folder ->
                     ImageFolderAssets.enumerateFolderImages(context, folder.treeUri)
+                        .map { folder.treeUri to it }
                 }
             }
         }
@@ -461,21 +549,27 @@ fun PlaylistEditorScreen(
                     isContentUri = w.isLocal || w.filePath.startsWith("content://"),
                 )
             }
-            val images = folderImages.map { e ->
+            val images = folderImages.map { (treeUri, e) ->
                 val resolved = cropMap[e.uri]?.cropFilePath ?: e.uri
                 PickItem(
                     filepath = resolved,
                     title = e.displayName.substringBeforeLast('.'),
                     type = "Image",
                     isContentUri = !resolved.startsWith("/"),
+                    folderUri = treeUri,
                 )
             }
             (walls + images).distinctBy { it.filepath }
         }
-        val visibleItems = remember(pickItems, pickerSearch, pickerGroup) {
+        val visibleItems = remember(pickItems, pickerSearch, pickerGroup, groupFolders) {
             val q = pickerSearch.trim().lowercase()
+            // v0.8.22: the group filter matches the group's MANUAL members
+            // and its LINKED folder's images — the same grid the library
+            // shows for that group.
+            val link = pickerGroup?.let { groupFolders[it] }
             pickItems.filter { item ->
-                (pickerGroup == null || groupOf[item.filepath] == pickerGroup) &&
+                (pickerGroup == null || groupOf[item.filepath] == pickerGroup ||
+                    (link != null && item.folderUri == link)) &&
                     (q.isEmpty() || item.title.lowercase().contains(q))
             }
         }
@@ -721,6 +815,16 @@ fun PlaylistEditorScreen(
 /** 870 → "14:30". */
 private fun formatMinute(minuteOfDay: Int): String =
     "%02d:%02d".format(minuteOfDay / 60, minuteOfDay % 60)
+
+/**
+ * v0.8.22: can this entry's video be trimmed in place? A raw video FILE
+ * on local storage (folder-imported/local videos) can be stream-copied;
+ * engine .mpkg packages are containers and are out of reach here.
+ */
+private fun isTrimVideoFile(path: String): Boolean =
+    path.startsWith("/") && listOf(
+        ".mp4", ".webm", ".mkv", ".avi", ".mov", ".m4v", ".3gp", ".ts", ".flv",
+    ).any { path.endsWith(it, ignoreCase = true) }
 
 /**
  * v0.8.21: the SEPARATE random-slot editor ("it should open a separate

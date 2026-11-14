@@ -54,11 +54,13 @@ fun FolderAddMenuDialog(
     onChooseExisting: () -> Unit,
     onCreateNew: () -> Unit,
     onImportOther: (() -> Unit)? = null,
+    // v0.8.22: the group link flow passes its own title.
+    title: String = "Add image folder",
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Filled.CreateNewFolder, contentDescription = null) },
-        title = { Text("Add image folder") },
+        title = { Text(title) },
         text = {
             Column {
                 OutlinedButton(

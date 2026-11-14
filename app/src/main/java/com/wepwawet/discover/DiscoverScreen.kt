@@ -85,6 +85,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import com.wepwawet.log.WepWawetLogger
 import com.wepwawet.ui.components.SlimTopBar
 import com.wepwawet.ui.screens.ImageFolderAssets
+import com.wepwawet.ui.screens.LibraryPrefs
 import com.wepwawet.ui.screens.BitmapCropDialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -159,7 +160,13 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
 
     // ---- v0.8.12: save-to-folder state ----
     var showSaveToFolder by remember { mutableStateOf(false) }
-    var saveFolders by remember { mutableStateOf<List<ImageFolderAssets.SavedFolder>>(emptyList()) }
+    // v0.8.22: saving targets GROUPS (a group with a linked folder saves
+    // into it; a name-only group links a folder first).
+    var saveGroups by remember {
+        mutableStateOf<List<com.wepwawet.ui.screens.LibraryPrefs.GroupInfo>>(emptyList())
+    }
+    // The group a pending folder pick/create should link to before saving.
+    var saveLinkGroup by remember { mutableStateOf<String?>(null) }
     var savingToFolder by remember { mutableStateOf(false) }
 
     /** The image to save — the visible preview, else the newest history entry. */
@@ -201,15 +208,37 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
         }
     }
 
-    // Pick a NEW folder and save the current image into it right away.
+    // Pick a folder — either to LINK a group (then save into it) or to
+    // create a fresh group-with-folder (then save into it).
     val saveFolderPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         if (uri != null) {
             ImageFolderAssets.takePersistableGrants(context, uri)
             ImageFolderAssets.addFolder(context, uri.toString())
-            saveFolders = ImageFolderAssets.readFolders(context)
-            saveToFolder(uri.toString())
+            val linkTarget = saveLinkGroup
+            saveLinkGroup = null
+            if (linkTarget != null) {
+                // Link THAT group, then save.
+                LibraryPrefs.setGroupFolder(context, linkTarget, uri.toString())
+                saveGroups = LibraryPrefs.readGroupsInfo(context)
+                saveToFolder(uri.toString())
+            } else {
+                // "＋ group": create-or-reuse a group named after the
+                // folder, link it, then save.
+                var name = ImageFolderAssets.folderDisplayName(uri.toString())
+                    .ifBlank { "Folder" }.trim().take(30)
+                val taken = LibraryPrefs.readGroups(context).toMutableSet()
+                if (name in taken) {
+                    var n = 2
+                    while ("$name ($n)" in taken) n++
+                    name = "$name ($n)".take(30)
+                }
+                LibraryPrefs.createGroup(context, name)
+                LibraryPrefs.setGroupFolder(context, name, uri.toString())
+                saveGroups = LibraryPrefs.readGroupsInfo(context)
+                saveToFolder(uri.toString())
+            }
         }
     }
 
@@ -788,11 +817,20 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                     // scaleY = dispW·windowAspect/imgAspect.
                     val (dispW, dispH) = previewMultipliers(shownBmp)
                     // The image CENTER sits at window center + pan; the
-                    // top-left offset follows from the drawn size.
+                    // top-left offset follows from the drawn size. v0.8.22:
+                    // the pan is RE-CLAMPED here from the drawn size — even
+                    // if some state ever slipped past the gesture clamp,
+                    // the rendered image can never show blank window space
+                    // ("you can move it to where it shows the blank space
+                    // behind the image. this is not desirable").
                     val w = previewWindowSize.width
                     val h = previewWindowSize.height
-                    val drawLeft = w / 2f + previewPanXPx - dispW * w / 2f
-                    val drawTop = h / 2f + previewPanYPx - dispH * h / 2f
+                    val maxX = maxOf(0f, (dispW - 1f) * w / 2f)
+                    val maxY = maxOf(0f, (dispH - 1f) * h / 2f)
+                    val panX = previewPanXPx.coerceIn(-maxX, maxX)
+                    val panY = previewPanYPx.coerceIn(-maxY, maxY)
+                    val drawLeft = w / 2f + panX - dispW * w / 2f
+                    val drawTop = h / 2f + panY - dispH * h / 2f
                     androidx.compose.foundation.layout.Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -810,20 +848,16 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                                         val oldZoom = previewZoom
                                         val newZoom =
                                             (oldZoom * gestureZoom).coerceIn(1f, 6f)
-                                        // Zoom about the PINCH CENTROID: the
-                                        // image point under the fingers
-                                        // stays under them (panPx' =
-                                        // g·panPx + (1−g)·centroidRel).
+                                        // v0.8.22: zoom anchors at the WINDOW
+                                        // CENTER ("it doesnt zoom into the
+                                        // center") — the pan scales with the
+                                        // zoom so the window's center point
+                                        // stays the center point; the clamp
+                                        // below keeps the image covering.
                                         val g = if (oldZoom > 0f) newZoom / oldZoom else 1f
                                         if (g != 1f) {
-                                            val cw = size.width.toFloat()
-                                            val ch = size.height.toFloat()
-                                            val relX = centroid.x - cw / 2f
-                                            val relY = centroid.y - ch / 2f
-                                            previewPanXPx =
-                                                previewPanXPx * g + relX * (1f - g)
-                                            previewPanYPx =
-                                                previewPanYPx * g + relY * (1f - g)
+                                            previewPanXPx *= g
+                                            previewPanYPx *= g
                                         }
                                         previewZoom = newZoom
                                     }
@@ -981,14 +1015,14 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
             // "+ folder" offers existing-or-create.
             OutlinedButton(
                 onClick = {
-                    saveFolders = ImageFolderAssets.readFolders(context)
+                    saveGroups = LibraryPrefs.readGroupsInfo(context)
                     showSaveToFolder = true
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Icon(Icons.Filled.Folder, contentDescription = null)
                 Spacer(Modifier.width(6.dp))
-                Text("Save to folder")
+                Text("Save to group")
             }
             // ===== Tags (tap a chip to flip strict/soft) =====
             Text("Tags", style = MaterialTheme.typography.titleMedium)
@@ -1204,64 +1238,88 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
         }
     }
 
-    // ===== v0.8.12: Save-to-folder picker (Discover → library folders) =====
+    // ===== v0.8.22: Save-to-GROUP picker (Discover → unified groups) =====
+    // "this change should work with the discover tab aswell" — the save
+    // list is GROUPS now: a linked group saves straight into its folder; a
+    // name-only group links a folder first (make a new device folder with
+    // the .nomedia toggle, or choose an existing one), then saves into it.
     if (showSaveToFolder) {
         AlertDialog(
             onDismissRequest = { if (!savingToFolder) showSaveToFolder = false },
-            title = { Text("Save to folder") },
+            title = { Text("Save to group") },
             text = {
                 Column {
                     Text(
                         "The current image is saved as a JPEG — it then shows " +
-                            "up in the Wallpapers section under that folder.",
+                            "up in the Wallpapers section under that group.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(12.dp))
-                    if (saveFolders.isEmpty()) {
+                    if (saveGroups.isEmpty()) {
                         Text(
-                            "No folders yet — pick one below.",
+                            "No groups yet — make one below.",
                             style = MaterialTheme.typography.bodyMedium,
                         )
                     } else {
-                        for (folder in saveFolders) {
+                        for (group in saveGroups) {
+                            val linked = group.folderUri != null
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable(enabled = !savingToFolder) {
-                                        saveToFolder(folder.treeUri)
+                                        if (linked) {
+                                            saveToFolder(group.folderUri!!)
+                                        } else {
+                                            // Link a folder to this group
+                                            // first, then save into it.
+                                            saveLinkGroup = group.name
+                                            showFolderMenu = true
+                                        }
                                     }
                                     .padding(vertical = 12.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Icon(
-                                    Icons.Filled.FolderOpen,
+                                    if (linked) Icons.Filled.FolderOpen
+                                    else Icons.Filled.Folder,
                                     contentDescription = null,
                                     tint = MaterialTheme.colorScheme.primary,
                                 )
                                 Spacer(Modifier.width(12.dp))
-                                Text(
-                                    folder.name,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    maxLines = 1,
-                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                )
+                                Column {
+                                    Text(
+                                        group.name,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    )
+                                    if (!linked) {
+                                        Text(
+                                            "Link a folder to save into",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
                     Spacer(Modifier.height(8.dp))
-                    // v0.8.18: "+ folder" opens the shared MENU first —
-                    // "make the create folder button come up with menu
-                    // asking if you want to use an already existing or make
-                    // one".
+                    // v0.8.18/22: "＋ group" — make-or-pick a folder (with
+                    // the .nomedia toggle option) → a new GROUP is created
+                    // for it → the image saves into it.
                     OutlinedButton(
-                        onClick = { showFolderMenu = true },
+                        onClick = {
+                            saveLinkGroup = null
+                            showFolderMenu = true
+                        },
                         enabled = !savingToFolder,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Icon(Icons.Filled.CreateNewFolder, contentDescription = null)
                         Spacer(Modifier.width(6.dp))
-                        Text("＋ folder")
+                        Text("＋ group")
                     }
                 }
             },
@@ -1340,7 +1398,11 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
     // folder that comes out of either path. =====
     if (showFolderMenu) {
         com.wepwawet.ui.screens.FolderAddMenuDialog(
-            onDismiss = { showFolderMenu = false },
+            title = if (saveLinkGroup != null) "Link to folder" else "＋ group",
+            onDismiss = {
+                showFolderMenu = false
+                saveLinkGroup = null
+            },
             onChooseExisting = {
                 showFolderMenu = false
                 try {
@@ -1363,9 +1425,28 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
             onDismiss = { showCreateFolder = false },
             onCreated = { dirUri ->
                 showCreateFolder = false
-                saveFolders = ImageFolderAssets.readFolders(context)
-                // Save the current image straight into the new folder.
-                saveToFolder(dirUri)
+                // CreateFolderFlow already registered the folder; resolve
+                // the pending group link or make a new group, then save.
+                val linkTarget = saveLinkGroup
+                saveLinkGroup = null
+                if (linkTarget != null) {
+                    LibraryPrefs.setGroupFolder(context, linkTarget, dirUri)
+                    saveGroups = LibraryPrefs.readGroupsInfo(context)
+                    saveToFolder(dirUri)
+                } else {
+                    var name = ImageFolderAssets.folderDisplayName(dirUri)
+                        .ifBlank { "Folder" }.trim().take(30)
+                    val taken = LibraryPrefs.readGroups(context).toMutableSet()
+                    if (name in taken) {
+                        var n = 2
+                        while ("$name ($n)" in taken) n++
+                        name = "$name ($n)".take(30)
+                    }
+                    LibraryPrefs.createGroup(context, name)
+                    LibraryPrefs.setGroupFolder(context, name, dirUri)
+                    saveGroups = LibraryPrefs.readGroupsInfo(context)
+                    saveToFolder(dirUri)
+                }
             },
         )
     }

@@ -126,9 +126,14 @@ import java.io.File
  * @param itemId Workshop item ID.
  * @param mode v0.9.0 — "send" (classic: trim → queue to the paired phone)
  *   or "library" (Download-button flow: trim → import into this app's
- *   integrated engine library).
+ *   integrated engine library). v0.8.22: "playlist" — trim a video ALREADY
+ *   added to a playlist ("there should be an option to trim a video
+ *   wallpaper after adding"): the clip is written to app storage and
+ *   handed to [onClipSaved], which re-points the playlist entry at it
+ *   (the ORIGINAL file is never touched — other playlists keep it).
  * @param onBack Navigate back.
  * @param onSendComplete Called after the video has been queued/imported.
+ * @param onClipSaved v0.8.22 "playlist" mode: the freshly written clip.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -139,8 +144,10 @@ fun VideoTrimScreen(
     onBack: () -> Unit,
     onSendComplete: () -> Unit,
     mode: String = "send",
+    onClipSaved: ((File) -> Unit)? = null,
 ) {
     val isLibraryMode = mode == "library"
+    val isPlaylistMode = mode == "playlist"
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
@@ -425,7 +432,11 @@ fun VideoTrimScreen(
             // v0.8.15: the title matches the mode — every other string in
             // library mode is clip-themed, the bar said "Trim Video".
             SlimTopBar(
-                title = if (isLibraryMode) "Clip Video" else "Trim Video",
+                title = when {
+                    isPlaylistMode -> "Trim Video"
+                    isLibraryMode -> "Clip Video"
+                    else -> "Trim Video"
+                },
                 onBack = onBack,
             )
         },
@@ -823,6 +834,66 @@ fun VideoTrimScreen(
 
             Spacer(Modifier.height(16.dp))
 
+            // === v0.8.22 "playlist" mode: trim a video ALREADY in a playlist ===
+            // ONE button writes the clip to app storage and hands it back
+            // (the editor re-points the entry at it; the original file is
+            // kept — other playlists may still use it).
+            if (isPlaylistMode) {
+                Button(
+                    onClick = {
+                        if (isTrimming) return@Button
+                        isTrimming = true
+                        trimStatus = "Clipping ${formatTime(startMs)}–${formatTime(endMs)}…"
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                var clip: File? = null
+                                try {
+                                    val dir = File(context.filesDir, "playlist_clips")
+                                        .apply { mkdirs() }
+                                    val base = videoFile.nameWithoutExtension
+                                        .replace(Regex("[^A-Za-z0-9_-]+"), "_").take(40)
+                                        .ifBlank { "clip" }
+                                    val out = File(dir,
+                                        "${base}_${startMs}-${endMs}_${
+                                            System.currentTimeMillis()}.mp4")
+                                    val ok = VideoTrimmer.trim(
+                                        videoFile, out, startMs, endMs)
+                                    if (!isActive) return@withContext
+                                    clip = if (ok) out else null
+                                    trimStatus = if (ok)
+                                        "Clip saved"
+                                    else
+                                        "Clip failed (${VideoTrimmer.lastFailure
+                                            ?: "unknown error"}) — your video was not changed."
+                                } catch (e: kotlinx.coroutines.CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    trimStatus = "Failed: ${e.message}"
+                                } finally {
+                                    if (isActive) {
+                                        isTrimming = false
+                                        val done = clip
+                                        if (done != null) {
+                                            withContext(Dispatchers.Main) {
+                                                onClipSaved?.invoke(done)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    enabled = !isTrimming && durationMs > 0,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (isTrimming) "Processing…" else "Save Clip")
+                }
+                Text(
+                    "The clip replaces this entry's video. The original file is kept.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else
             // === Trim & Send + Send Full Video side by side ===
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -845,10 +916,11 @@ fun VideoTrimScreen(
                                         val trimSuccess = VideoTrimmer.trim(videoFile, trimmedFile, startMs, endMs)
                                         if (!isActive) return@withContext
                                         val packedFile = if (trimSuccess) trimmedFile else videoFile
+                                        // v0.8.22: WHY it failed, on screen.
                                         trimStatus = if (trimSuccess)
                                             "Adding clipped video to your library…"
                                         else
-                                            "Clip failed — adding full video…"
+                                            "Clip failed (${VideoTrimmer.lastFailure ?: "unknown error"}) — adding full video…"
                                         // The import (pack + library write + state
                                         // updates) runs in WorkshopDownloadJob's
                                         // own scope; we surface its progress via
@@ -881,7 +953,8 @@ fun VideoTrimScreen(
                                         // v0.7.23 BUG VT-2: check if cancelled after trim
                                         if (!isActive) return@withContext
                                         val packedFile = if (trimSuccess) trimmedFile else videoFile
-                                        trimStatus = if (trimSuccess) "Packing trimmed video…" else "Trim failed — packing full video…"
+                                        trimStatus = if (trimSuccess) "Packing trimmed video…"
+                                        else "Trim failed (${VideoTrimmer.lastFailure ?: "unknown error"}) — packing full video…"
 
                                         val mpkgFile = File(context.cacheDir, "${itemId}_${System.currentTimeMillis()}_send.mpkg")
                                         val item = WorkshopItemTyped(
