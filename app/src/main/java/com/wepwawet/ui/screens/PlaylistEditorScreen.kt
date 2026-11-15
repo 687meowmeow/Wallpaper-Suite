@@ -443,15 +443,41 @@ fun PlaylistEditorScreen(
                                 color = MaterialTheme.colorScheme.error,
                             )
                         }
+                    }
+                    // v0.10.0 (THE SILENT INACTIVE PLAYLIST): a permanent,
+                    // clearly visible banner on any playlist that is not
+                    // the active one — the old journal-only note was easy
+                    // to miss, so a rule built here silently did nothing.
+                    // One tap makes this playlist active.
+                    if (activeId != current.id && rulesData.rules.isNotEmpty()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(
+                                    MaterialTheme.colorScheme.errorContainer)
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "These rules NEVER run — this playlist isn't the active one.",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            androidx.compose.material3.TextButton(onClick = {
+                                com.wepwawet.playlist.SuitePlaylistStore
+                                    .setActive(context, current.id)
+                            }) {
+                                Text("Make active")
+                            }
+                        }
+                    } else if (activeId == current.id) {
                         Text(
-                            if (activeId == current.id)
-                                "Rules run while this playlist is ACTIVE."
-                            else
-                                "These rules won't run — this playlist isn't the active one.",
+                            "Rules run while this playlist is ACTIVE.",
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (activeId == current.id)
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            else MaterialTheme.colorScheme.error,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }

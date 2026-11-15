@@ -56,6 +56,49 @@ object WeEnginePrefs {
     const val PREF_KEY_HAS_SHOWN_ALIGN_OVERLAY = "hasShownAlignOverlay"
     const val PREF_KEY_HAS_SHOWN_LOCKSCREEN_WARNING = "hasShownLockscreenWarning"
 
+    // ═══ v0.10.0 (per-screen selected wallpapers) ═════════════════════
+    // One selection PER SCREEN: the home engine loads HOME, the lock engine
+    // loads LOCK. An apply that targets one screen never touches the other
+    // — exactly the user's toggle model (turn one off, set, turn it on,
+    // set the other). The legacy single key migrates into BOTH on first
+    // read (both screens start on whatever was showing).
+    const val PREF_KEY_SELECTED_WALLPAPER_HOME = "selectedWallpaperHome"
+    const val PREF_KEY_SELECTED_WALLPAPER_LOCK = "selectedWallpaperLock"
+    private const val PREF_KEY_PER_SCREEN_MIGRATED = "selectedWallpaperPerScreenMigrated"
+
+    /** The pref key of one screen's selection ("home" | "lock"). */
+    fun selectedKeyForScreen(screen: String): String =
+        if (screen == "lock") PREF_KEY_SELECTED_WALLPAPER_LOCK
+        else PREF_KEY_SELECTED_WALLPAPER_HOME
+
+    /** One screen's selected wallpaper path (after the one-time migration). */
+    fun readSelectedForScreen(context: Context, screen: String): String? {
+        migrateLegacySelectionIfNeeded(context)
+        return getStoredString(context, selectedKeyForScreen(screen))
+    }
+
+    /** Write one screen's selection — the other screen's stays untouched. */
+    fun writeSelectedForScreen(context: Context, screen: String, path: String?) {
+        migrateLegacySelectionIfNeeded(context)
+        if (path == null) prefs(context).edit().remove(selectedKeyForScreen(screen)).apply()
+        else storeString(context, selectedKeyForScreen(screen), path)
+    }
+
+    /** Copy the legacy single selection into both screens exactly once. */
+    private fun migrateLegacySelectionIfNeeded(context: Context) {
+        val p = prefs(context)
+        if (p.getBoolean(PREF_KEY_PER_SCREEN_MIGRATED, false)) return
+        val legacy = p.getString(PREF_KEY_SELECTED_WALLPAPER, null)
+        val editor = p.edit()
+        if (legacy != null && !p.contains(PREF_KEY_SELECTED_WALLPAPER_HOME)) {
+            editor.putString(PREF_KEY_SELECTED_WALLPAPER_HOME, legacy)
+        }
+        if (legacy != null && !p.contains(PREF_KEY_SELECTED_WALLPAPER_LOCK)) {
+            editor.putString(PREF_KEY_SELECTED_WALLPAPER_LOCK, legacy)
+        }
+        editor.putBoolean(PREF_KEY_PER_SCREEN_MIGRATED, true).apply()
+    }
+
     // v0.8.3: the official client's "don't ask again" key for the
     // audio-responsive permission prompt (Util.PREF_KEY_IGNORE_AUDIO_RESPONSE).
     const val PREF_KEY_IGNORE_AUDIO_RESPONSE = "ignoreAudioResponse"
@@ -332,6 +375,8 @@ object WeEnginePrefs {
                     }
                 }
             } catch (e: Exception) {
+                WepWawetLogger.appWarn("weEngine: getWallpaperResolution — getWallpaperResolution failed (ignored)",
+                    "exception" to (e.message ?: e.javaClass.name))
             }
         }
         // video wallpapers — read through the mpkg VFS or the local URI
@@ -358,6 +403,8 @@ object WeEnginePrefs {
                 retriever.release()
             }
         } catch (e: Exception) {
+            WepWawetLogger.appWarn("weEngine: getWallpaperResolution — getWallpaperResolution failed (ignored)",
+                "exception" to (e.message ?: e.javaClass.name))
         }
         return null
     }
@@ -391,6 +438,8 @@ object WeEnginePrefs {
                 retriever.release()
             }
         } catch (e: Exception) {
+            WepWawetLogger.appWarn("weEngine: getWallpaperFPS — getWallpaperFPS failed (ignored)",
+                "exception" to (e.message ?: e.javaClass.name))
         }
         return 0
     }
@@ -673,7 +722,16 @@ object WeEnginePrefs {
         wallpaper: WallpaperInfoSparse,
         forceOpenPicker: Boolean,
     ): Boolean {
+        // v0.10.0: PER-SCREEN writes — only the screens the Home/Lock
+        // toggles have ON get the new image; an off screen keeps exactly
+        // what it has. (The legacy single key is kept in sync for the
+        // delete/active checks below.)
         storeString(context, PREF_KEY_SELECTED_WALLPAPER, wallpaper.filePath)
+        val screens = com.wepwawet.discover.DiscoverPrefs.readScreens(context)
+        val homeOn = com.wepwawet.discover.DiscoverPrefs.homeRequired(screens.first)
+        val lockOn = com.wepwawet.discover.DiscoverPrefs.lockRequired(screens.second)
+        if (homeOn) writeSelectedForScreen(context, "home", wallpaper.filePath)
+        if (lockOn) writeSelectedForScreen(context, "lock", wallpaper.filePath)
         val service = WEWallpaperService.instance
         if (!forceOpenPicker && service != null && service.isLiveWallpaperActive) {
             service.requestWallpaperReload()
@@ -711,6 +769,8 @@ object WeEnginePrefs {
         try {
             WallpaperManager.getInstance(context).clearWallpaper()
         } catch (e: Exception) {
+            WepWawetLogger.appWarn("WeEnginePrefs: resetToSystemWallpaper — best-effort call failed",
+                "exception" to (e.message ?: e.javaClass.name))
         }
     }
 
@@ -744,6 +804,8 @@ object WeEnginePrefs {
                     }
                     callback(isPowerSaveMode)
                 } catch (e: Exception) {
+                    WepWawetLogger.appWarn("weEngine: onReceive — onReceive failed (ignored)",
+                        "exception" to (e.message ?: e.javaClass.name))
                 }
             }
         }
@@ -847,6 +909,8 @@ object WeEnginePrefs {
             point.x = dm.widthPixels
             point.y = dm.heightPixels
         } catch (t: Throwable) {
+            WepWawetLogger.appWarn("weEngine: getDisplayResolution — getDisplayResolution failed (ignored)",
+                "exception" to (t.message ?: t.javaClass.name))
         }
         return point
     }

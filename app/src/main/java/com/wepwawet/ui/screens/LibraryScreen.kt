@@ -488,20 +488,12 @@ fun LibraryScreen(
                             }
                         }
                     val crop = com.wepwawet.discover.DiscoverApplier.cropForScreen(context, bmp)
-                    // v0.8.18 (review B6): the Discover tab's Home/Lock
-                    // tri-state is the app-wide model of which screens the
-                    // user wants this app to manage. The old unconditional
-                    // home+lock apply silently overwrote a lock screen the
-                    // user had excluded in Discover. Default to both only
-                    // when the user has never expressed a preference (both
-                    // off), matching DiscoverPrefs' own legacy defaults.
+                    // v0.10.0: the toggles ARE the model — both OFF
+                    // means NOTHING is written (the old "no preference"
+                    // fallback wrote both screens against the toggles).
                     val screens = com.wepwawet.discover.DiscoverPrefs.readScreens(context)
-                    val noPreference = screens.first == com.wepwawet.discover.DiscoverPrefs.SCREEN_OFF &&
-                        screens.second == com.wepwawet.discover.DiscoverPrefs.SCREEN_OFF
-                    val homeOn = noPreference ||
-                        com.wepwawet.discover.DiscoverPrefs.homeRequired(screens.first)
-                    val lockOn = noPreference ||
-                        com.wepwawet.discover.DiscoverPrefs.lockRequired(screens.second)
+                    val homeOn = com.wepwawet.discover.DiscoverPrefs.homeRequired(screens.first)
+                    val lockOn = com.wepwawet.discover.DiscoverPrefs.lockRequired(screens.second)
                     com.wepwawet.discover.DiscoverApplier.apply(
                         context, crop, homeOn = homeOn, lockOn = lockOn).ok
                 }

@@ -947,8 +947,9 @@ class WorkshopRepository constructor(
                     }
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
-                } catch (_: Exception) {
-                    // refresh failed — fall through to the cached value
+                } catch (e: Exception) {
+                    WepWawetLogger.appWarn("app: getById — getById failed (ignored)",
+                        "exception" to (e.message ?: e.javaClass.name))
                 }
             }
             WepWawetLogger.workshopDebug("getById cache hit", "id" to id)
@@ -972,8 +973,9 @@ class WorkshopRepository constructor(
                     }
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
-                } catch (_: Exception) {
-                    // refresh failed — fall through to the cached value
+                } catch (e: Exception) {
+                    WepWawetLogger.appWarn("app: getById — getById failed (ignored)",
+                        "exception" to (e.message ?: e.javaClass.name))
                 }
             }
             detailCache[id] = it
@@ -996,8 +998,9 @@ class WorkshopRepository constructor(
                     }
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
-                } catch (_: Exception) {
-                    // refresh failed — fall through to the cached value
+                } catch (e: Exception) {
+                    WepWawetLogger.appWarn("app: getById — getById failed (ignored)",
+                        "exception" to (e.message ?: e.javaClass.name))
                 }
             }
             detailCache[id] = it

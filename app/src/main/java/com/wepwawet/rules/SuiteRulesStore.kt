@@ -47,6 +47,57 @@ object SuiteRulesStore {
 
     private fun file(context: Context): File = File(context.filesDir, FILE)
 
+    // ═══ v0.10.0: DATA SAFETY ═════════════════════════════════════════
+    // The old writeRoot did a plain writeText of the whole file with no
+    // lock and no atomicity: every rule firing (recordFire), every named
+    // value change, and every editor save read the file, changed one
+    // part, and wrote the WHOLE file back from different coroutines — a
+    // rule firing while the user edits overwrote the edit, and a crash
+    // mid-write corrupted the file (then quarantined → "my rules are
+    // gone").
+    //
+    // Now: ALL writes go through [mutate] — ONE lock, read-modify-write
+    // under it, then an ATOMIC temp-file + fsync + rename (a crash leaves
+    // either the old file or the new one, never a half-written one).
+
+    private val writeLock = Any()
+
+    /**
+     * The single writer: mutate the root under one lock and persist
+     * atomically. Every mutation API (rules, values, presets, pins,
+     * last-fired, wait bookkeeping) funnels through here.
+     */
+    fun mutate(context: Context, block: (JSONObject) -> Unit) {
+        synchronized(writeLock) {
+            val root = readRoot(context)
+            block(root)
+            writeRootAtomic(context, root)
+        }
+    }
+
+    /** Atomic write: temp file → fsync → rename over the real file. */
+    private fun writeRootAtomic(context: Context, root: JSONObject) {
+        val f = file(context)
+        val tmp = File(context.filesDir, "$FILE.tmp-$${System.currentTimeMillis()}")
+        try {
+            java.io.FileOutputStream(tmp).use { out ->
+                out.write(root.toString().toByteArray(Charsets.UTF_8))
+                out.flush()
+                out.fd.sync()
+            }
+            if (!tmp.renameTo(f)) {
+                // Cross-filesystem or busy — stream-copy then delete.
+                f.outputStream().use { tmp.inputStream().copyTo(it) }
+                tmp.delete()
+            }
+        } catch (e: Exception) {
+            runCatching { tmp.delete() }
+            WepWawetLogger.appError("SuiteRulesStore: atomic write failed",
+                "exception" to e.javaClass.name,
+                "message" to (e.message ?: ""))
+        }
+    }
+
     @Synchronized
     private fun readRoot(context: Context): JSONObject {
         val f = file(context)
@@ -74,15 +125,7 @@ object SuiteRulesStore {
         }
     }
 
-    @Synchronized
-    private fun writeRoot(context: Context, root: JSONObject) {
-        try {
-            file(context).writeText(root.toString())
-        } catch (e: Exception) {
-            WepWawetLogger.appError("SuiteRulesStore: write failed",
-                "exception" to e.javaClass.name)
-        }
-    }
+
 
     // ── Per-playlist rule sets ─────────────────────────────────────────
 
@@ -94,12 +137,12 @@ object SuiteRulesStore {
     }
 
     fun writePlaylistRules(context: Context, pr: RuleModel.PlaylistRules) {
-        val root = readRoot(context)
-        val all = root.optJSONObject(KEY_PLAYLISTS) ?: JSONObject().also {
-            root.put(KEY_PLAYLISTS, it)
+        mutate(context) { root ->
+            val all = root.optJSONObject(KEY_PLAYLISTS) ?: JSONObject().also {
+                root.put(KEY_PLAYLISTS, it)
+            }
+            all.put(pr.playlistId, RuleModel.playlistRulesToJson(pr))
         }
-        all.put(pr.playlistId, RuleModel.playlistRulesToJson(pr))
-        writeRoot(context, root)
         WepWawetLogger.appInfo("SuiteRulesStore: rules saved",
             "playlist" to pr.playlistId,
             "rules" to pr.rules.size,
@@ -115,9 +158,9 @@ object SuiteRulesStore {
     }
 
     fun deletePlaylistRules(context: Context, playlistId: String) {
-        val root = readRoot(context)
-        root.optJSONObject(KEY_PLAYLISTS)?.remove(playlistId)
-        writeRoot(context, root)
+        mutate(context) { root ->
+            root.optJSONObject(KEY_PLAYLISTS)?.remove(playlistId)
+        }
         RuleTriggerHub.onRulesChanged(context)
     }
 
@@ -167,16 +210,16 @@ object SuiteRulesStore {
         readValues(context)[name]
 
     fun setValue(context: Context, name: String, value: NamedValue) {
-        val root = readRoot(context)
-        val all = root.optJSONObject(KEY_VALUES) ?: JSONObject().also {
-            root.put(KEY_VALUES, it)
+        mutate(context) { root ->
+            val all = root.optJSONObject(KEY_VALUES) ?: JSONObject().also {
+                root.put(KEY_VALUES, it)
+            }
+            all.put(name, JSONObject()
+                .put("kind", value.kind)
+                .put("bool", value.boolValue)
+                .put("num", value.numValue)
+                .put("str", value.strValue))
         }
-        all.put(name, JSONObject()
-            .put("kind", value.kind)
-            .put("bool", value.boolValue)
-            .put("num", value.numValue)
-            .put("str", value.strValue))
-        writeRoot(context, root)
         WepWawetLogger.appInfo("SuiteRulesStore: value set",
             "name" to name, "kind" to value.kind)
     }
@@ -193,9 +236,9 @@ object SuiteRulesStore {
     }
 
     fun clearValue(context: Context, name: String) {
-        val root = readRoot(context)
-        root.optJSONObject(KEY_VALUES)?.remove(name)
-        writeRoot(context, root)
+        mutate(context) { root ->
+            root.optJSONObject(KEY_VALUES)?.remove(name)
+        }
         WepWawetLogger.appInfo("SuiteRulesStore: value cleared", "name" to name)
     }
 
@@ -217,21 +260,21 @@ object SuiteRulesStore {
     }
 
     fun savePreset(context: Context, preset: Preset) {
-        val root = readRoot(context)
-        val all = root.optJSONObject(KEY_PRESETS) ?: JSONObject().also {
-            root.put(KEY_PRESETS, it)
+        mutate(context) { root ->
+            val all = root.optJSONObject(KEY_PRESETS) ?: JSONObject().also {
+                root.put(KEY_PRESETS, it)
+            }
+            all.put(preset.name, JSONObject()
+                .put("wallpaper", preset.wallpaperPath)
+                .put("properties", preset.propertiesJson))
         }
-        all.put(preset.name, JSONObject()
-            .put("wallpaper", preset.wallpaperPath)
-            .put("properties", preset.propertiesJson))
-        writeRoot(context, root)
         WepWawetLogger.appInfo("SuiteRulesStore: preset saved", "name" to preset.name)
     }
 
     fun deletePreset(context: Context, name: String) {
-        val root = readRoot(context)
-        root.optJSONObject(KEY_PRESETS)?.remove(name)
-        writeRoot(context, root)
+        mutate(context) { root ->
+            root.optJSONObject(KEY_PRESETS)?.remove(name)
+        }
     }
 
     // ── Pinned (QS tile) + notification-button rule ─────────────────────
@@ -245,15 +288,15 @@ object SuiteRulesStore {
     }
 
     private fun writeRuleRef(context: Context, key: String, ref: Pair<String, String>?) {
-        val root = readRoot(context)
-        if (ref == null) {
-            root.remove(key)
-        } else {
-            root.put(key, JSONObject()
-                .put("playlistId", ref.first)
-                .put("ruleId", ref.second))
+        mutate(context) { root ->
+            if (ref == null) {
+                root.remove(key)
+            } else {
+                root.put(key, JSONObject()
+                    .put("playlistId", ref.first)
+                    .put("ruleId", ref.second))
+            }
         }
-        writeRoot(context, root)
     }
 
     fun pinRuleForTile(context: Context, playlistId: String?, ruleId: String?) {
@@ -278,28 +321,50 @@ object SuiteRulesStore {
         rule.lastFiredAt = System.currentTimeMillis()
         rule.lastResult = result
         // Persist both on the rule object in the store AND in the flat map
-        // the editor reads cheaply.
-        val root = readRoot(context)
-        val all = root.optJSONObject(KEY_PLAYLISTS) ?: JSONObject().also {
-            root.put(KEY_PLAYLISTS, it)
+        // the editor reads cheaply — through the single writer.
+        mutate(context) { root ->
+            val all = root.optJSONObject(KEY_PLAYLISTS) ?: JSONObject().also {
+                root.put(KEY_PLAYLISTS, it)
+            }
+            all.optJSONObject(playlistId)?.let { po ->
+                val rules = po.optJSONArray("rules") ?: return@let
+                for (i in 0 until rules.length()) {
+                    val o = rules.optJSONObject(i) ?: continue
+                    if (o.optString("id") == rule.id) {
+                        o.put("lastFiredAt", rule.lastFiredAt)
+                        o.put("lastResult", result)
+                        break
+                    }
+                }
+            }
+            val fired = root.optJSONObject(KEY_LAST_FIRED) ?: JSONObject().also {
+                root.put(KEY_LAST_FIRED, it)
+            }
+            fired.put("$playlistId|${rule.id}", JSONObject()
+                .put("at", rule.lastFiredAt)
+                .put("result", result))
         }
-        all.optJSONObject(playlistId)?.let { po ->
-            val rules = po.optJSONArray("rules") ?: return@let
+    }
+
+    /**
+     * v0.10.0: stamp the cooldown the moment a run STARTS (recordFire used
+     * to be the only stamp — written AFTER the run finished, so a long run
+     * (a Wait block can hold one for ten minutes) let every arriving event
+     * start a duplicate). The final recordFire still writes the result.
+     */
+    fun stampLastFiredAt(context: Context, playlistId: String, rule: RuleModel.Rule) {
+        rule.lastFiredAt = System.currentTimeMillis()
+        mutate(context) { root ->
+            val all = root.optJSONObject(KEY_PLAYLISTS) ?: return@mutate
+            val po = all.optJSONObject(playlistId) ?: return@mutate
+            val rules = po.optJSONArray("rules") ?: return@mutate
             for (i in 0 until rules.length()) {
                 val o = rules.optJSONObject(i) ?: continue
                 if (o.optString("id") == rule.id) {
                     o.put("lastFiredAt", rule.lastFiredAt)
-                    o.put("lastResult", result)
                     break
                 }
             }
         }
-        val fired = root.optJSONObject(KEY_LAST_FIRED) ?: JSONObject().also {
-            root.put(KEY_LAST_FIRED, it)
-        }
-        fired.put("$playlistId|${rule.id}", JSONObject()
-            .put("at", rule.lastFiredAt)
-            .put("result", result))
-        writeRoot(context, root)
     }
 }

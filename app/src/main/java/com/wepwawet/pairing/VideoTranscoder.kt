@@ -269,16 +269,18 @@ object VideoTranscoder {
                                 android.media.MediaCodecInfo.CodecProfileLevel.AVCLevel42
                             else
                                 android.media.MediaCodecInfo.CodecProfileLevel.AVCLevel51)
-                    } catch (_: Exception) {
-                        // Some encoders don't support KEY_PROFILE — fall back to default
+                    } catch (e: Exception) {
+                        WepWawetLogger.appWarn("app: transcodeWithMediaCodec — transcodeWithMediaCodec failed (ignored)",
+                            "exception" to (e.message ?: e.javaClass.name))
                     }
                 }
 
                 // v0.6.0 (parity §8-5): Disable B-frames for seek-friendly wallpaper playback
                 try {
                     setInteger("max-bframes", 0)  // API 23+
-                } catch (_: Exception) {
-                    // Some encoders don't support this key — ignore
+                } catch (e: Exception) {
+                    WepWawetLogger.appWarn("app: transcodeWithMediaCodec — transcodeWithMediaCodec failed (ignored)",
+                        "exception" to (e.message ?: e.javaClass.name))
                 }
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
                     try {
@@ -562,7 +564,7 @@ object VideoTranscoder {
                                 val encSliceH = try {
                                     vEnc.outputFormat.getInteger(
                                         android.media.MediaFormat.KEY_SLICE_HEIGHT, -1)
-                                } catch (_: Exception) { -1 }
+                                } catch (e: Exception) { -1 }
                                 copyYuv420Image(decodedImage, encoderImage, width, height, encSliceH)
                                 // Pass the encoder input buffer capacity as the
                                 // size — the full YUV420 frame per the encoder's

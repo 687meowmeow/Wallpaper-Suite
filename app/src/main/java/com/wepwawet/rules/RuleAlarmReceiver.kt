@@ -24,6 +24,12 @@ import kotlinx.coroutines.launch
  * untouched — an alarm that fires late never double-fires a rule.
  */
 class RuleAlarmReceiver : BroadcastReceiver() {
+
+    /** v0.10.0: a persisted Wait block re-armed for its remaining time. */
+    companion object {
+        const val ACTION_RESUME_WAIT = "com.wepwawet.rules.RESUME_WAIT"
+    }
+
     override fun onReceive(context: Context, intent: Intent) {
         val appCtx = context.applicationContext
         WepWawetLogger.appInfo("RuleAlarmReceiver: wake fired",
@@ -32,7 +38,15 @@ class RuleAlarmReceiver : BroadcastReceiver() {
         val pending = goAsync()
         com.wepwawet.WepWawetApplication.appScope.launch {
             try {
-                RuleTriggerHub.onAlarmWake(appCtx)
+                if (intent.action == ACTION_RESUME_WAIT) {
+                    RuleEngine.onWaitAlarm(
+                        appCtx,
+                        intent.getStringExtra("playlist") ?: "",
+                        intent.getStringExtra("rule") ?: "",
+                        intent.getStringExtra("block") ?: "")
+                } else {
+                    RuleTriggerHub.onAlarmWake(appCtx)
+                }
             } finally {
                 pending.finish()
             }

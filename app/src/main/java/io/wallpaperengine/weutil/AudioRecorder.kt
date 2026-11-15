@@ -3,6 +3,7 @@ package io.wallpaperengine.weutil
 import android.media.audiofx.Visualizer
 import kotlin.math.exp
 import kotlin.math.log10
+import com.wepwawet.log.WepWawetLogger
 
 /**
  * System-audio FFT capture for audio-responsive wallpapers, ported 1:1 from
@@ -39,6 +40,8 @@ class AudioRecorder : Visualizer.OnDataCaptureListener {
             try {
                 viz.setScalingMode(Visualizer.SCALING_MODE_AS_PLAYED)
             } catch (e: NoSuchMethodError) {
+                WepWawetLogger.appWarn("weEngine: startAudioListener — startAudioListener failed (ignored)",
+                    "exception" to (e.message ?: e.javaClass.name))
             }
             viz.setMeasurementMode(Visualizer.MEASUREMENT_MODE_NONE)
             viz.setDataCaptureListener(
@@ -54,6 +57,8 @@ class AudioRecorder : Visualizer.OnDataCaptureListener {
             viz.setEnabled(true)
             mAudioRecordState = true
         } catch (e: RuntimeException) {
+            WepWawetLogger.appWarn("weEngine: startAudioListener — startAudioListener failed (ignored)",
+                "exception" to (e.message ?: e.javaClass.name))
         }
     }
 

@@ -117,9 +117,25 @@ object RuleTriggerHub {
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
             when (intent.action) {
-                Intent.ACTION_SCREEN_ON -> dispatch(ctx, RuleModel.TRIG_SCREEN_ON)
-                Intent.ACTION_SCREEN_OFF -> dispatch(ctx, RuleModel.TRIG_SCREEN_OFF)
-                Intent.ACTION_USER_PRESENT -> dispatch(ctx, RuleModel.TRIG_UNLOCKED)
+                Intent.ACTION_SCREEN_ON -> {
+                    // v0.10.0: the broadcast ARRIVED — logged even when no
+                    // rule matches or no rules exist (the user's demand: a
+                    // log alone must tell a broadcast that never arrived
+                    // from a rule that did not run).
+                    WepWawetLogger.appInfo("$TAG: broadcast arrived",
+                        "action" to "SCREEN_ON")
+                    dispatch(ctx, RuleModel.TRIG_SCREEN_ON)
+                }
+                Intent.ACTION_SCREEN_OFF -> {
+                    WepWawetLogger.appInfo("$TAG: broadcast arrived",
+                        "action" to "SCREEN_OFF")
+                    dispatch(ctx, RuleModel.TRIG_SCREEN_OFF)
+                }
+                Intent.ACTION_USER_PRESENT -> {
+                    WepWawetLogger.appInfo("$TAG: broadcast arrived",
+                        "action" to "USER_PRESENT (unlocked)")
+                    dispatch(ctx, RuleModel.TRIG_UNLOCKED)
+                }
                 Intent.ACTION_POWER_CONNECTED -> dispatch(ctx, RuleModel.TRIG_CHARGER_IN)
                 Intent.ACTION_POWER_DISCONNECTED -> dispatch(ctx, RuleModel.TRIG_CHARGER_OUT)
                 android.os.PowerManager.ACTION_POWER_SAVE_MODE_CHANGED -> {
@@ -229,9 +245,6 @@ object RuleTriggerHub {
             actions.add(Intent.ACTION_POWER_CONNECTED)
             actions.add(Intent.ACTION_POWER_DISCONNECTED)
             actions.add(android.os.PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
-        }
-        if (RuleModel.TRIG_WALLPAPER_CHANGED in types) {
-            actions.add(ACTION_WALLPAPER_CHANGED)
         }
         if (RuleModel.TRIG_WALLPAPER_CHANGED in types) {
             actions.add(ACTION_WALLPAPER_CHANGED)

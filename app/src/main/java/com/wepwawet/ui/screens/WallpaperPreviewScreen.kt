@@ -310,18 +310,12 @@ fun WallpaperPreviewScreen(
                     val bmp = ImageFolderAssets.decodeBitmapScaled(context, wallpaper.filePath, 4096)
                         ?: return@withContext false
                     val crop = com.wepwawet.discover.DiscoverApplier.cropForScreen(context, bmp)
-                    // v0.8.18 (review B6): respect the Discover Home/Lock
-                    // tri-state instead of always writing both screens (see
-                    // the matching LibraryScreen fix for the rationale —
-                    // default both only when the user never chose).
+                    // v0.10.0: the toggles ARE the model — both OFF
+                    // means NOTHING is written (the old "no preference"
+                    // fallback wrote both screens against the toggles).
                     val screens = com.wepwawet.discover.DiscoverPrefs.readScreens(context)
-                    val noPreference =
-                        screens.first == com.wepwawet.discover.DiscoverPrefs.SCREEN_OFF &&
-                        screens.second == com.wepwawet.discover.DiscoverPrefs.SCREEN_OFF
-                    val homeOn = noPreference ||
-                        com.wepwawet.discover.DiscoverPrefs.homeRequired(screens.first)
-                    val lockOn = noPreference ||
-                        com.wepwawet.discover.DiscoverPrefs.lockRequired(screens.second)
+                    val homeOn = com.wepwawet.discover.DiscoverPrefs.homeRequired(screens.first)
+                    val lockOn = com.wepwawet.discover.DiscoverPrefs.lockRequired(screens.second)
                     com.wepwawet.discover.DiscoverApplier.apply(
                         context, crop, homeOn = homeOn, lockOn = lockOn).ok
                 }

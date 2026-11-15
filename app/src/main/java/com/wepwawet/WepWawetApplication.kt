@@ -221,6 +221,13 @@ class WepWawetApplication : Application(), Configuration.Provider, ImageLoaderFa
         }
         runCatching {
             com.wepwawet.rules.RuleTriggerHub.start(this)
+            // v0.10.0: a Wait block that outlived the process resumes now
+            // (its remaining time was persisted at wait start).
+            runCatching { com.wepwawet.rules.RuleEngine.resumePendingWaits(this) }
+                .onFailure {
+                    WepWawetLogger.appWarn("WepWawetApplication: wait resume failed",
+                        "exception" to (it.message ?: it.javaClass.name))
+                }
         }.onFailure { t ->
             if (loggerOk) WepWawetLogger.appWarn("rules hub start failed",
                 "exception" to t.javaClass.simpleName,

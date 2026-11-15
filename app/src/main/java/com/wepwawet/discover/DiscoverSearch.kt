@@ -168,7 +168,7 @@ object DiscoverSearch {
         // take the same image and a failed download's id stays claimed.
         while (System.currentTimeMillis() < deadline) {
             attempts++
-            val url = tryLadder(effStrict, effSoft, styleValue, r18Mode, sources, tried, deadline)
+            val url = tryLadder(context, effStrict, effSoft, styleValue, r18Mode, sources, tried, deadline)
             if (url.isNullOrEmpty()) break
             // v0.8.27: a candidate whose HOST is blocked (recent download
             // failures) is undownloadable — skip it and draw the NEXT
@@ -209,6 +209,7 @@ object DiscoverSearch {
 
     /** The v1.0.0 tier ladder. Each tier returns null on miss. */
     private fun tryLadder(
+        ctxApp: Context,
         strict: List<String>,
         soft: List<String>,
         styleValue: Int,
@@ -231,7 +232,7 @@ object DiscoverSearch {
 
         // ── Tier 2: booru pool with tags ──
         if (System.currentTimeMillis() < deadline) {
-            booruPool(strict, r18Mode, sources, tried)?.let { return it }
+            booruPool(ctxApp, strict, r18Mode, sources, tried)?.let { return it }
         }
 
         // ── R18 escalations (v1.0.0 tierEscalations) ──
@@ -240,7 +241,7 @@ object DiscoverSearch {
             if (DiscoverPrefs.SOURCE_LOLICON in sources) {
                 lolicon(strict, soft, styleValue, escalated, attachSoft = false, tried)?.let { return it }
             }
-            booruPool(strict, escalated, sources, tried)?.let { return it }
+            booruPool(ctxApp, strict, escalated, sources, tried)?.let { return it }
         }
 
         // ── Tier 3: slider-only (style band alone) ──
@@ -249,7 +250,7 @@ object DiscoverSearch {
                 if (DiscoverPrefs.SOURCE_LOLICON in sources) {
                     lolicon(listOf(band), emptyList(), styleValue, r18Mode, attachSoft = false, tried)?.let { return it }
                 }
-                booruPool(listOf(band), r18Mode, sources, tried)?.let { return it }
+                booruPool(ctxApp, listOf(band), r18Mode, sources, tried)?.let { return it }
             }
         }
 
@@ -262,7 +263,7 @@ object DiscoverSearch {
         if (DiscoverPrefs.SOURCE_DANBOORU in sources) {
             danbooru(emptyList(), emptyList(), styleValue, r18Mode, tried)?.let { return it }
         }
-        booruPool(emptyList(), r18Mode, sources, tried)?.let { return it }
+        booruPool(ctxApp, emptyList(), r18Mode, sources, tried)?.let { return it }
         return null
     }
 
@@ -534,6 +535,7 @@ object DiscoverSearch {
      * v0.8.18: only sites whose source id is in `sources` are tried.
      */
     private fun booruPool(
+        ctxApp: Context,
         tags: List<String>,
         r18Mode: Int,
         sources: Set<String>,
@@ -640,8 +642,18 @@ object DiscoverSearch {
                 // v0.9.2 (the review): dapi offset (`pid`) randomized per
                 // fetch — same reason as the moebooru page above.
                 val pid = Random.nextInt(5)
+                // v0.10.0: Gelbooru requires authentication — the stored
+                // api_key + user_id ride along (they are in the Gelbooru
+                // account options page; without them it answers 401).
+                val authSuffix = if (sourceId == DiscoverPrefs.SOURCE_GELBOORU) {
+                    val key = DiscoverPrefs.readGelbooruApiKey(ctxApp)
+                    val uid = DiscoverPrefs.readGelbooruUserId(ctxApp)
+                    if (key.isNotEmpty() && uid.isNotEmpty())
+                        "&api_key=${encode(key)}&user_id=${encode(uid)}"
+                    else ""
+                } else ""
                 val body = httpGetJsonArray(
-                    "${base}&tags=${encode(tag)}&limit=24&pid=$pid") ?: continue
+                    "${base}&tags=${encode(tag)}&limit=24&pid=$pid$authSuffix") ?: continue
                 val urls = ArrayList<String>()
                 for (i in 0 until body.length()) {
                     val post = body.optJSONObject(i) ?: continue

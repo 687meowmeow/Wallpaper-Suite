@@ -88,6 +88,12 @@
         <package android:name="io.wallpaperengine.weclient" />
         <package android:name="com.wallpaper.engine" />
         <package android:name="com.fws.wallpaperengine" />
+        <!-- v0.10.0: WallpaperManager.getWallpaperInfo(FLAG_SYSTEM/FLAG_LOCK)
+             returns null without visibility of the wallpaper package on
+             Android 14+ — the router's coverage check needs this. -->
+        <intent>
+            <action android:name="android.service.wallpaper.WallpaperService" />
+        </intent>
     </queries>
 
     <application

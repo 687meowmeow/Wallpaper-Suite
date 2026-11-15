@@ -38,6 +38,31 @@ object DiscoverApplier {
     // Decode / crop
     // ════════════════════════════════════════════════════════════════
 
+    /**
+     * v0.10.0: the TRUE physical screen size (the whole display,
+     * including the system bars). The old reads used
+     * displayMetrics.heightPixels — the app-window metrics, which EXCLUDE
+     * system bars — so every crop computed a slightly wrong aspect and
+     * the applied lock image sat off-center. maximumWindowMetrics (API
+     * 30+) is the real display; displayMetrics is the pre-30 fallback.
+     */
+    fun physicalScreenSize(context: Context): Pair<Int, Int> {
+        return try {
+            val wm = context.getSystemService(Context.WINDOW_SERVICE) as? android.view.WindowManager
+            if (android.os.Build.VERSION.SDK_INT >= 30 && wm != null) {
+                val b = wm.maximumWindowMetrics.bounds
+                b.width() to b.height()
+            } else {
+                @Suppress("DEPRECATION")
+                val dm = context.resources.displayMetrics
+                dm.widthPixels to dm.heightPixels
+            }
+        } catch (e: Exception) {
+            val dm = context.resources.displayMetrics
+            dm.widthPixels to dm.heightPixels
+        }
+    }
+
     /** Decode with a sampling size hint so 12 MP sources don't OOM. */
     fun decode(bytes: ByteArray, maxDim: Int): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -71,9 +96,10 @@ object DiscoverApplier {
          *  exact aspect (no center-crop), just scale to screen width. */
         matchScreenAspect: Boolean = true,
     ): Bitmap {
-        val metrics = context.resources.displayMetrics
-        val screenWidth = metrics.widthPixels
-        val screenHeight = metrics.heightPixels
+        // v0.10.0: the TRUE physical screen (was displayMetrics — the
+        // app-window size without the system bars → a slightly wrong
+        // aspect on every crop).
+        val (screenWidth, screenHeight) = physicalScreenSize(context)
 
         val bitmap = downscaleIfNeeded(source, maxDecodeDimension(context))
 
@@ -161,9 +187,7 @@ object DiscoverApplier {
         panX: Float,
         panY: Float,
     ): Bitmap {
-        val metrics = context.resources.displayMetrics
-        val screenWidth = metrics.widthPixels
-        val screenHeight = metrics.heightPixels
+        val (screenWidth, screenHeight) = physicalScreenSize(context)
 
         val bitmap = downscaleIfNeeded(source, maxDecodeDimension(context))
 
@@ -206,13 +230,6 @@ object DiscoverApplier {
         return target
     }
 
-    /** WallpaperManager on some OEMs only accepts software bitmaps. */
-    private fun forWallpaperManager(bitmap: Bitmap): Bitmap {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return bitmap
-        if (bitmap.config != Bitmap.Config.HARDWARE) return bitmap
-        return bitmap.copy(Bitmap.Config.ARGB_8888, true)
-    }
-
     // ════════════════════════════════════════════════════════════════
     // Apply (home / lock / both)
     // ════════════════════════════════════════════════════════════════
@@ -227,6 +244,15 @@ object DiscoverApplier {
         val allOk: Boolean get() = homeOk && lockOk
     }
 
+    /**
+     * v0.10.0: THE ROUTER — both screens are served by the app's own live
+     * wallpaper; WallpaperManager.setBitmap is GONE from normal operation
+     * (every call installed a NEW system wallpaper — a new
+     * WallpaperManager ID — filling the OnePlus "Wallpaper & style" list
+     * with entries, and it REPLACED the live wallpaper, stopping the
+     * playlist and rules). The bitmaps are saved to a small ring and
+     * loaded by the engines of the ON screens.
+     */
     suspend fun apply(
         context: Context,
         bitmap: Bitmap,
@@ -234,15 +260,22 @@ object DiscoverApplier {
         lockOn: Boolean,
         lockBitmap: Bitmap? = null,
     ): ApplyResult = withContext(Dispatchers.IO) {
-        var homeOk = true
-        var lockOk = true
-        if (homeOn) {
-            homeOk = setWallpaperWithRetry(context, bitmap, WallpaperManager.FLAG_SYSTEM)
+        val target = when {
+            homeOn && lockOn -> "both"
+            homeOn -> "home"
+            lockOn -> "lock"
+            else -> "none"
         }
-        if (lockOn) {
-            val lockSrc = lockBitmap ?: bitmap
-            lockOk = setWallpaperWithRetry(context, lockSrc, WallpaperManager.FLAG_LOCK)
-        }
+        val homeOutcome = if (homeOn) {
+            com.wepwawet.wallpaper.WallpaperRouter.applyBitmap(context, bitmap, target)
+        } else null
+        // both → one image on both screens (the router writes the same
+        // path to both); a separate lock bitmap only applies to lock.
+        val lockOutcome = if (lockOn && lockBitmap != null) {
+            com.wepwawet.wallpaper.WallpaperRouter.applyBitmap(context, lockBitmap, "lock")
+        } else null
+        val homeOk = homeOutcome?.allOk ?: (lockOutcome?.allOk ?: false)
+        val lockOk = if (lockBitmap != null) (lockOutcome?.allOk ?: false) else homeOk
         WepWawetLogger.appInfo("$TAG: apply result",
             "home_ok" to homeOk,
             "lock_ok" to lockOk,
@@ -251,11 +284,9 @@ object DiscoverApplier {
     }
 
     /**
-     * v1.0.0 WallpaperTargetMode apply: `homeState`/`lockState` are the
-     * tri-state values (0 off / 1 pink / 2 blue).
-     *   • both on, same color   → ONE bitmap on both screens (sync)
-     *   • both on, colors differ → [bitmap] on home, [lockBitmap] on lock
-     *   • one on                → that screen only
+     * The toggle-driven apply: `homeState`/`lockState` are the screen
+     * states (0 off / on). Both on → ONE bitmap on both screens; one on
+     * → that screen only; both off → nothing (the router reports why).
      */
     suspend fun applyScreens(
         context: Context,
@@ -266,33 +297,7 @@ object DiscoverApplier {
     ): ApplyResult {
         val homeOn = DiscoverPrefs.homeRequired(homeState)
         val lockOn = DiscoverPrefs.lockRequired(lockState)
-        val separate = DiscoverPrefs.isDualMode(homeState, lockState)
-        return apply(context, bitmap, homeOn, lockOn, if (separate) lockBitmap else null)
-    }
-
-    private suspend fun setWallpaperWithRetry(context: Context, bitmap: Bitmap, which: Int): Boolean {
-        val wm = WallpaperManager.getInstance(context)
-        val soft = forWallpaperManager(bitmap)
-        var lastError: Exception? = null
-        repeat(3) { attempt ->
-            try {
-                // visibleCropHint=null + allowBackup=true — v1.0.0 semantics.
-                wm.setBitmap(soft, null, true, which)
-                if (attempt > 0) {
-                    WepWawetLogger.appInfo("$TAG: wallpaper write succeeded on retry",
-                        "attempt" to attempt + 1,
-                        "which" to which)
-                }
-                return true
-            } catch (e: Exception) {
-                lastError = e
-                delay(300)
-            }
-        }
-        WepWawetLogger.appError("$TAG: wallpaper write FAILED",
-            "which" to which,
-            "exception" to (lastError?.javaClass?.name ?: "null"))
-        return false
+        return apply(context, bitmap, homeOn, lockOn, lockBitmap)
     }
 
     // ════════════════════════════════════════════════════════════════

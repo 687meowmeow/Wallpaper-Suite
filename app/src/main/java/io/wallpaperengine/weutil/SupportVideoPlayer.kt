@@ -12,6 +12,7 @@ import android.net.Uri
 import android.view.Surface
 import java.io.IOException
 import java.io.RandomAccessFile
+import com.wepwawet.log.WepWawetLogger
 
 /**
  * Video player the NATIVE engine instantiates and drives through JNI for
@@ -88,6 +89,8 @@ class SupportVideoPlayer : SurfaceTexture.OnFrameAvailableListener {
         try {
             video.start()
         } catch (e: Exception) {
+            WepWawetLogger.appWarn("weEngine: play — play failed (ignored)",
+                "exception" to (e.message ?: e.javaClass.name))
         }
     }
 
@@ -95,6 +98,8 @@ class SupportVideoPlayer : SurfaceTexture.OnFrameAvailableListener {
         try {
             video.pause()
         } catch (e: Exception) {
+            WepWawetLogger.appWarn("weEngine: pause — pause failed (ignored)",
+                "exception" to (e.message ?: e.javaClass.name))
         }
     }
 
@@ -103,6 +108,8 @@ class SupportVideoPlayer : SurfaceTexture.OnFrameAvailableListener {
             video.stop()
             video.reset()
         } catch (e: Exception) {
+            WepWawetLogger.appWarn("weEngine: stop — stop failed (ignored)",
+                "exception" to (e.message ?: e.javaClass.name))
         }
     }
 
@@ -155,6 +162,8 @@ class SupportVideoPlayer : SurfaceTexture.OnFrameAvailableListener {
                 video.setDataSource(androidContext, Uri.parse(file))
             }
         } catch (t: Throwable) {
+            WepWawetLogger.appWarn("weEngine: getSize — getSize failed (ignored)",
+                "exception" to (t.message ?: t.javaClass.name))
         }
     }
 
@@ -164,6 +173,8 @@ class SupportVideoPlayer : SurfaceTexture.OnFrameAvailableListener {
             point.x = video.metrics.getInt("android.media.mediaplayer.width")
             point.y = video.metrics.getInt("android.media.mediaplayer.height")
         } catch (t: Throwable) {
+            WepWawetLogger.appWarn("weEngine: getVideoDimensions — getVideoDimensions failed (ignored)",
+                "exception" to (t.message ?: t.javaClass.name))
         }
         return point
     }

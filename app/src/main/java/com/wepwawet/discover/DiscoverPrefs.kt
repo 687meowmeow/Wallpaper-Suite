@@ -54,9 +54,6 @@ object DiscoverPrefs {
     private const val KEY_LOCK_STATE = "lock_state"
 
     // Legacy v0.8.10 booleans (migrated once on first read).
-    private const val KEY_HOME_ON = "home_on"
-    private const val KEY_LOCK_ON = "lock_on"
-    private const val KEY_LOCK_SAME = "lock_same_image"
 
     /** v1.0.0 default: neutral style, Pure content. */
     const val DEFAULT_STYLE = 50
@@ -66,17 +63,7 @@ object DiscoverPrefs {
 
     /** WallpaperTargetMode: 0 = off, 1 = pink, 2 = blue. */
     const val SCREEN_OFF = 0
-    const val SCREEN_PINK = 1
-    const val SCREEN_BLUE = 2
-
-    /**
-     * v0.9.1: the ON value for the universal binary toggles (stored as the
-     * legacy PINK slot so every reader keeps working untouched). The
-     * pink/blue tri-state is RETIRED — readScreens migrates any stored
-     * blue to plain ON, so dual mode (two different images) can never
-     * trigger again: both screens ON always means ONE image on both.
-     */
-    const val SCREEN_ON = SCREEN_PINK
+    const val SCREEN_ON = 1
 
     const val SCHEDULE_OFF = "off"
     const val SCHEDULE_DAILY_7 = "daily7"
@@ -200,6 +187,25 @@ object DiscoverPrefs {
     const val SOURCE_GELBOORU = "gelbooru"
     const val SOURCE_BEHOIMI = "behoimi"
 
+    // v0.10.0: Gelbooru API credentials (its anonymous JSON API answers
+    // 401; the key + id are in the Gelbooru account options page). Empty
+    // = the credentials are not set.
+    private const val KEY_GELBOORU_API_KEY = "gelbooruApiKey"
+    private const val KEY_GELBOORU_USER_ID = "gelbooruUserId"
+
+    fun readGelbooruApiKey(context: Context): String =
+        prefs(context).getString(KEY_GELBOORU_API_KEY, "")?.trim() ?: ""
+
+    fun readGelbooruUserId(context: Context): String =
+        prefs(context).getString(KEY_GELBOORU_USER_ID, "")?.trim() ?: ""
+
+    fun writeGelbooruCredentials(context: Context, apiKey: String, userId: String) {
+        prefs(context).edit()
+            .putString(KEY_GELBOORU_API_KEY, apiKey.trim())
+            .putString(KEY_GELBOORU_USER_ID, userId.trim())
+            .apply()
+    }
+
     val ALL_SOURCES = listOf(
         SOURCE_LOLICON, SOURCE_DANBOORU, SOURCE_KONACHAN, SOURCE_YANDE,
         SOURCE_SAFEBOORU, SOURCE_TBIB, SOURCE_XBOORU,
@@ -241,53 +247,27 @@ object DiscoverPrefs {
     // ── Tri-state screens (v1.0.0 WallpaperTargetMode) ───────────────
 
     /**
-     * Reads the (home, lock) tri-state pair, migrating the v0.8.10
-     * boolean model (homeOn/lockOn/lockSame) on first access:
-     *   homeOn & lockOn & lockSame  → (PINK, PINK)   one image
-     *   homeOn & lockOn & !lockSame → (PINK, BLUE)   two images
-     *   homeOn only                 → (PINK, OFF)
-     *   lockOn only                 → (OFF, PINK)
+     * v0.10.0: BINARY screens — each toggle turns one screen on or off as
+     * a target. The tri-state (pink/blue) and its boolean-era migration
+     * are GONE: both on → one image on both; one on → that screen; both
+     * off → nothing. Different images per screen is the toggle dance
+     * (turn one off, set, swap, set) — there is no separate lock image
+     * any more.
      */
     fun readScreens(context: Context): Pair<Int, Int> {
         val p = prefs(context)
-        if (!p.contains(KEY_HOME_STATE) && !p.contains(KEY_LOCK_STATE)) {
-            val homeOn = p.getBoolean(KEY_HOME_ON, true)
-            val lockOn = p.getBoolean(KEY_LOCK_ON, true)
-            val lockSame = p.getBoolean(KEY_LOCK_SAME, true)
-            val migrated = when {
-                homeOn && lockOn && lockSame -> SCREEN_PINK to SCREEN_PINK
-                homeOn && lockOn -> SCREEN_PINK to SCREEN_BLUE
-                homeOn -> SCREEN_PINK to SCREEN_OFF
-                lockOn -> SCREEN_OFF to SCREEN_PINK
-                else -> SCREEN_OFF to SCREEN_OFF
-            }
-            writeScreens(context, migrated.first, migrated.second)
-            return migrated
-        }
-        // v0.9.1: BINARY — a stored blue migrates to plain ON here, so the
-        // universal toggles and every apply path only ever see OFF or ON.
-        val home = prefs(context).getInt(KEY_HOME_STATE, SCREEN_ON).coerceIn(0, 2)
-        val lock = prefs(context).getInt(KEY_LOCK_STATE, SCREEN_ON).coerceIn(0, 2)
-        return home.toOnOff() to lock.toOnOff()
+        // A stored 2 (the retired blue) reads as ON.
+        val home = if (p.getInt(KEY_HOME_STATE, SCREEN_ON) > SCREEN_OFF) SCREEN_ON else SCREEN_OFF
+        val lock = if (p.getInt(KEY_LOCK_STATE, SCREEN_ON) > SCREEN_OFF) SCREEN_ON else SCREEN_OFF
+        return home to lock
     }
-
-    /** Blue → ON (the tri-state's dual mode is retired). */
-    private fun Int.toOnOff(): Int = if (this > SCREEN_OFF) SCREEN_ON else SCREEN_OFF
 
     fun writeScreens(context: Context, homeState: Int, lockState: Int) {
         prefs(context).edit()
-            .putInt(KEY_HOME_STATE, homeState.coerceIn(0, 2))
-            .putInt(KEY_LOCK_STATE, lockState.coerceIn(0, 2))
+            .putInt(KEY_HOME_STATE, if (homeState > SCREEN_OFF) SCREEN_ON else SCREEN_OFF)
+            .putInt(KEY_LOCK_STATE, if (lockState > SCREEN_OFF) SCREEN_ON else SCREEN_OFF)
             .apply()
     }
-
-    /** Both screens on and the SAME color → one image for both. */
-    fun isSyncMode(homeState: Int, lockState: Int): Boolean =
-        homeState > SCREEN_OFF && lockState > SCREEN_OFF && homeState == lockState
-
-    /** Both screens on with DIFFERENT colors → two independent images. */
-    fun isDualMode(homeState: Int, lockState: Int): Boolean =
-        homeState > SCREEN_OFF && lockState > SCREEN_OFF && homeState != lockState
 
     fun homeRequired(homeState: Int): Boolean = homeState > SCREEN_OFF
     fun lockRequired(lockState: Int): Boolean = lockState > SCREEN_OFF

@@ -8,6 +8,7 @@ import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.PowerManager
+import com.wepwawet.WepWawetApplication
 import com.wepwawet.log.WepWawetLogger
 import com.wepwawet.playlist.GroupBlocks
 import com.wepwawet.playlist.RandomPullEngine
@@ -52,6 +53,8 @@ object RuleEngine {
     class RunContext(
         val playlistId: String,
         val manual: Boolean,
+        /** v0.10.0: the running rule id (wait persistence keys on it). */
+        val ruleId: String = "",
         /** blockId → highlight-until epoch ms (the editor animates these). */
         val highlights: MutableMap<String, Long> = HashMap(),
         /** Produced values: "last", "block:<id>", named copies. */
@@ -72,6 +75,9 @@ object RuleEngine {
     /** Control flow result of a block/stack execution. */
     enum class Flow { CONTINUE, STOPPED }
 
+    /** v0.10.0: how many rule Discover picks stay on disk (newest kept). */
+    private const val RULE_PICKS_LIMIT = 5
+
     /** v0.8.26: playlists already journaled as not-active this session. */
     private val notedInactivePlaylists = HashSet<String>()
 
@@ -90,18 +96,220 @@ object RuleEngine {
      * and the editor's play button all end up here. Time triggers arrive
      * as events too (the hub computes their wakes).
      */
+    // ═══ v0.10.0: EVENT-RUN MACHINERY ═══════════════════════════════
+    // The user's demands, made real:
+    //  • rules of one playlist run ONE AT A TIME (a screen-on and an
+    //    unlock arriving together used to run their rules concurrently —
+    //    double picks, double applies);
+    //  • the COOLDOWN is stamped when a run STARTS (it used to be
+    //    recorded after the run finished, so a long run — a Wait block
+    //    can hold one for ten minutes — let every new event start a
+    //    duplicate);
+    //  • same-type events arriving within a short window COALESCE into
+    //    one run (OEMs burst USER_PRESENT + SCREEN_ON + SCREEN_OFF in
+    //    quick succession on some unlock paths);
+    //  • every decision is logged (matched / no match / cooldown /
+    //    conditions / first-match-wins) — a log alone tells a broadcast
+    //    that never arrived from a rule that did not run.
+
+    /** One playlist's runs at a time, in arrival order. */
+    private val playlistRunLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
+    /** The last run START per (playlist|event-type) — coalescing window. */
+    private val lastEventRunAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** Same-type events inside this window join the run already going. */
+    private const val EVENT_COALESCE_MS = 750L
+
+    private fun runLockFor(playlistId: String): Any =
+        playlistRunLocks.computeIfAbsent(playlistId) { Any() }
+
+    private suspend fun <T> withPlaylistRunLock(playlistId: String, block: suspend () -> T): T =
+        kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+            val lock = runLockFor(playlistId)
+            val thread = Thread({
+                synchronized(lock) {
+                    // Resume the coroutine on its context with the result.
+                    val result = runCatching {
+                        kotlinx.coroutines.runBlocking { block() }
+                    }
+                    cont.resumeWith(result.mapCatching { it })
+                }
+            }, "rules-run-${playlistId.takeLast(6)}")
+            thread.isDaemon = true
+            thread.start()
+        }
+
+    /** True when a same-type run started within the coalescing window. */
+    private fun coalescedRecently(playlistId: String, type: String, now: Long): Boolean {
+        val key = "$playlistId|$type"
+        val last = lastEventRunAt[key] ?: return false
+        return now - last < EVENT_COALESCE_MS
+    }
+
+    private fun stampEventRun(playlistId: String, type: String, now: Long) {
+        lastEventRunAt["$playlistId|$type"] = now
+    }
+
+    // ═══ v0.10.0: persistent waits across process death ══════════════
+    // A Wait block used to hold a plain coroutine — lost when OnePlus
+    // killed the process; the rest of the rule never ran. Now the
+    // remaining wait is persisted at wait START; on the next process
+    // start, [resumePendingWaits] re-runs the rule's REMAINING blocks
+    // after the remaining time.
+
+    private const val KEY_PENDING_WAITS = "pendingWaits"
+
+    private fun runtimes(context: Context) =
+        context.getSharedPreferences("suite_rules_runtime", Context.MODE_PRIVATE)
+
+    private data class PendingWait(
+        val playlistId: String,
+        val ruleId: String,
+        val blockId: String,
+        val resumeAt: Long,
+    )
+
+    private fun readPendingWaits(context: Context): List<PendingWait> {
+        val raw = runtimes(context).getString(KEY_PENDING_WAITS, "[]") ?: "[]"
+        return try {
+            val arr = org.json.JSONArray(raw)
+            List(arr.length()) { i ->
+                val o = arr.optJSONObject(i) ?: return@List null
+                PendingWait(
+                    o.optString("playlist"), o.optString("rule"),
+                    o.optString("block"), o.optLong("resumeAt"))
+            }.filterNotNull()
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun writePendingWaits(context: Context, waits: List<PendingWait>) {
+        val arr = org.json.JSONArray()
+        for (w in waits) {
+            arr.put(org.json.JSONObject()
+                .put("playlist", w.playlistId)
+                .put("rule", w.ruleId)
+                .put("block", w.blockId)
+                .put("resumeAt", w.resumeAt))
+        }
+        runtimes(context).edit().putString(KEY_PENDING_WAITS, arr.toString()).apply()
+    }
+
+    /** Record (or clear) the wait-survival entry for one running rule. */
+    private fun noteWaitStarted(context: Context, playlistId: String, ruleId: String, blockId: String, resumeAt: Long) {
+        val waits = readPendingWaits(context).filterNot {
+            it.playlistId == playlistId && it.ruleId == ruleId
+        } + PendingWait(playlistId, ruleId, blockId, resumeAt)
+        writePendingWaits(context, waits)
+    }
+
+    private fun noteWaitCleared(context: Context, playlistId: String, ruleId: String) {
+        val waits = readPendingWaits(context).filterNot {
+            it.playlistId == playlistId && it.ruleId == ruleId
+        }
+        writePendingWaits(context, waits)
+    }
+
+    /**
+     * Called once per process start (Application.onCreate): every wait
+     * whose time passed while we were dead resumes NOW; the rest re-arm
+     * a one-shot alarm for the remaining time.
+     */
+    fun resumePendingWaits(context: Context) {
+        val waits = readPendingWaits(context)
+        if (waits.isEmpty()) return
+        val now = System.currentTimeMillis()
+        val due = waits.filter { it.resumeAt <= now }
+        val later = waits - due.toSet()
+        writePendingWaits(context, later)
+        for (w in due) {
+            WepWawetLogger.appInfo("$TAG: resuming a wait that outlived the process",
+                "playlist" to w.playlistId.takeLast(6),
+                "rule" to w.ruleId.takeLast(6),
+                "late_by_ms" to (now - w.resumeAt))
+            WepWawetApplication.appScope.launch {
+                fireRuleFromWait(context, w.playlistId, w.ruleId, w.blockId)
+            }
+        }
+        for (w in later) {
+            val remaining = (w.resumeAt - now).coerceAtLeast(1000L)
+            WepWawetLogger.appInfo("$TAG: re-arming a wait for its remaining time",
+                "playlist" to w.playlistId.takeLast(6),
+                "remaining_ms" to remaining)
+            val appCtx = context.applicationContext
+            val am = appCtx.getSystemService(Context.ALARM_SERVICE) as? android.app.AlarmManager
+            val pi = android.app.PendingIntent.getBroadcast(
+                appCtx, w.ruleId.hashCode(),
+                Intent(appCtx, RuleAlarmReceiver::class.java)
+                    .setAction(RuleAlarmReceiver.ACTION_RESUME_WAIT)
+                    .putExtra("playlist", w.playlistId)
+                    .putExtra("rule", w.ruleId)
+                    .putExtra("block", w.blockId),
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or
+                    android.app.PendingIntent.FLAG_IMMUTABLE)
+            try {
+                am?.setExactAndAllowWhileIdle(
+                    android.app.AlarmManager.RTC_WAKEUP, w.resumeAt, pi)
+            } catch (e: Exception) {
+                WepWawetLogger.appWarn("$TAG: wait alarm set failed",
+                    "exception" to e.javaClass.simpleName)
+                am?.setAndAllowWhileIdle(
+                    android.app.AlarmManager.RTC_WAKEUP, w.resumeAt, pi)
+            }
+        }
+    }
+
+    /** The alarm's target: resume one rule at its wait block. */
+    suspend fun onWaitAlarm(context: Context, playlistId: String, ruleId: String, blockId: String) {
+        val waits = readPendingWaits(context)
+        val w = waits.firstOrNull {
+            it.playlistId == playlistId && it.ruleId == ruleId && it.resumeAt <= System.currentTimeMillis()
+        } ?: return
+        writePendingWaits(context, waits - w)
+        fireRuleFromWait(context, playlistId, ruleId, blockId)
+    }
+
+    private suspend fun fireRuleFromWait(
+        context: Context, playlistId: String, ruleId: String, blockId: String,
+    ) {
+        val all = SuiteRulesStore.readAll(context)
+        val pr = all.firstOrNull { it.playlistId == playlistId } ?: return
+        val rule = pr.rules.firstOrNull { it.id == ruleId } ?: return
+        val idx = rule.actions.indexOfFirst { it.id == blockId }
+        if (idx < 0) return
+        val remaining = rule.actions.drop(idx + 1)
+        if (remaining.isEmpty()) return
+        WepWawetLogger.appInfo("$TAG: wait resumed — running the remaining blocks",
+            "rule" to rule.name, "blocks" to remaining.size)
+        val ctx = RunContext(playlistId, manual = false, ruleId = ruleId)
+        execBlocks(context, ctx, remaining, depth = 0)
+        SuiteRulesStore.recordFire(context, playlistId, rule,
+            "Resumed after a wait — ran ${remaining.size} block(s)")
+    }
+
     suspend fun onEvent(context: Context, type: String, extra: Map<String, String> = emptyMap()) {
         val all = SuiteRulesStore.readAll(context)
-        if (all.isEmpty()) return
-        val activeId = SuitePlaylistStore.activePlaylistId(context)
-        // v0.9.2 (structured logging): EVERY trigger event gets a log line,
-        // so a log alone shows why a wallpaper did or didn't change.
+        // v0.10.0: the decision log lives BEFORE any early return — an
+        // event with no rule sets says so (a log alone must tell a
+        // broadcast that never arrived from a rule that did not run).
+        val activeId = if (all.isEmpty()) "" else SuitePlaylistStore.activePlaylistId(context)
         WepWawetLogger.appInfo("$TAG: event received",
             "event" to type,
             "rule_sets" to all.size,
             "active" to activeId.takeLast(6),
             "extra_keys" to extra.keys.joinToString(","))
+        if (all.isEmpty()) return
         for (pr in all) {
+            // v0.10.0: same-type events inside the window join the run in
+            // progress instead of starting a duplicate.
+            val nowMs = System.currentTimeMillis()
+            if (coalescedRecently(pr.playlistId, type, nowMs)) {
+                WepWawetLogger.appInfo("$TAG: event coalesced into the run in progress",
+                    "event" to type, "playlist" to pr.playlistId.takeLast(6))
+                continue
+            }
             // v0.8.25 (ONLY THE INTENDED PLAYLIST RUNS): a playlist's rules
             // fire only while THAT playlist is the active one — rules edited
             // on a non-active playlist never rotate the wallpaper from
@@ -127,6 +335,8 @@ object RuleEngine {
                 continue
             }
             val firedThisPlaylist = StringBuilder()
+            withPlaylistRunLock(pr.playlistId) {
+            stampEventRun(pr.playlistId, type, System.currentTimeMillis())
             for (rule in pr.rules) {
                 if (!rule.enabled) {
                     WepWawetLogger.appDebug("$TAG: rule skipped — disabled",
@@ -142,7 +352,9 @@ object RuleEngine {
                         "rule" to rule.name, "event" to type)
                     continue
                 }
-                // Cooldown.
+                // Cooldown — v0.10.0: stamped at run START (below), so a
+                // long-running rule can never be started twice by events
+                // that arrive while it runs.
                 if (rule.cooldownMinutes > 0 &&
                     System.currentTimeMillis() - rule.lastFiredAt <
                     rule.cooldownMinutes * 60_000L
@@ -164,6 +376,14 @@ object RuleEngine {
                         "Conditions not met (event: $type)")
                     continue
                 }
+                // v0.10.0: the cooldown is stamped the moment the run
+                // starts, BEFORE the blocks execute.
+                if (rule.cooldownMinutes > 0) {
+                    SuiteRulesStore.stampLastFiredAt(context, pr.playlistId, rule)
+                }
+                WepWawetLogger.appInfo("$TAG: first match — running the rule",
+                    "rule" to rule.name,
+                    "mode" to pr.mode)
                 val result = try {
                     fireRuleInternal(context, pr.playlistId, rule, manual = false)
                 } catch (e: CancellationException) {
@@ -172,7 +392,17 @@ object RuleEngine {
                     "Failed: ${e.message ?: e.javaClass.simpleName}"
                 }
                 firedThisPlaylist.append("${rule.name} → $result; ")
-                if (pr.mode != "all") break   // first match wins
+                // v0.10.0 (first-match-wins, FIXED): a rule whose actions
+                // FAILED or did nothing no longer blocks the later rules —
+                // only a rule that actually did its job wins the match.
+                val didSomething = result.contains("applied") ||
+                    result.contains("ran") && !result.contains("Failed")
+                if (pr.mode != "all" && didSomething) break   // first match wins
+                if (pr.mode != "all" && !didSomething) {
+                    WepWawetLogger.appInfo("$TAG: matched rule did nothing — trying the next",
+                        "rule" to rule.name)
+                }
+            }
             }
             if (firedThisPlaylist.isNotEmpty()) {
                 WepWawetLogger.appInfo("$TAG: event handled",
@@ -214,7 +444,8 @@ object RuleEngine {
         onHighlight: ((String) -> Unit)? = null,
         depth: Int = 0,
     ): String {
-        val ctx = RunContext(playlistId, manual, chooser = chooser, onHighlight = onHighlight)
+        val ctx = RunContext(playlistId, manual, ruleId = rule.id,
+            chooser = chooser, onHighlight = onHighlight)
         WepWawetLogger.appInfo("$TAG: rule fired",
             "rule" to rule.name,
             "playlist" to playlistId,
@@ -646,7 +877,18 @@ object RuleEngine {
                     flow
                 }
                 RuleModel.BLOCK_WAIT -> {
-                    delay(b.num.coerceIn(1, 600).coerceAtMost(600) * 1000L)
+                    // v0.10.0 (THE WAIT THAT SURVIVES DEATH): the remaining
+                    // wait is PERSISTED at wait start (resumeAt); if the
+                    // process dies, resumePendingWaits/onWaitAlarm re-runs
+                    // the rule's REMAINING blocks after the remaining time.
+                    val ms = b.num.coerceIn(1, 600).coerceAtMost(600) * 1000L
+                    val resumeAt = System.currentTimeMillis() + ms
+                    noteWaitStarted(context, ctx.playlistId, ctx.ruleId, b.id, resumeAt)
+                    try {
+                        delay(ms)
+                    } finally {
+                        noteWaitCleared(context, ctx.playlistId, ctx.ruleId)
+                    }
                     Flow.CONTINUE
                 }
                 RuleModel.BLOCK_STOP -> Flow.STOPPED
@@ -812,38 +1054,62 @@ object RuleEngine {
                 "group" -> candidatesFor(context, ctx, b.copy(type = RuleModel.BLOCK_PICK_GROUP))
                 "playlist" -> candidatesFor(context, ctx, b.copy(type = RuleModel.BLOCK_PICK_PLAYLIST))
                 "discover" -> {
-                    // The Discover source = Discover's own current settings.
-                    val url = withContext(Dispatchers.IO) {
-                        runCatching {
-                            com.wepwawet.discover.DiscoverSearch.searchOne(
-                                context = context,
-                                strictTags = com.wepwawet.discover.DiscoverPrefs.readStrictTags(context),
-                                softTags = com.wepwawet.discover.DiscoverPrefs.readSoftTags(context),
-                                styleValue = com.wepwawet.discover.DiscoverPrefs.readStyle(context),
-                                r18Mode = com.wepwawet.discover.DiscoverPrefs.readR18(context),
-                                recentUrls = com.wepwawet.discover.DiscoverPrefs.readRecentUrls(context),
-                                sources = com.wepwawet.discover.DiscoverPrefs.readSources(context),
-                            )
-                        }.onFailure {
-                            WepWawetLogger.appWarn("$TAG: discover pick failed",
-                                "exception" to it.javaClass.simpleName)
-                        }.getOrNull()
+                    // v0.10.0: the PRELOADED Discover queue first — a
+                    // screen-on or unlock rotation pops an already-
+                    // downloaded image (instant, offline-safe). The live
+                    // search + download only runs when the queue is empty.
+                    val signature = com.wepwawet.discover.DiscoverPrefs.searchSignature(
+                        com.wepwawet.discover.DiscoverPrefs.readStrictTags(context),
+                        com.wepwawet.discover.DiscoverPrefs.readSoftTags(context),
+                        com.wepwawet.discover.DiscoverPrefs.readStyle(context),
+                        com.wepwawet.discover.DiscoverPrefs.readR18(context),
+                        com.wepwawet.discover.DiscoverPrefs.readSources(context))
+                    val queued = withContext(Dispatchers.IO) {
+                        com.wepwawet.discover.DiscoverPrefs.consumeQueuedImage(context, signature)
                     }
-                    val bytes = if (url != null) withContext(Dispatchers.IO) {
-                        runCatching { com.wepwawet.discover.DiscoverSearch.downloadImage(url) }.onFailure { WepWawetLogger.appWarn("RuleEngine: com — best-effort call failed", "exception" to it.javaClass.simpleName) }
-                            .onFailure {
+                    if (queued != null) {
+                        val (qBytes, qUrl) = queued
+                        WepWawetLogger.appInfo("$TAG: discover pick from the preloaded queue",
+                            "bytes" to qBytes.size)
+                        // Keep the queue full for the NEXT pick.
+                        com.wepwawet.WepWawetApplication.appScope.launch {
+                            runCatching { com.wepwawet.discover.DiscoverPreload.kick(context) }
+                        }
+                        val f = writeRulePick(context, qBytes)
+                        if (f != null) listOf(f) else emptyList()
+                    } else {
+                        // Queue empty — the live path (slow/offline may fail
+                        // honestly here).
+                        val url = withContext(Dispatchers.IO) {
+                            runCatching {
+                                com.wepwawet.discover.DiscoverSearch.searchOne(
+                                    context = context,
+                                    strictTags = com.wepwawet.discover.DiscoverPrefs.readStrictTags(context),
+                                    softTags = com.wepwawet.discover.DiscoverPrefs.readSoftTags(context),
+                                    styleValue = com.wepwawet.discover.DiscoverPrefs.readStyle(context),
+                                    r18Mode = com.wepwawet.discover.DiscoverPrefs.readR18(context),
+                                    recentUrls = com.wepwawet.discover.DiscoverPrefs.readRecentUrls(context),
+                                    sources = com.wepwawet.discover.DiscoverPrefs.readSources(context),
+                                )
+                            }.onFailure {
+                                WepWawetLogger.appWarn("$TAG: discover pick failed",
+                                    "exception" to it.javaClass.simpleName)
+                            }.getOrNull()
+                        }
+                        val bytes = if (url != null) withContext(Dispatchers.IO) {
+                            runCatching {
+                                com.wepwawet.discover.DiscoverSearch.downloadImage(url)
+                            }.onFailure {
                                 WepWawetLogger.appWarn("$TAG: discover download failed",
                                     "exception" to it.javaClass.simpleName)
                             }.getOrNull()
-                    } else null
-                    if (bytes != null && url != null) {
-                        com.wepwawet.discover.DiscoverPrefs.pushRecentUrl(context, url)
-                        val f = java.io.File(
-                            java.io.File(context.filesDir, "rule_picks").apply { mkdirs() },
-                            "pick_${System.currentTimeMillis()}.img")
-                        withContext(Dispatchers.IO) { f.writeBytes(bytes) }
-                        listOf(f.absolutePath)
-                    } else emptyList()
+                        } else null
+                        if (bytes != null && url != null) {
+                            com.wepwawet.discover.DiscoverPrefs.pushRecentUrl(context, url)
+                            val f = writeRulePick(context, bytes)
+                            if (f != null) listOf(f) else emptyList()
+                        } else emptyList()
+                    }
                 }
                 else -> withContext(Dispatchers.IO) {
                     com.wepwawet.engine.EngineLibrary.enumerateWallpapers(context)
@@ -858,6 +1124,28 @@ object RuleEngine {
     }
 
 
+
+    /**
+     * v0.10.0: write a rule Discover pick into filesDir/rule_picks, keeping
+     * only the newest [RULE_PICKS_LIMIT] files — the old path wrote a full
+     * image per pick and NEVER deleted any (storage grew forever).
+     */
+    private fun writeRulePick(context: Context, bytes: ByteArray): String? {
+        return try {
+            val dir = java.io.File(context.filesDir, "rule_picks").apply { mkdirs() }
+            val f = java.io.File(dir, "pick_${System.currentTimeMillis()}.img")
+            f.writeBytes(bytes)
+            dir.listFiles()
+                ?.sortedBy { it.name }
+                ?.dropLast(RULE_PICKS_LIMIT)
+                ?.forEach { runCatching { it.delete() } }
+            f.absolutePath
+        } catch (e: Exception) {
+            WepWawetLogger.appWarn("$TAG: rule pick write failed",
+                "exception" to e.javaClass.simpleName)
+            null
+        }
+    }
 
     /** Pick from [candidates] per the block's mode and apply. */
     private suspend fun applyPick(
@@ -926,19 +1214,22 @@ object RuleEngine {
      * keeps it — the editor still offers per-block choices.
      */
     fun resolvedTarget(context: Context, target: String): String {
-        if (target.isNotEmpty()) return target
+        // v0.10.0: the saved rule's own target wins, with the LEGACY
+        // bothDifferent folded into "both" (dual mode is gone — the
+        // toggles are the single screen model now).
+        if (target.isNotEmpty()) return if (target == "bothDifferent") "both" else target
         val screens = com.wepwawet.discover.DiscoverPrefs.readScreens(context)
         val home = com.wepwawet.discover.DiscoverPrefs.homeRequired(screens.first)
         val lock = com.wepwawet.discover.DiscoverPrefs.lockRequired(screens.second)
         return when {
-            home && lock -> if (com.wepwawet.discover.DiscoverPrefs.isDualMode(
-                    screens.first, screens.second)) "bothDifferent" else "both"
+            home && lock -> "both"
             home -> "home"
             lock -> "lock"
-            // Both toggles off: nothing selected anywhere — apply to both
-            // (the toggles' screen makes the state obvious; a rule the
-            // user runs by hand should still show SOMETHING).
-            else -> "both"
+            // v0.10.0: both toggles off → NOTHING changes. The old code
+            // applied to both screens here — exactly backwards. A manual
+            // run gets the honest reason ("both screens are switched
+            // off") instead of an unwanted apply.
+            else -> "none"
         }
     }
 
@@ -976,32 +1267,26 @@ object RuleEngine {
     }
 
     /**
-     * Apply one picked path to the target screen(s).
+     * Apply one picked path to the target screen(s) — THE ONE PATH.
      *
-     * v0.9.2 (THE "NEXT CANNOT DISPLAY MY WALLPAPERS" FIX, from the
-     * 2026-11-14 review): the old version read EVERY image with
-     * `java.io.File(path).readBytes()` — a guaranteed FileNotFoundException
-     * for the `content://com.android.externalstorage.documents/…` SAF
-     * URIs a linked folder's members are — and applied through
-     * WallpaperManager.setBitmap (FLAG_SYSTEM/FLAG_LOCK), which sets a
-     * STATIC system wallpaper and REPLACES the live wallpaper service the
-     * playlist runs on.
+     * v0.10.0 (research-corrected): the old home path silently "succeeded"
+     * the moment it poked the service (a null-safe no-op when no engine
+     * was attached), and the lock path called WallpaperManager.setBitmap
+     * — every setBitmap installs a NEW system wallpaper (a new
+     * WallpaperManager ID — that is what filled the OnePlus "Wallpaper &
+     * style" list with entries) and REPLACES the live wallpaper, which
+     * stops the playlist and rules until the user sets the live wallpaper
+     * again.
      *
-     * The new path:
-     *  • HOME (or BOTH) — ALWAYS through the LIVE SERVICE's own loader:
-     *    the file is written as the engine's selected wallpaper and
-     *    `requestWallpaperReload()` loads it — exactly the
-     *    reloadActiveWallpaper path that has always worked (it handles
-     *    .mpkg packages, plain files AND content:// SAF URIs). The live
-     *    service keeps running; the playlist keeps its rotation state.
-     *  • LOCK — the one screen a third-party live wallpaper can never
-     *    own — gets the static WallpaperManager.setBitmap(FLAG_LOCK)
-     *    path. Its bytes are read through ContentResolver for content://
-     *    URIs and File for plain paths.
-     *  • BOTH-DIFFERENT — home via the service loader + a second image,
-     *    static, on the lock screen.
-     * The universal Home/Lock toggles drive `target` (resolvedTarget) —
-     * nothing here re-reads them.
+     * Everything routes through [com.wepwawet.wallpaper.WallpaperRouter]
+     * now: the per-screen selections are written (an OFF screen is never
+     * touched), the engines of the ON screens load their selection, and
+     * success is ENGINE-CONFIRMED — an apply only reports OK when a
+     * living engine actually loaded the file. The lock screen is served
+     * by the app's own live wallpaper (it CAN own the lock screen on
+     * current Android — Engine.getWallpaperFlags() tells each engine
+     * which screen it renders; the old "a third-party live wallpaper can
+     * never own the lock screen" claim was wrong).
      */
     private suspend fun applyImagePath(
         context: Context,
@@ -1010,68 +1295,24 @@ object RuleEngine {
         path: String,
         target: String,
     ) {
-        val wantHome = target == "home" || target == "both" || target == "bothDifferent"
-        val wantLock = target == "lock" || target == "both" || target == "bothDifferent"
         ctx.blockReason = null
-        var homeOk = !wantHome
-        var lockOk = !wantLock
-        if (wantHome) {
-            val svc = WEWallpaperService.instance
-            if (svc == null) {
-                // v0.9.2: no fallback to a static set — that is the very
-                // call that replaced the live service. Report the honest
-                // reason instead (the ▶ result and the log both show it).
-                homeOk = false
-                ctx.blockReason = "wallpaper service not running"
-                WepWawetLogger.appWarn("$TAG: apply skipped — no live service",
-                    "path" to path.takeLast(56))
-            } else {
-                withContext(Dispatchers.IO) {
-                    io.wallpaperengine.weclient.WeEnginePrefs.storeString(
-                        context, io.wallpaperengine.weclient.WeEnginePrefs
-                            .PREF_KEY_SELECTED_WALLPAPER, path)
-                }
-                svc.requestWallpaperReload()
-                homeOk = true
-                WepWawetLogger.appInfo(
-                    "$TAG: wallpaper applied via live service loader",
-                    "path" to path.takeLast(56),
-                    "target" to target)
-            }
-        }
-        if (wantLock) {
-            lockOk = withContext(Dispatchers.IO) {
-                val bmp = readImageBytes(context, path)?.let {
-                    com.wepwawet.discover.DiscoverApplier.decode(it, 2160)
-                }
-                if (bmp == null) {
-                    ctx.blockReason = "could not read the image for the lock screen"
-                    WepWawetLogger.appWarn("$TAG: lock apply failed — unreadable image",
-                        "path" to path.takeLast(56))
-                    false
-                } else {
-                    val ok = com.wepwawet.discover.DiscoverApplier
-                        .apply(context, bmp, homeOn = false, lockOn = true).allOk
-                    if (ok) WepWawetLogger.appInfo(
-                        "$TAG: wallpaper applied to the lock screen (static)",
-                        "path" to path.takeLast(56))
-                    ok
-                }
-            }
-        }
-        val ok = homeOk && lockOk
+        val outcome = com.wepwawet.wallpaper.WallpaperRouter.applyPath(
+            context, path, target)
+        val ok = outcome.allOk
         ctx.lastPickOk = ok
         if (ok) {
             ctx.values["last"] = path
             ctx.values["block:${b.id}"] = path
             rememberRecentPick(context, ctx.playlistId, path)
             RuleActivityLog.record(context, "applied", ctx.playlistId, "",
-                "Wallpaper applied — ${path.substringAfterLast('/').take(48)} ($target)")
+                "Wallpaper applied — ${path.substringAfterLast('/').take(48)} (${outcome.describe()})")
             // v0.9.0 (rules): the "the wallpaper changed" trigger — our own
             // apply (the system broadcast covers manual changes). The hub
             // suppresses the SYSTEM broadcast that follows our own apply.
             RuleTriggerHub.noteSelfWallpaperApply()
             RuleEvents.post(context, RuleModel.TRIG_WALLPAPER_CHANGED)
+        } else {
+            ctx.blockReason = outcome.reason.ifEmpty { "no engine showed the wallpaper" }
         }
     }
 

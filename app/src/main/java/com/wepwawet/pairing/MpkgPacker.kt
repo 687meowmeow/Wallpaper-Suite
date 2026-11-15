@@ -2481,7 +2481,8 @@ object MpkgPacker {
                 f.delete()
             }
         } catch (e: Exception) {
-            // Cache eviction errors are non-fatal
+            WepWawetLogger.appWarn("app: texCacheEvictIfNeeded — texCacheEvictIfNeeded failed (ignored)",
+                "exception" to (e.message ?: e.javaClass.name))
         }
     }
 
@@ -3322,7 +3323,10 @@ object MpkgPacker {
                         try {
                             val id = idField.asInt
                             if (id > maxId) maxId = id
-                        } catch (_: Exception) { /* not a number, skip */ }
+                        } catch (e: Exception) {
+                            WepWawetLogger.appWarn("app: computeMaxObjectId — computeMaxObjectId failed (ignored)",
+                                "exception" to (e.message ?: e.javaClass.name))
+                        }
                     }
                     for (key in obj.keySet()) {
                         stack.addLast(obj.get(key))
@@ -4348,7 +4352,7 @@ object MpkgPacker {
                 val materialContent = entryMap[materialPath] ?: continue
                 val materialJson = try {
                     JsonParser.parseString(materialContent).asJsonObject
-                } catch (_: Exception) { continue }
+                } catch (e: Exception) { continue }
                 val matPasses = materialJson.getAsJsonArray("passes")
                 if (matPasses == null || matPasses.size() == 0) continue
 
@@ -4361,7 +4365,8 @@ object MpkgPacker {
                 }
             }
         } catch (e: Exception) {
-            // Ignore parsing errors
+            WepWawetLogger.appWarn("app: findShaderName — findShaderName failed (ignored)",
+                "exception" to (e.message ?: e.javaClass.name))
         }
         return null
     }

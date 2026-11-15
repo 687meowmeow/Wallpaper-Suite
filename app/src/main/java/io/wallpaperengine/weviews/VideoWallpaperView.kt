@@ -69,6 +69,12 @@ class VideoWallpaperView(context: Context) :
     companion object {
         private const val GL_TEXTURE_EXTERNAL_OES = 36197
 
+        /** v0.10.0: image decodes leave the main thread (one at a time). */
+        private val decodeExecutor =
+            java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+                Thread(r, "wallpaper-image-decode").apply { isDaemon = true }
+            }
+
         private val VERTICES_DATA = floatArrayOf(
             -1.0f, -1.0f, 0.0f, 0.0f, 0.0f,
             1.0f, -1.0f, 0.0f, 1.0f, 0.0f,
@@ -96,9 +102,11 @@ class VideoWallpaperView(context: Context) :
             precision mediump float;
             in vec2 vTextureCoord;
             uniform samplerExternalOES sTexture;
+            uniform float uFade;
             out vec4 oColor;
             void main() {
-                oColor = texture(sTexture, vTextureCoord);
+                vec4 c = texture(sTexture, vTextureCoord);
+                oColor = vec4(c.rgb * uFade, uFade);
             }
         """.trimIndent()
 
@@ -129,6 +137,7 @@ class VideoWallpaperView(context: Context) :
             in vec2 vTextureCoord;
             uniform samplerExternalOES sTexture;
             uniform vec4 g_Params;
+            uniform float uFade;
             out vec4 oColor;
             void main() {
                 vec4 albedo = texture(sTexture, vTextureCoord);
@@ -139,7 +148,7 @@ class VideoWallpaperView(context: Context) :
                 hsv.y *= g_Params.z;
                 hsv.x += g_Params.w;
                 albedo.rgb = hsv2rgb(hsv);
-                oColor = albedo;
+                oColor = vec4(albedo.rgb * uFade, uFade);
             }
         """.trimIndent()
 
@@ -162,8 +171,10 @@ class VideoWallpaperView(context: Context) :
             precision mediump float;
             varying vec2 vTextureCoord;
             uniform samplerExternalOES sTexture;
+            uniform float uFade;
             void main() {
-                gl_FragColor = texture2D(sTexture, vTextureCoord);
+                vec4 c = texture2D(sTexture, vTextureCoord);
+                gl_FragColor = vec4(c.rgb * uFade, uFade);
             }
         """.trimIndent()
 
@@ -193,6 +204,7 @@ class VideoWallpaperView(context: Context) :
             varying vec2 vTextureCoord;
             uniform samplerExternalOES sTexture;
             uniform vec4 g_Params;
+            uniform float uFade;
             void main() {
                 vec4 albedo = texture2D(sTexture, vTextureCoord);
                 albedo.rgb = mix(vec3(0.5), albedo.rgb, g_Params.y);
@@ -202,7 +214,7 @@ class VideoWallpaperView(context: Context) :
                 hsv.y *= g_Params.z;
                 hsv.x += g_Params.w;
                 albedo.rgb = hsv2rgb(hsv);
-                gl_FragColor = albedo;
+                gl_FragColor = vec4(albedo.rgb * uFade, uFade);
             }
         """.trimIndent()
 
@@ -288,6 +300,39 @@ class VideoWallpaperView(context: Context) :
     private var ccSimpleHandle: Int = 0
     private var updateSurface: Boolean = false
     private var surfaceTexture: SurfaceTexture? = null
+
+    // ═══ v0.10.0 (smooth changes) ════════════════════════════════════
+    // Every reload fades the NEW content in over the old frame (350ms):
+    //  • images/GIFs ALSO cross-fade at the Canvas layer (old bitmap kept
+    //    inside the drawable, blended into the SurfaceTexture) — a
+    //    guaranteed fade independent of GL backbuffer behavior;
+    //  • videos keep their last frame in the shared SurfaceTexture until
+    //    the new one is prepared, and the shader fades the new frames in;
+    //  • during the fade the renderer SKIPS glClear so the old frame
+    //    shows through the blended new quad.
+    @Volatile
+    private var shaderFade: Float = 1.0f
+    private var fadeHandle: Int = 0
+    private var fadeAnimator: android.animation.ValueAnimator? = null
+    private val fadePaint = android.graphics.Paint(
+        android.graphics.Paint.FILTER_BITMAP_FLAG or android.graphics.Paint.ANTI_ALIAS_FLAG)
+
+    /** Begin the fade-in for a fresh load (called on the view handler). */
+    private fun beginShaderFade() {
+        fadeAnimator?.cancel()
+        shaderFade = 0.0f
+        fadeAnimator = android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 350
+            interpolator = android.view.animation.DecelerateInterpolator()
+            addUpdateListener { anim ->
+                shaderFade = anim.animatedValue as Float
+                if (shaderFade >= 1f) {
+                    shaderFade = 1f
+                }
+            }
+            start()
+        }
+    }
     private val frameSemaphore = Semaphore(1)
     private val mvMatrix = FloatArray(16)
     private val pMatrix = FloatArray(16)
@@ -518,6 +563,7 @@ class VideoWallpaperView(context: Context) :
             textureHandle = attr("aTextureCoord", activeProgram)
             mvpMatrixHandle = uniform("uMVPMatrix", activeProgram)
             stMatrixHandle = uniform("uSTMatrix", activeProgram)
+            fadeHandle = uniform("uFade", activeProgram)
             GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vbo)
             GLES30.glEnableVertexAttribArray(positionHandle)
             GLES30.glVertexAttribPointer(positionHandle, 3, GLES30.GL_FLOAT, false, 20, 0)
@@ -587,8 +633,19 @@ class VideoWallpaperView(context: Context) :
             GLES30.glUniformMatrix4fv(mvpMatrixHandle, 1, false, mvpMatrixPrlxCpy, 0)
         }
 
-        if (alignmentMode == WallpaperProperties.VALUE_FILL_INDEX ||
-            alignmentMode == WallpaperProperties.VALUE_FREE_INDEX
+        // v0.10.0: fade-in — blend the new quad over the OLD frame and
+        // skip the clear while fading (the old frame shows through).
+        val fading = shaderFade < 0.999f
+        if (fading) {
+            GLES30.glEnable(GLES30.GL_BLEND)
+            GLES30.glBlendFunc(GLES30.GL_ONE, GLES30.GL_ONE_MINUS_SRC_ALPHA)
+        } else {
+            GLES30.glDisable(GLES30.GL_BLEND)
+        }
+        if (!fading && (
+            alignmentMode == WallpaperProperties.VALUE_FILL_INDEX ||
+                alignmentMode == WallpaperProperties.VALUE_FREE_INDEX
+            )
         ) {
             GLES30.glClearColor(
                 ((clearColor shr 16) and 255) / 255.0f,
@@ -598,7 +655,7 @@ class VideoWallpaperView(context: Context) :
             )
             GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
         }
-
+        GLES30.glUniform1f(fadeHandle, shaderFade)
         GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
         GLES30.glFinish()
 
@@ -753,15 +810,20 @@ class VideoWallpaperView(context: Context) :
             ""
         }
         val isGif = type.startsWith("image/gif")
+        // v0.10.0: the outgoing IMAGE drawable hands its bitmap to the new
+        // one — the Canvas cross-fade blends old → new inside the texture.
+        val previousImage = wallpaperView as? WallpaperImageDrawable
+        val previousBitmap = previousImage?.snapshotBitmapForFade()
         wallpaperView = when {
             isGif -> WallpaperGifDrawable()
-            type.startsWith("image/") -> WallpaperImageDrawable()
+            type.startsWith("image/") -> WallpaperImageDrawable(previousBitmap)
             else -> VideoDrawable()
         }
         WepWawetLogger.engine("VideoView: drawable chosen",
             "mime" to (if (type.isEmpty()) "(package)" else type),
             "drawable" to (wallpaperView?.javaClass?.simpleName ?: "(none)"),
-            "local_player" to isLocalPlayer)
+            "local_player" to isLocalPlayer,
+            "crossfade_from_previous" to (previousBitmap != null))
         wallpaperView?.load(file)
 
         val defaults = Property.fromJson(PropertyList.defaultVideoProperties)
@@ -788,11 +850,25 @@ class VideoWallpaperView(context: Context) :
         } else {
             wallpaperView?.play()
         }
+        // v0.10.0: "loaded" now means CONTENT READY. Images/GIFs decode on
+        // the background decode executor and call [completeLoad] when the
+        // first frame is in the texture; videos finish [VideoDrawable.load]
+        // synchronously (MediaPlayer.prepare blocks) so they complete here.
+        if (wallpaperView is WallpaperImageDrawable || wallpaperView is WallpaperGifDrawable) {
+            scaleVideo()
+        } else {
+            completeLoad()
+        }
+    }
+
+    /** Content is on the texture — fade in, notify, and finish the load. */
+    private fun completeLoad() {
         synchronized(this) {
             isLoaded = true
             isProducingFrames = true
         }
         getActiveHandler()?.post {
+            beginShaderFade()
             loadCallback?.run()
         }
         scaleVideo()
@@ -1183,11 +1259,15 @@ class VideoWallpaperView(context: Context) :
         abstract fun invalidate()
     }
 
-    inner class WallpaperImageDrawable : WallpaperDrawable() {
+    inner class WallpaperImageDrawable(
+        /** The outgoing image — kept for the Canvas cross-fade. */
+        private var fadeFrom: Bitmap? = null,
+    ) : WallpaperDrawable() {
         private var bitmap: Bitmap? = null
         private var surface: Surface? = null
         private val rect = Rect()
         private var destroyed: Boolean = false
+        private var fadeRunning: Boolean = false
 
         override fun applyProperties(properties: HashMap<String, Property>) {
         }
@@ -1202,22 +1282,108 @@ class VideoWallpaperView(context: Context) :
         }
 
         override fun load(file: String) {
-            try {
-                context.contentResolver.openInputStream(Uri.parse(file))?.use { input ->
-                    bitmap = BitmapFactory.decodeStream(input)
+            // v0.10.0: decode on the BACKGROUND executor (the old path
+            // decoded a full-resolution image on the engine handler — a
+            // main-thread stall for every wallpaper change), sized to the
+            // screen (no 12 MP bitmaps in memory), then post back.
+            val st = surfaceTexture ?: return
+            decodeExecutor.execute {
+                val decoded = decodeForScreen(file)
+                getActiveHandler()?.post {
+                    if (destroyed) {
+                        decoded?.recycle()
+                        return@post
+                    }
+                    bitmap = decoded
+                    val bmp = bitmap
+                    if (bmp != null) {
+                        st.setDefaultBufferSize(bmp.width, bmp.height)
+                        surface = Surface(st)
+                        rect.right = bmp.width
+                        rect.bottom = bmp.height
+                        startFadeOrDraw()
+                        completeLoad()
+                    }
+                }
+            }
+        }
+
+        /** Screen-sized decode (sampling hint, ≤2160px) — background thread. */
+        private fun decodeForScreen(file: String): Bitmap? {
+            return try {
+                val resolver = context.contentResolver
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                resolver.openInputStream(Uri.parse(file))?.use {
+                    BitmapFactory.decodeStream(it, null, bounds)
+                }
+                if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                    null
+                } else {
+                    val maxDim = 2160
+                    var sample = 1
+                    while (maxOf(bounds.outWidth, bounds.outHeight) / sample > maxDim) sample *= 2
+                    val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+                    resolver.openInputStream(Uri.parse(file))?.use {
+                        BitmapFactory.decodeStream(it, null, opts)
+                    }
                 }
             } catch (t: Throwable) {
+                WepWawetLogger.engineWarn("VideoView: image decode failed",
+                    "file" to file.takeLast(56),
+                    "exception" to (t.message ?: t.javaClass.name))
+                null
             }
-            val bmp = bitmap
-            if (bmp != null) {
-                val st = surfaceTexture ?: return
-                st.setDefaultBufferSize(bmp.width, bmp.height)
-                surface = Surface(st)
-                rect.right = bmp.width
-                rect.bottom = bmp.height
-            }
-            invalidate()
         }
+
+        /** Draw immediately, or cross-fade from [fadeFrom] over 350ms. */
+        private fun startFadeOrDraw() {
+            val old = fadeFrom
+            if (old == null || old.isRecycled || old == bitmap) {
+                drawFrame(1f)
+                return
+            }
+            // Cross-fade at the CANVAS layer — both bitmaps blended into
+            // the SurfaceTexture; the GL quad then shows the blend at full
+            // alpha (driver-independent, no backbuffer assumptions).
+            fadeRunning = true
+            android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 350
+                interpolator = android.view.animation.DecelerateInterpolator()
+                addUpdateListener { anim ->
+                    if (!destroyed) drawFrame(anim.animatedValue as Float)
+                }
+                addListener(object : android.animation.AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: android.animation.Animator) {
+                        fadeRunning = false
+                        fadeFrom?.recycle()
+                        fadeFrom = null
+                    }
+                })
+                start()
+            }
+        }
+
+        /** old at full + new at [alpha] — one frame into the texture. */
+        private fun drawFrame(alpha: Float) {
+            if (destroyed) return
+            val bmp = bitmap ?: return
+            val s = surface ?: return
+            val canvas = s.lockCanvas(rect)
+            if (canvas != null) {
+                canvas.drawColor(android.graphics.Color.BLACK)
+                fadeFrom?.let { old ->
+                    if (!old.isRecycled) canvas.drawBitmap(old, 0.0f, 0.0f, null)
+                }
+                fadePaint.alpha = (alpha * 255).toInt().coerceIn(0, 255)
+                canvas.drawBitmap(bmp, 0.0f, 0.0f, fadePaint)
+                s.unlockCanvasAndPost(canvas)
+            }
+            this@VideoWallpaperView.onFrameAvailable(surfaceTexture)
+        }
+
+        /** The outgoing drawable's bitmap, handed to the successor. */
+        fun snapshotBitmapForFade(): Bitmap? =
+            if (fadeRunning) fadeFrom ?: bitmap else bitmap
 
         override fun destroy() {
             destroyed = true
@@ -1231,12 +1397,7 @@ class VideoWallpaperView(context: Context) :
 
         override fun invalidate() {
             if (destroyed) return
-            val bmp = bitmap ?: return
-            val s = surface ?: return
-            val canvas = s.lockCanvas(rect)
-            canvas?.drawBitmap(bmp, 0.0f, 0.0f, null)
-            s.unlockCanvasAndPost(canvas)
-            this@VideoWallpaperView.onFrameAvailable(surfaceTexture)
+            drawFrame(1f)
         }
     }
 
@@ -1281,23 +1442,39 @@ class VideoWallpaperView(context: Context) :
         }
 
         override fun load(file: String) {
-            val source = ImageDecoder.createSource(context.contentResolver, Uri.parse(file))
-            val decoded = ImageDecoder.decodeDrawable(source)
-            drawable = decoded
-            decoded.callback = gifCallback
+            // v0.10.0: GIF decode also leaves the main thread.
             val st = surfaceTexture ?: return
-            st.setDefaultBufferSize(decoded.minimumWidth, decoded.minimumHeight)
-            val s = Surface(st)
-            surface = s
-            val canvas = s.lockCanvas(rect)
-            decoded.draw(canvas)
-            s.unlockCanvasAndPost(canvas)
-            if (decoded is AnimatedImageDrawable) {
-                animatedDrawable = decoded
-                decoded.repeatCount = AnimatedImageDrawable.REPEAT_INFINITE
-                decoded.start()
+            decodeExecutor.execute {
+                val decoded = try {
+                    val source = ImageDecoder.createSource(context.contentResolver, Uri.parse(file))
+                    ImageDecoder.decodeDrawable(source)
+                } catch (t: Throwable) {
+                    WepWawetLogger.engineWarn("VideoView: gif decode failed",
+                        "file" to file.takeLast(56),
+                        "exception" to (t.message ?: t.javaClass.name))
+                    null
+                }
+                getActiveHandler()?.post {
+                    if (destroyed || decoded == null) return@post
+                    drawable = decoded
+                    decoded.callback = gifCallback
+                    st.setDefaultBufferSize(decoded.minimumWidth, decoded.minimumHeight)
+                    val s = Surface(st)
+                    surface = s
+                    val canvas = s.lockCanvas(rect)
+                    if (canvas != null) {
+                        decoded.draw(canvas)
+                        s.unlockCanvasAndPost(canvas)
+                    }
+                    if (decoded is AnimatedImageDrawable) {
+                        animatedDrawable = decoded
+                        decoded.repeatCount = AnimatedImageDrawable.REPEAT_INFINITE
+                        decoded.start()
+                    }
+                    this@VideoWallpaperView.onFrameAvailable(st)
+                    completeLoad()
+                }
             }
-            this@VideoWallpaperView.onFrameAvailable(surfaceTexture)
         }
 
         override fun pause() {
@@ -1401,6 +1578,8 @@ class VideoWallpaperView(context: Context) :
                         video.playbackParams = params
                     }
                 } catch (e: Exception) {
+                    WepWawetLogger.appWarn("weEngine: applyProperties — applyProperties failed (ignored)",
+                        "exception" to (e.message ?: e.javaClass.name))
                 }
             }
         }

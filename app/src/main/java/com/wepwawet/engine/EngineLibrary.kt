@@ -352,11 +352,19 @@ object EngineLibrary {
                 } else {
                     val file = File(context.filesDir, info.filePath)
                     if (file.exists()) deletedMain = file.delete()
+                    // v0.10.0: clear whichever SCREEN selection pointed at
+                    // it (either or both); the playlist/default logic
+                    // re-picks on the next reload.
+                    for (screen in listOf("home", "lock")) {
+                        if (WeEnginePrefs.readSelectedForScreen(context, screen) ==
+                            info.filePath
+                        ) {
+                            WeEnginePrefs.writeSelectedForScreen(context, screen, "")
+                        }
+                    }
                     if (WeEnginePrefs.getStoredString(context, WeEnginePrefs.PREF_KEY_SELECTED_WALLPAPER) ==
                         info.filePath
                     ) {
-                        // fall back like the official client: clear the selection so the
-                        // playlist/default logic re-picks on next reload
                         WeEnginePrefs.storeString(
                             context, WeEnginePrefs.PREF_KEY_SELECTED_WALLPAPER, ""
                         )
@@ -433,9 +441,12 @@ object EngineLibrary {
     // Selection
     // =====================================================================
 
+    /** v0.10.0: the HOME screen's selection (the rotation owner's). */
     fun getSelectedWallpaper(context: Context): String? =
-        WeEnginePrefs.getStoredString(context, WeEnginePrefs.PREF_KEY_SELECTED_WALLPAPER)
+        WeEnginePrefs.readSelectedForScreen(context, "home")
 
+    /** Is this wallpaper showing on EITHER screen right now? */
     fun isWallpaperActive(context: Context, info: WallpaperInfoSparse): Boolean =
-        getSelectedWallpaper(context) == info.filePath
+        WeEnginePrefs.readSelectedForScreen(context, "home") == info.filePath ||
+            WeEnginePrefs.readSelectedForScreen(context, "lock") == info.filePath
 }
