@@ -77,7 +77,10 @@ object RandomPullEngine {
     // A stable per-slot file name: markers contain "://", so hash them.
     private fun slotFile(context: Context, playlistId: String, slotMarker: String): File =
         // toHexString of an Int is always 1–8 hex chars (no separators).
-        File(dir(context), "slot_${playlistId}_${Integer.toHexString(slotMarker.hashCode())}.img")
+        File(dir(context), "slot_${playlistId}_${slotFileHash(slotMarker)}.img")
+
+    /** This slot's stable file-name fragment (ownership test on delete). */
+    private fun slotFileHash(marker: String): String = Integer.toHexString(marker.hashCode())
 
     /**
      * Pull ONE fresh image for [slot] (an entry of [playlist]) and return
@@ -185,8 +188,13 @@ object RandomPullEngine {
             .putString(key, path)
             .putString(KEY_RECENT_PREFIX + slotMarker, url)
             .apply()
-        // Delete the PREVIOUS slot file (keep only the current one).
-        if (previous != null && previous != path) {
+        // v0.8.27 (audit — THE CROSS-SLOT DELETE): delete the previous
+        // file ONLY when it belonged to THIS slot. The old code deleted
+        // whatever `current_` held — in a MULTI-slot playlist, slot B's
+        // pull deleted slot A's file even while A's image was the
+        // on-screen wallpaper; the next reload of the selected (deleted)
+        // path produced a blank screen.
+        if (previous != null && previous != path && previous.contains(slotFileHash(marker = slotMarker))) {
             runCatching { File(previous).delete() }.onFailure { WepWawetLogger.appWarn("RandomPullEngine: File(previous) — best-effort call failed", "exception" to it.javaClass.simpleName) }
         }
     }

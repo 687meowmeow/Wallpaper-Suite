@@ -19,8 +19,8 @@ android {
                      // matches the official client's minSdk; Visualizer/MediaDataSource
                      // fast paths and the GLES3 surface pipeline assume it.
         targetSdk = 35
-        versionCode = 146
-        versionName = "0.8.26-alpha"
+        versionCode = 147
+        versionName = "0.8.27-alpha"
         // Native ABI filter — only build for arm64-v8a (WE app targets Snapdragon 8 Gen 2+)
         ndk {
             abiFilters += "arm64-v8a"

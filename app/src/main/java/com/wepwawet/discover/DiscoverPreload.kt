@@ -259,6 +259,13 @@ object DiscoverPreload {
         } ?: return@withContext false
         val bytes = try {
             DiscoverSearch.downloadImage(url)
+        } catch (e: DiscoverSearch.HostSkippedException) {
+            // v0.8.27: nothing was downloaded and nothing failed — draw
+            // the NEXT candidate immediately instead of burning the slot
+            // (the dedup handoff is already dropped inside downloadImage).
+            WepWawetLogger.appDebug("$TAG: lane draw skipped — host blocked",
+                "url" to url.take(80))
+            return@withContext false
         } catch (e: Exception) {
             // The URL/host is already marked failed in the session health
             // tracker; the dedup handoff is dropped (id stays seen).

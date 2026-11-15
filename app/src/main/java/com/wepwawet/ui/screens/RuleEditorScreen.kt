@@ -92,6 +92,9 @@ fun RuleEditorScreen(
     var headerField by remember { mutableStateOf<String?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
     val scope = androidx.compose.runtime.rememberCoroutineScope()
+    // v0.8.27: the hub's live armed set — recomputed on every recomposition
+    // (each save re-reads the rule, which recomposes this screen).
+    val armed = com.wepwawet.rules.RuleTriggerHub.armedTypes(context)
 
     fun save(mutate: RuleModel.Rule.() -> Unit) {
         val fresh = SuiteRulesStore.readPlaylistRules(context, playlistId)
@@ -278,16 +281,37 @@ fun RuleEditorScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     for ((ti, t) in r.triggers.withIndex()) {
+                        // v0.8.27: LIVE armed state — a trigger whose event
+                        // cannot currently arrive says so on its own chip
+                        // (the 0.8.26 field report was exactly an invisible
+                        // mismatch: the chips looked right, nothing fired).
+                        val armed = t.type in armed
                         FilterChip(
-                            selected = false,
+                            selected = armed,
                             onClick = { editingTriggerIdx = ti },
-                            label = { Text(triggerChipLabel(t)) },
+                            label = { Text(triggerChipLabel(t) + if (armed) " ●" else " ○ not armed") },
                         )
                     }
                     FilterChip(
                         selected = false,
                         onClick = { showTriggerSheet = true },
                         label = { Text("＋") },
+                    )
+                }
+                if (r.triggers.isNotEmpty()) {
+                    Text(
+                        "● armed — the hub listens for it.  ○ not armed — " +
+                            "it only arms once this rule is on (check the switch) " +
+                            "and saved.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (r.triggers.isEmpty()) {
+                    Text(
+                        "No trigger — this rule only runs from the ▶ button.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
                     )
                 }
             }
@@ -399,15 +423,25 @@ fun RuleEditorScreen(
         if (current == null) {
             editingTriggerIdx = null
         } else {
+            // v0.8.27: identity-based, NOT index-based — the captured idx
+            // went stale whenever the list changed while the dialog was
+            // open (the name field saves on EVERY keystroke), and a delete
+            // then removed the WRONG trigger.
             TriggerEditorDialog(
                 trigger = current,
                 onDismiss = { editingTriggerIdx = null },
                 onDelete = {
-                    save { triggers.removeAt(idx) }
+                    save {
+                        val i = triggers.indexOfFirst { it == current }
+                        if (i >= 0) triggers.removeAt(i)
+                    }
                     editingTriggerIdx = null
                 },
                 onSave = { t ->
-                    save { triggers[idx] = t }
+                    save {
+                        val i = triggers.indexOfFirst { it == current }
+                        if (i >= 0) triggers[i] = t
+                    }
                     editingTriggerIdx = null
                 },
             )

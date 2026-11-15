@@ -176,6 +176,11 @@ fun PlaylistEditorScreen(
         next.mutate()
         SuitePlaylistStore.upsert(context, next)
         playlist = SuitePlaylistStore.read(context, playlistId)
+        // v0.8.27 (audit — THE STALE GROUP ORDER): group-block edits (order
+        // mode, manual reorder) and block add/remove flow through here;
+        // without invalidation the rotation kept the OLD resolve for up to
+        // 60 seconds after Save.
+        com.wepwawet.playlist.GroupBlocks.invalidate()
     }
 
     fun saveRules(mutate: RuleModel.PlaylistRules.() -> Unit) {
@@ -412,8 +417,32 @@ fun PlaylistEditorScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text("Changes when…", style = MaterialTheme.typography.titleMedium)
-                        // v0.8.26: the one-line reminder of the gate
-                        // (was journal spam before).
+                        TextButton(onClick = { showTriggerSheet = true }) {
+                            Icon(Icons.Filled.Add, contentDescription = null)
+                        }
+                    }
+                }
+
+                // v0.8.27: live hub status under the header — the honest
+                // lines the 0.8.26 field report was missing (the user could
+                // not see that their screen-on trigger was not armed).
+                item(key = "changes-hub-status") {
+                    val usedTypes = rulesData.rules
+                        .filter { it.enabled }
+                        .flatMap { it.triggers }
+                        .map { it.type }
+                        .toSet()
+                    if (usedTypes.isNotEmpty()) {
+                        val armedNow =
+                            com.wepwawet.rules.RuleTriggerHub.armedTypes(context)
+                        val armedCount = armedNow.intersect(usedTypes).size
+                        if (armedCount < usedTypes.size) {
+                            Text(
+                                "Hub: $armedCount of ${usedTypes.size} trigger types armed — open each rule's When… chips to see which ○.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
                         Text(
                             if (activeId == current.id)
                                 "Rules run while this playlist is ACTIVE."
@@ -423,11 +452,7 @@ fun PlaylistEditorScreen(
                             color = if (activeId == current.id)
                                 MaterialTheme.colorScheme.onSurfaceVariant
                             else MaterialTheme.colorScheme.error,
-                            modifier = Modifier.weight(1f),
                         )
-                        TextButton(onClick = { showTriggerSheet = true }) {
-                            Icon(Icons.Filled.Add, contentDescription = null)
-                        }
                     }
                 }
 

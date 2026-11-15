@@ -562,8 +562,8 @@ internal val BLOCK_CATEGORIES: List<Pair<String, List<Pair<String, String>>>> = 
         RuleModel.BLOCK_NEXT to "Next wallpaper",
         RuleModel.BLOCK_SHOW to "Show a wallpaper",
         RuleModel.BLOCK_SHOW_SET to "Show one from a set",
-        RuleModel.BLOCK_RANDOM to "Random wallpaper",
-        RuleModel.BLOCK_PICK_GROUP to "Random from a group",
+        RuleModel.BLOCK_RANDOM to "Random wallpaper (library / Workshop / Discover)",
+        RuleModel.BLOCK_PICK_GROUP to "Pick from a group (the group's own order)",
         RuleModel.BLOCK_LIMIT to "Only use these wallpapers while…",
         RuleModel.BLOCK_PICK_PLAYLIST to "Pick from a playlist",
         RuleModel.BLOCK_PULL_DISCOVER to "Pull a fresh Discover image",
@@ -688,8 +688,8 @@ internal fun BlockTypeSheet(
 internal fun blockName(type: String): String = when (type) {
     RuleModel.BLOCK_SHOW -> "Show wallpaper"
     RuleModel.BLOCK_SHOW_SET -> "Show from set"
-    RuleModel.BLOCK_PICK_GROUP -> "Random from group"
-    RuleModel.BLOCK_PICK_PLAYLIST -> "From playlist"
+    RuleModel.BLOCK_PICK_GROUP -> "Pick from group"
+    RuleModel.BLOCK_PICK_PLAYLIST -> "From playlist (its order)"
     RuleModel.BLOCK_RANDOM -> "Random wallpaper"
     RuleModel.BLOCK_PULL_DISCOVER -> "Discover pull"
     RuleModel.BLOCK_NEXT -> "Next wallpaper"
@@ -780,8 +780,10 @@ private fun targetLabel(block: RuleModel.Block): String = when (block.param3) {
 
 
 private fun sourceLabel(v: String): String = when (v) {
-    "group" -> "A group"
-    "playlist" -> "A playlist"
+    // group/playlist: legacy saved rules only — the labels point their
+    // owner at the modern block (the group's/playlist's own order).
+    "group" -> "A group (legacy — the group's own order now decides)"
+    "playlist" -> "A playlist (legacy — the playlist's order now decides)"
     "workshop" -> "The Workshop"
     "discover" -> "Discover"
     else -> "The library"
@@ -999,10 +1001,16 @@ internal fun BlockCard(
                 playlistNameOf(context, block.param3),
                 { idx2 -> onEdit { b -> b.param3 = all.getOrNull(idx2)?.id ?: b.param3 } }, close)
         }
+        // v0.8.27 (ONE RANDOM PATH): "A group" and "A playlist" are GONE
+        // from this list — picking randomly from a group/playlist is what
+        // the group's/playlist's OWN order setting already does (tapping
+        // the group in the playlist); a second random switch here was the
+        // confusing duplicate. Old saved rules with group/playlist still
+        // run (engine compat), but can no longer be created.
         "source" -> ChoiceDialog("Random from",
-            listOf("The library", "A group", "A playlist", "The Workshop", "Discover"),
+            listOf("The library", "The Workshop", "Discover"),
             sourceLabel(block.param),
-            { idx2 -> onEdit { b -> b.param = listOf("library", "group", "playlist", "workshop", "discover")[idx2] } },
+            { idx2 -> onEdit { b -> b.param = listOf("library", "workshop", "discover")[idx2] } },
             close)
         "preset" -> PresetPickerDialog(block.param, close) { name -> onEdit { it.param = name } }
         "minutes" -> NumberDialog("Minutes", block.num, 1, 24 * 60,
@@ -1397,7 +1405,7 @@ internal fun blockSummary(
     RuleModel.BLOCK_SHOW_SET -> "Show one of ${b.paths.size} wallpapers (random)"
     RuleModel.BLOCK_PICK_GROUP -> "Pick from the group \"${b.param.ifEmpty { "…" }}\""
     RuleModel.BLOCK_PICK_PLAYLIST -> "Pick from ${playlistNameOf(context, b.param)}"
-    RuleModel.BLOCK_RANDOM -> "Random from ${sourceLabel(b.param).lowercase()}"
+    RuleModel.BLOCK_RANDOM -> "Random wallpaper from ${sourceLabel(b.param).lowercase()}"
     RuleModel.BLOCK_PULL_DISCOVER -> "Pull a fresh Discover image"
     RuleModel.BLOCK_NEXT -> "Go to the next wallpaper"
     RuleModel.BLOCK_PREV -> "Go to the previous wallpaper"

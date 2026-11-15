@@ -590,10 +590,15 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                 )
                 statusLine = "New image — press Set to apply"
             } catch (e: DiscoverSearch.NoImageException) {
+                // v0.8.27: the exception's own message is the HONEST one
+                // (network/DNS unreachable vs. no tag matches — it says
+                // which); the old override here replaced it with a
+                // generic "try different tags" even when the network was
+                // the problem.
                 statusLine = when {
                     sources.isEmpty() ->
                         "Pick at least one booru source below"
-                    else -> "No image found — try different tags"
+                    else -> e.message ?: "No image found"
                 }
                 WepWawetLogger.appWarn("DiscoverScreen: no image found",
                     "message" to (e.message ?: ""),

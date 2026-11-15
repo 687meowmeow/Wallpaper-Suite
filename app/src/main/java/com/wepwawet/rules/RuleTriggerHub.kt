@@ -54,6 +54,64 @@ object RuleTriggerHub {
     private val handler = Handler(Looper.getMainLooper())
     private var started = false
     private var registeredTypes: Set<String> = emptySet()
+    @Volatile
+    private var registrationFailed = false
+
+    /**
+     * v0.8.27 (THE SCREEN-WAKE/UNLOCK FIX): the phone-broadcast family is
+     * registered WHENEVER ANY RULE EXISTS — not only when some stored rule
+     * names the type. The 0.8.26 field log: the user's "Screen turns on"
+     * rule carried an orientation trigger instead (an editing casualty),
+     * the hub therefore registered no screen receiver at all, and screen
+     * wake / device unlock silently did nothing. With the family always
+     * on, the event ARRIVES regardless of what the aggregation saw; the
+     * engine re-reads the rules from disk on every event, so a stored
+     * screenOn/unlocked trigger fires even when aggregation missed it.
+     * One receiver, six system actions — the cost is negligible.
+     */
+    private val ALWAYS_REGISTERED_TYPES = setOf(
+        RuleModel.TRIG_SCREEN_ON, RuleModel.TRIG_SCREEN_OFF, RuleModel.TRIG_UNLOCKED,
+        RuleModel.TRIG_CHARGER_IN, RuleModel.TRIG_CHARGER_OUT,
+        RuleModel.TRIG_SAVER_ON, RuleModel.TRIG_SAVER_OFF,
+    )
+
+    /**
+     * The trigger types whose events can arrive RIGHT NOW (for the editors'
+     * live status):
+     *  • the broadcast family — armed whenever ANY rule exists;
+     *  • listener types (wifi / audio / orientation) and the gated
+     *    broadcasts (wallpaper-changed, battery) — armed when some enabled
+     *    rule uses them (the hub registered them);
+     *  • TIME types — armed only when used by an enabled rule on the
+     *    ACTIVE playlist (the wake schedule is active-only since 0.8.25).
+     */
+    fun armedTypes(context: Context): Set<String> {
+        val armed = HashSet<String>()
+        val activeId = try {
+            com.wepwawet.playlist.SuitePlaylistStore.activePlaylistId(context)
+        } catch (e: Exception) { "" }
+        val sets = try {
+            SuiteRulesStore.readAll(context)
+        } catch (e: Exception) {
+            emptyList()
+        }
+        var anyRule = false
+        for (pr in sets) {
+            for (rule in pr.rules) {
+                if (!rule.enabled) continue
+                anyRule = true
+                for (t in rule.triggers) {
+                    if (t.type in RuleModel.TIME_TRIGGERS) {
+                        if (pr.playlistId == activeId) armed.add(t.type)
+                    } else {
+                        armed.add(t.type)
+                    }
+                }
+            }
+        }
+        if (anyRule) armed.addAll(ALWAYS_REGISTERED_TYPES)
+        return armed
+    }
 
     // The single aggregated receiver for every broadcast-based trigger.
     private val receiver = object : BroadcastReceiver() {
@@ -128,6 +186,9 @@ object RuleTriggerHub {
         val types = try {
             SuiteRulesStore.usedTriggerTypes(context)
         } catch (e: Exception) {
+            WepWawetLogger.appWarn("$TAG: usedTriggerTypes read failed",
+                "exception" to e.javaClass.simpleName,
+                "message" to (e.message ?: ""))
             emptySet()
         }
         if (!started) {
@@ -143,8 +204,11 @@ object RuleTriggerHub {
         // TYPE SET, and the old early-return left the alarm aimed at the old
         // schedule until the self-heal tick noticed, up to 45 minutes late.
         scheduleNextWake()
-        if (types == registeredTypes) return
-        // Re-aggregate: unregister everything, register only what's used.
+        // v0.8.27: also re-aggregate after a FAILED registration (the old
+        // early-return left a dead receiver forever if one register threw).
+        if (types == registeredTypes && !registrationFailed) return
+        // Re-aggregate: unregister everything, register what's used (+ the
+        // always-on phone-broadcast family).
         reaggregate(context, types)
     }
 
@@ -155,14 +219,19 @@ object RuleTriggerHub {
         } catch (e: Exception) {
             // not registered — fine
         }
+        var failed = false
         val actions = HashSet<String>()
-        if (RuleModel.TRIG_SCREEN_ON in types) actions.add(Intent.ACTION_SCREEN_ON)
-        if (RuleModel.TRIG_SCREEN_OFF in types) actions.add(Intent.ACTION_SCREEN_OFF)
-        if (RuleModel.TRIG_UNLOCKED in types) actions.add(Intent.ACTION_USER_PRESENT)
-        if (RuleModel.TRIG_CHARGER_IN in types) actions.add(Intent.ACTION_POWER_CONNECTED)
-        if (RuleModel.TRIG_CHARGER_OUT in types) actions.add(Intent.ACTION_POWER_DISCONNECTED)
-        if (RuleModel.TRIG_SAVER_ON in types || RuleModel.TRIG_SAVER_OFF in types) {
+        // v0.8.27: the always-armed family (see ALWAYS_REGISTERED_TYPES).
+        if (types.isNotEmpty()) {
+            actions.add(Intent.ACTION_SCREEN_ON)
+            actions.add(Intent.ACTION_SCREEN_OFF)
+            actions.add(Intent.ACTION_USER_PRESENT)
+            actions.add(Intent.ACTION_POWER_CONNECTED)
+            actions.add(Intent.ACTION_POWER_DISCONNECTED)
             actions.add(android.os.PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+        }
+        if (RuleModel.TRIG_WALLPAPER_CHANGED in types) {
+            actions.add(ACTION_WALLPAPER_CHANGED)
         }
         if (RuleModel.TRIG_WALLPAPER_CHANGED in types) {
             actions.add(ACTION_WALLPAPER_CHANGED)
@@ -191,6 +260,7 @@ object RuleTriggerHub {
                     "actions" to actions.joinToString(","),
                     "flag" to "RECEIVER_NOT_EXPORTED")
             } catch (e: Exception) {
+                failed = true
                 WepWawetLogger.appWarn("$TAG: receiver registration failed",
                     "exception" to e.javaClass.simpleName,
                     "message" to (e.message ?: ""))
@@ -291,18 +361,38 @@ object RuleTriggerHub {
             orientationListener = null
         }
         if (RuleModel.TRIG_ORIENTATION in types) {
+            // v0.8.27 (THE BOOT-STORM FIX): the 0.8.26 field log shows the
+            // display listener firing TWICE during boot (sensor/surface
+            // settling) — the rule rotated the wallpaper twice before the
+            // user even unlocked. Two guards: a BOOT GRACE (ignore the
+            // first 10s after registration) and a DEBOUNCE (an orientation
+            // must hold for 800ms before it dispatches; a flap inside the
+            // window is cancelled).
+            val registeredAt = System.currentTimeMillis()
+            val pendingRunnable = java.util.concurrent.atomic.AtomicReference<Runnable?>(null)
             val listener = object : android.hardware.display.DisplayManager.DisplayListener {
                 override fun onDisplayAdded(displayId: Int) {}
                 override fun onDisplayRemoved(displayId: Int) {}
                 override fun onDisplayChanged(displayId: Int) {
-                    val o = appCtx.resources.configuration.orientation
-                    if (o != lastOrientation) {
-                        lastOrientation = o
-                        dispatch(appCtx, RuleModel.TRIG_ORIENTATION,
-                            mapOf("orientation" to
-                                if (o == android.content.res.Configuration.ORIENTATION_PORTRAIT)
-                                    "portrait" else "landscape"))
+                    if (System.currentTimeMillis() - registeredAt < 10_000L) {
+                        WepWawetLogger.appDebug("$TAG: orientation ignored — boot grace")
+                        return
                     }
+                    val o = appCtx.resources.configuration.orientation
+                    if (o == lastOrientation) return
+                    pendingRunnable.get()?.let { handler.removeCallbacks(it) }
+                    val check = Runnable {
+                        val now = appCtx.resources.configuration.orientation
+                        if (now != lastOrientation) {
+                            lastOrientation = now
+                            dispatch(appCtx, RuleModel.TRIG_ORIENTATION,
+                                mapOf("orientation" to
+                                    if (now == android.content.res.Configuration.ORIENTATION_PORTRAIT)
+                                        "portrait" else "landscape"))
+                        }
+                    }
+                    pendingRunnable.set(check)
+                    handler.postDelayed(check, 800L)
                 }
             }
             try {
@@ -314,13 +404,20 @@ object RuleTriggerHub {
             }
         }
 
+        val previousTypes = registeredTypes
         registeredTypes = types
+        registrationFailed = failed
+        // v0.8.27: UNCONDITIONAL — the old log skipped unchanged type sets,
+        // which read in the field like saves that never re-registered.
         WepWawetLogger.appInfo("$TAG: trigger registrations aggregated",
             "types" to types.size,
+            "type_list" to types.joinToString(",").take(120),
             "broadcasts" to actions.size,
+            "always_on_family" to (types.isNotEmpty()),
             "wifi" to (networkCallback != null),
             "audio" to (audioDeviceCallback != null),
-            "orientation" to (orientationListener != null))
+            "orientation" to (orientationListener != null),
+            "changed" to (types != previousTypes || failed))
     }
 
     private var lastWifiSsid: String = ""

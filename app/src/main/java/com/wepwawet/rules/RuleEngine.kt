@@ -75,6 +75,14 @@ object RuleEngine {
     /** v0.8.26: playlists already journaled as not-active this session. */
     private val notedInactivePlaylists = HashSet<String>()
 
+    /** v0.8.27: rules already journaled as disabled / in-cooldown this
+     *  session — with the always-armed broadcast family every power press
+     *  delivers an event, and a per-event journal record per disabled or
+     *  cooling rule flooded the journal (the same class as the 0.8.26
+     *  not-active spam). The per-event DEBUG LOG line stays. */
+    private val notedDisabledRules = HashSet<String>()
+    private val notedCooldownRules = HashSet<String>()
+
     // ══ Event dispatch ═════════════════════════════════════════════════
 
     /**
@@ -123,8 +131,10 @@ object RuleEngine {
                 if (!rule.enabled) {
                     WepWawetLogger.appDebug("$TAG: rule skipped — disabled",
                         "rule" to rule.name, "playlist" to pr.playlistId)
-                    RuleActivityLog.record(context, "skipped", pr.playlistId, rule.name,
-                        "Disabled (event: $type)")
+                    if (notedDisabledRules.add(rule.id)) {
+                        RuleActivityLog.record(context, "skipped", pr.playlistId, rule.name,
+                            "Rule is off — its triggers never fire. Turn it on in the editor.")
+                    }
                     continue
                 }
                 if (!triggerMatches(context, rule, type, extra, pr.playlistId)) {
@@ -139,8 +149,10 @@ object RuleEngine {
                 ) {
                     WepWawetLogger.appInfo("$TAG: rule in cooldown — skipped",
                         "rule" to rule.name, "cooldown_min" to rule.cooldownMinutes)
-                    RuleActivityLog.record(context, "skipped", pr.playlistId, rule.name,
-                        "In cooldown (${rule.cooldownMinutes} min) — event $type")
+                    if (notedCooldownRules.add(rule.id)) {
+                        RuleActivityLog.record(context, "skipped", pr.playlistId, rule.name,
+                            "In cooldown (${rule.cooldownMinutes} min) — some events were skipped")
+                    }
                     continue
                 }
                 // Gate.

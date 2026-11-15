@@ -170,6 +170,17 @@ object DiscoverSearch {
             attempts++
             val url = tryLadder(effStrict, effSoft, styleValue, r18Mode, sources, tried, deadline)
             if (url.isNullOrEmpty()) break
+            // v0.8.27: a candidate whose HOST is blocked (recent download
+            // failures) is undownloadable — skip it and draw the NEXT
+            // candidate instead of handing the caller a dead URL (the
+            // 0.8.26 lanes burned their whole budget on pixiv.re URLs
+            // while safebooru sat unqueried).
+            if (DiscoverSourceHealth.isHostBlocked(url)) {
+                WepWawetLogger.appDebug("$TAG: search skips blocked-host candidate",
+                    "host" to DiscoverSourceHealth.hostOf(url))
+                tried.add(url)
+                continue
+            }
             tried.add(url)
             if (DiscoverDedup.reserve(context, url)) {
                 WepWawetLogger.appInfo("$TAG: image found",
@@ -369,16 +380,25 @@ object DiscoverSearch {
             val w = entry.optInt("width", 0)
             val h = entry.optInt("height", 0)
             val ext = entry.optString("ext", "")
-            // Both variants, scored — original first (the unmetered pick).
+            // v0.8.27 (THE ORIGINAL-SIZE DEATH SPIRAL): REGULAR first —
+            // original ONLY as the fallback. The 0.8.26 field log: every
+            // pick was the multi-MB img-original, every download blew the
+            // 8s timeout on a slow link, the host took 3 strikes and a
+            // 10-minute block, and the queue stayed empty ALL SESSION
+            // while lolicon kept handing out undownloadable originals.
+            // The regular variant (master, ~1200px) is what the old
+            // picker used and decodes fine at 2160 — quality scoring
+            // still rejects gif/tiny variants below.
             val variants = listOf(
-                urls.optString("original", "") to true,
                 urls.optString("regular", "") to false,
+                urls.optString("original", "") to true,
             )
             var best: Pair<String, Int>? = null
             for ((u, isOriginal) in variants) {
                 if (u.isEmpty() || u in tried) continue
                 val s = scoreImageVariant(u, w, h, ext, isOriginal) ?: continue
                 if (best == null || s > best!!.second) best = u to s
+                if (!isOriginal) break  // regular passed the floor — take it
             }
             val url = best?.first ?: continue
             val niche = spec?.let { nicheScore(tagStr, it) } ?: 0
@@ -980,6 +1000,12 @@ object DiscoverSearch {
         // order hammering a dead mirror before the good ones.
         val ranked = DiscoverSourceHealth.rank(candidates)
         var lastError: Exception? = null
+        // v0.8.27: was ANY candidate actually attempted? A candidate
+        // skipped for a failed URL / blocked host was NEVER downloaded —
+        // the old path still counted it as a failure and re-armed the
+        // host's block window (the 0.8.26 log: consecutive_failures
+        // 4→5→6 while the host was ALREADY blocked, all on skips).
+        var attemptedAny = false
         for (candidate in ranked) {
             try {
                 // v0.9.2 (the review): a URL that already failed this
@@ -993,6 +1019,7 @@ object DiscoverSearch {
                         "host" to hostOf(candidate))
                     continue
                 }
+                attemptedAny = true
                 val cl = candidate.lowercase()
                 val needReferer = "pximg.net" in cl || "pixiv.net" in cl ||
                     cl.endsWith(".pixiv.re") || cl == "pixiv.re" ||
@@ -1030,6 +1057,13 @@ object DiscoverSearch {
                 lastError = e
             }
         }
+        if (!attemptedAny) {
+            // Everything was skipped — nothing about the host changed.
+            // The dedup handoff is still dropped (this URL is undownloadable
+            // right now), but NO failure is recorded.
+            DiscoverDedup.abandon(url)
+            throw HostSkippedException(url)
+        }
         // v0.9.2: the failure is remembered per-URL AND per-host so the
         // session stops paying for the same dead endpoint; the dedup
         // handoff is dropped (the id STAYS seen — a failed image is never
@@ -1038,6 +1072,14 @@ object DiscoverSearch {
         DiscoverDedup.abandon(url)
         throw lastError ?: IllegalStateException("Image download failed: $url")
     }
+
+    /**
+     * v0.8.27: the download was never attempted (every candidate was
+     * skipped for a failed URL / blocked host). Callers treat it as
+     * "draw a different image", not as a host failure.
+     */
+    class HostSkippedException(url: String) :
+        Exception("Host temporarily blocked — skipped: $url")
 
     private fun encode(value: String): String =
         URLEncoder.encode(value, "UTF-8").replace("+", "%20")

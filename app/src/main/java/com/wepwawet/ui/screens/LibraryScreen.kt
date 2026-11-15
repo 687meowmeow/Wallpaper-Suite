@@ -2444,6 +2444,8 @@ internal object LibraryPrefs {
         edit.remove(KEY_GROUP_FOLDER_PREFIX + name)
         edit.apply()
         dropFolderIfUnlinked(context)
+        // v0.8.27 (audit): same cache invalidation on group delete.
+        com.wepwawet.playlist.GroupBlocks.invalidate()
     }
 
     fun readGroupOf(context: android.content.Context): Map<String, String> {
@@ -2464,6 +2466,9 @@ internal object LibraryPrefs {
         } else {
             prefs.edit().putString(KEY_GROUP_OF_PREFIX + filePath, group).apply()
         }
+        // v0.8.27 (audit): group membership changed — drop the group-block
+        // resolve cache (it held the OLD membership for up to 60s).
+        com.wepwawet.playlist.GroupBlocks.invalidate()
     }
 
     // ══ v0.8.22: UNIFIED GROUPS — folders merged INTO groups ══════════
