@@ -25,7 +25,7 @@ import kotlinx.coroutines.launch
  */
 class RuleAlarmReceiver : BroadcastReceiver() {
 
-    /** v0.10.0: a persisted Wait block re-armed for its remaining time. */
+    /** v0.8.28: a persisted Wait block re-armed for its remaining time. */
     companion object {
         const val ACTION_RESUME_WAIT = "com.wepwawet.rules.RESUME_WAIT"
     }

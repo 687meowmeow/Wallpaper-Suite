@@ -39,6 +39,14 @@ interface WallpaperControls {
 
     fun setLoadCallback(runnable: Runnable?)
 
+    /**
+     * v0.8.28: the content FAILED to load (decode error, prepare error,
+     * unreadable file). The engine completes its apply-confirmation
+     * FALSE and restores the previous wallpaper. Default: no-op (views
+     * without a failure signal keep the old timeout-based semantics).
+     */
+    fun setLoadFailedCallback(runnable: Runnable?) { }
+
     fun isSupportingAudioProcessing(): Boolean
 
     fun sendAudioData(fft64: FloatArray)

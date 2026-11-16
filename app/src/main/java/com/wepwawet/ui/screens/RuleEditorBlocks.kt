@@ -897,13 +897,21 @@ private fun InnerStack(
                             val j = (idx + delta).coerceIn(0, list.size - 1)
                             val moved = list.removeAt(idx)
                             list.add(j, moved)
+                            logEditor("nested block moved",
+                                "block" to b.type, "in" to label, "to" to j)
                             setBlocks(list)
                         },
-                        onDelete = { setBlocks(blocks.filter { it.id != b.id }) },
+                        onDelete = {
+                            logEditor("nested block deleted",
+                                "block" to b.type, "in" to label)
+                            setBlocks(blocks.filter { it.id != b.id })
+                        },
                         onDuplicate = {
                             val copy = RuleModel.copyBlock(b)
                             val list = blocks.toMutableList()
                             list.add(idx + 1, copy)
+                            logEditor("nested block duplicated",
+                                "block" to b.type, "in" to label)
                             setBlocks(list)
                         },
                     )
@@ -919,6 +927,7 @@ private fun InnerStack(
             onDismiss = { showSheet = false },
             onPick = { type ->
                 showSheet = false
+                logEditor("nested block added", "block" to type, "in" to label)
                 setBlocks(blocks + newBlock(type))
             },
         )
@@ -1221,6 +1230,8 @@ internal fun BlockCard(
                             },
                             onClick = {
                                 menuOpen = false
+                                logEditor(if (block.disabled) "block enabled" else "block disabled",
+                                    "block" to block.type, "id" to block.id)
                                 onEdit { it.disabled = !it.disabled }
                             },
                         )
@@ -1312,8 +1323,20 @@ internal fun BlockCard(
                 // ── The nested stacks ──
                 when (block.type) {
                     RuleModel.BLOCK_IF -> {
-                        CondCard(cond = block.cond ?: RuleModel.Cond()) { newCond ->
-                            onEdit { it.cond = newCond }
+                        if (block.cond == null) {
+                            TextButton(onClick = {
+                                logEditor("if-condition added", "block" to block.id)
+                                onEdit { it.cond = RuleModel.Cond(type = RuleModel.COND_ALL) }
+                            }) { Text("＋ Add an 'only if'") }
+                        } else {
+                            CondCard(
+                                cond = block.cond!!,
+                                onChange = { newCond -> onEdit { it.cond = newCond } },
+                                onRemove = {
+                                    logEditor("if-condition removed", "block" to block.id)
+                                    onEdit { it.cond = null }
+                                },
+                            )
                         }
                         InnerStack(
                             label = "Then",
@@ -1342,8 +1365,34 @@ internal fun BlockCard(
                     )
                     RuleModel.BLOCK_CHOOSE -> {
                         for ((oi, opt) in block.options.withIndex()) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    "Option: ${opt.label}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                // v0.8.28: EVERY option deletes ITSELF —
+                                // the old "remove the last option" button
+                                // could not remove a specific option.
+                                IconButton(onClick = {
+                                    onEdit {
+                                        if (it.options.size > 1) {
+                                            logEditor("choose option removed",
+                                                "label" to opt.label,
+                                                "remaining" to (it.options.size - 1))
+                                            it.options.removeAt(oi)
+                                        }
+                                    }
+                                }) {
+                                    Icon(Icons.Filled.Delete,
+                                        contentDescription = "Remove option ${opt.label}")
+                                }
+                            }
                             InnerStack(
-                                label = "Option: ${opt.label}",
+                                label = "",
                                 blocks = opt.blocks,
                                 rule = rule, depth = depth + 1,
                                 highlights = highlights,
@@ -1356,15 +1405,10 @@ internal fun BlockCard(
                                 onEdit {
                                     it.options.add(RuleModel.BlockOption(
                                         label = "Option ${it.options.size + 1}"))
+                                    logEditor("choose option added",
+                                        "count" to it.options.size)
                                 }
                             }) { Text("＋ Add an option") }
-                            if (block.options.size > 1) {
-                                TextButton(onClick = {
-                                    onEdit {
-                                        if (it.options.size > 1) it.options.removeAt(it.options.size - 1)
-                                    }
-                                }) { Text("Remove the last option") }
-                            }
                         }
                     }
                 }
@@ -1499,10 +1543,24 @@ private val COND_CATEGORIES = listOf(
  * and, for all/any/not, its children (nested condition cards; an If can sit
  * inside an If via nested all/any/not gates).
  */
+/**
+ * v0.8.28: EVERY rule-editor action is logged — the exported log had no
+ * editor entries at all, so "what did I do?" was unanswerable.
+ */
+internal fun logEditor(action: String, vararg ctx: Pair<String, Any?>) =
+    com.wepwawet.log.WepWawetLogger.appInfo("RuleEditor: $action", *ctx)
+
 @Composable
 internal fun CondCard(
     cond: RuleModel.Cond,
     onChange: (RuleModel.Cond) -> Unit,
+    /**
+     * v0.8.28: REMOVES this condition. The old trash button called
+     * onChange with a brand-new empty All node — the gate could never go
+     * back to empty and no child was ever actually removed. Null keeps a
+     * harmless fallback (reset) for any caller that cannot remove.
+     */
+    onRemove: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     var field by remember { mutableStateOf<String?>(null) }
@@ -1510,6 +1568,8 @@ internal fun CondCard(
 
     when (field) {
         "type" -> ConditionTypePicker(cond.type, close) { type ->
+            logEditor("condition type changed",
+                "from" to cond.type, "to" to type)
             onChange(cond.copy(type = type,
                 children = if (type in listOf(RuleModel.COND_ALL, RuleModel.COND_ANY, RuleModel.COND_NOT)) {
                     cond.children.ifEmpty { ArrayList(listOf(RuleModel.Cond(type = RuleModel.COND_CHARGING))) }.toMutableList()
@@ -1574,7 +1634,19 @@ internal fun CondCard(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
-            IconButton(onClick = { onChange(RuleModel.Cond(type = RuleModel.COND_ALL)) }) {
+            IconButton(onClick = {
+                // v0.8.28: the trash REMOVES the condition — at the gate
+                // it clears the gate; inside a parent it removes exactly
+                // THIS child.
+                if (onRemove != null) {
+                    logEditor("condition removed", "type" to cond.type)
+                    onRemove()
+                } else {
+                    logEditor("condition reset (no remover)",
+                        "type" to cond.type)
+                    onChange(RuleModel.Cond(type = RuleModel.COND_ALL))
+                }
+            }) {
                 Icon(Icons.Filled.Delete, contentDescription = "Remove condition")
             }
         }
@@ -1601,24 +1673,44 @@ internal fun CondCard(
             }
             else -> {}
         }
-        // The children (combine nodes) + add/remove.
+        // The children (combine nodes) — each child deletes ITSELF.
         if (cond.type in listOf(RuleModel.COND_ALL, RuleModel.COND_ANY, RuleModel.COND_NOT)) {
+            if (cond.children.isEmpty()) {
+                Text(
+                    "(empty — add a condition below, or delete this whole group)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 2.dp),
+                )
+            }
             for ((ci, child) in cond.children.withIndex()) {
-                CondCard(child) { newChild ->
-                    val list = cond.children.toMutableList()
-                    list[ci] = newChild
-                    onChange(cond.copy(children = list))
-                }
+                CondCard(
+                    cond = child,
+                    onChange = { newChild ->
+                        val list = cond.children.toMutableList()
+                        list[ci] = newChild
+                        onChange(cond.copy(children = list))
+                    },
+                    // v0.8.28: the child trash removes EXACTLY this child
+                    // (any position, including the last one).
+                    onRemove = {
+                        val list = cond.children.toMutableList()
+                        if (ci < list.size) {
+                            list.removeAt(ci)
+                            logEditor("condition child removed",
+                                "parent" to cond.type,
+                                "child" to child.type,
+                                "remaining" to list.size)
+                            onChange(cond.copy(children = list))
+                        }
+                    },
+                )
             }
             Row {
                 TextButton(onClick = {
+                    logEditor("condition child added", "parent" to cond.type)
                     onChange(cond.copy(children = (cond.children + RuleModel.Cond(type = RuleModel.COND_CHARGING)).toMutableList()))
                 }) { Text("＋ add a condition") }
-                if (cond.children.size > 1) {
-                    TextButton(onClick = {
-                        onChange(cond.copy(children = cond.children.dropLast(1).toMutableList()))
-                    }) { Text("remove the last") }
-                }
             }
         }
     }

@@ -47,7 +47,7 @@ object SuiteRulesStore {
 
     private fun file(context: Context): File = File(context.filesDir, FILE)
 
-    // ═══ v0.10.0: DATA SAFETY ═════════════════════════════════════════
+    // ═══ v0.8.28: DATA SAFETY ═════════════════════════════════════════
     // The old writeRoot did a plain writeText of the whole file with no
     // lock and no atomicity: every rule firing (recordFire), every named
     // value change, and every editor save read the file, changed one
@@ -347,7 +347,7 @@ object SuiteRulesStore {
     }
 
     /**
-     * v0.10.0: stamp the cooldown the moment a run STARTS (recordFire used
+     * v0.8.28: stamp the cooldown the moment a run STARTS (recordFire used
      * to be the only stamp — written AFTER the run finished, so a long run
      * (a Wait block can hold one for ten minutes) let every arriving event
      * start a duplicate). The final recordFire still writes the result.

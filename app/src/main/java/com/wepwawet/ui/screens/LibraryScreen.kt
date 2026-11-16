@@ -462,46 +462,31 @@ fun LibraryScreen(
         workingImage = true
         scope.launch {
             try {
-                val ok = withContext(Dispatchers.IO) {
-                    // v0.8.16: an edited image SETS its crop (the original
-                    // file is never modified — the crop is a derived copy).
-                    val resolved = ImageCropStore.resolve(context, entry.uri)
-                    val data: Any = if (resolved.startsWith("/"))
-                        java.io.File(resolved) else android.net.Uri.parse(resolved)
-                    val request = ImageRequest.Builder(context)
-                        .data(data)
-                        .allowHardware(false) // the crop needs pixel access
-                        .size(2048)
-                        .build()
-                    val drawable = context.imageLoader.execute(request).drawable
-                        ?: return@withContext false
-                    val bmp = (drawable as? BitmapDrawable)?.bitmap
-                        ?: run {
-                            // Animated drawables (GIF): draw the current
-                            // frame into a software bitmap.
-                            val w = drawable.intrinsicWidth.coerceAtLeast(1)
-                            val h = drawable.intrinsicHeight.coerceAtLeast(1)
-                            Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also {
-                                val canvas = android.graphics.Canvas(it)
-                                drawable.setBounds(0, 0, w, h)
-                                drawable.draw(canvas)
-                            }
-                        }
-                    val crop = com.wepwawet.discover.DiscoverApplier.cropForScreen(context, bmp)
-                    // v0.10.0: the toggles ARE the model — both OFF
-                    // means NOTHING is written (the old "no preference"
-                    // fallback wrote both screens against the toggles).
-                    val screens = com.wepwawet.discover.DiscoverPrefs.readScreens(context)
-                    val homeOn = com.wepwawet.discover.DiscoverPrefs.homeRequired(screens.first)
-                    val lockOn = com.wepwawet.discover.DiscoverPrefs.lockRequired(screens.second)
-                    com.wepwawet.discover.DiscoverApplier.apply(
-                        context, crop, homeOn = homeOn, lockOn = lockOn).ok
+                // v0.8.28: the ORIGINAL file (or the user's edited crop,
+                // never both) routes through the router — no decode, no
+                // re-encode: transparency and animation survive, and the
+                // engine center-crops to the screen at render exactly
+                // like the old pre-crop did.
+                val resolved = ImageCropStore.resolve(context, entry.uri)
+                val screens = com.wepwawet.discover.DiscoverPrefs.readScreens(context)
+                val homeOn = com.wepwawet.discover.DiscoverPrefs.homeRequired(screens.first)
+                val lockOn = com.wepwawet.discover.DiscoverPrefs.lockRequired(screens.second)
+                val target = when {
+                    homeOn && lockOn -> "both"
+                    homeOn -> "home"
+                    lockOn -> "lock"
+                    else -> "none"
                 }
+                val outcome = com.wepwawet.wallpaper.WallpaperRouter.applyPath(
+                    context, resolved, target)
+                val ok = outcome.allOk
                 snackbar.showSnackbar(
                     if (ok) "Wallpaper set — \"${entry.displayName.substringBeforeLast('.')}\""
-                    else "Wallpaper write failed")
-                if (ok) WepWawetLogger.appInfo("LibraryScreen: folder image set (system)",
-                    "file" to entry.displayName)
+                    else (outcome.reason.ifEmpty { "Wallpaper write failed" }))
+                if (ok) WepWawetLogger.appInfo("LibraryScreen: folder image set (router)",
+                    "file" to entry.displayName,
+                    "home_ok" to outcome.homeOk,
+                    "lock_ok" to outcome.lockOk)
             } finally {
                 workingImage = false
                 selectedImage = null
@@ -937,6 +922,10 @@ fun LibraryScreen(
                 .fillMaxSize()
                 .padding(padding),
         ) {
+            // v0.8.28: the live-wallpaper banner on EVERY screen that can
+            // apply a wallpaper (coverage + shared-engine split advice).
+            com.wepwawet.ui.components.LiveWallpaperPromptBanner()
+
             // ===== Filter chips: All + LIVE + GROUPS + ＋ =====
             // Tap a chip to filter; DOUBLE-TAP a GROUP chip for its manage
             // menu (rename/delete/link); long-press-drag a group chip to

@@ -118,13 +118,31 @@ object RuleTriggerHub {
         override fun onReceive(ctx: Context, intent: Intent) {
             when (intent.action) {
                 Intent.ACTION_SCREEN_ON -> {
-                    // v0.10.0: the broadcast ARRIVED — logged even when no
+                    // v0.8.28: the broadcast ARRIVED — logged even when no
                     // rule matches or no rules exist (the user's demand: a
                     // log alone must tell a broadcast that never arrived
                     // from a rule that did not run).
                     WepWawetLogger.appInfo("$TAG: broadcast arrived",
                         "action" to "SCREEN_ON")
                     dispatch(ctx, RuleModel.TRIG_SCREEN_ON)
+                    // v0.8.28 (THE MISSING UNLOCK): USER_PRESENT is
+                    // OEM-flaky for background apps (OnePlus/OxygenOS
+                    // drops it in some battery states), and a screen that
+                    // turns on ALREADY UNLOCKED (fingerprint-while-off,
+                    // smart lock, no keyguard) never sends USER_PRESENT
+                    // at all. When the screen turns on with NO keyguard,
+                    // the device IS unlocked — derive the event.
+                    try {
+                        val km = ctx.getSystemService(android.app.KeyguardManager::class.java)
+                        if (km != null && !km.isKeyguardLocked) {
+                            WepWawetLogger.appInfo("$TAG: unlock DERIVED — screen on with no keyguard",
+                                "keyguard_locked" to false)
+                            dispatch(ctx, RuleModel.TRIG_UNLOCKED)
+                        }
+                    } catch (t: Throwable) {
+                        WepWawetLogger.appWarn("$TAG: keyguard check failed",
+                            "exception" to (t.message ?: t.javaClass.name))
+                    }
                 }
                 Intent.ACTION_SCREEN_OFF -> {
                     WepWawetLogger.appInfo("$TAG: broadcast arrived",

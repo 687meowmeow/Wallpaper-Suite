@@ -11,11 +11,12 @@ import java.io.File
  * Folders tab was folded INTO the main wallpaper page).
  *
  * The user picks any device folder (SAF); its images appear in the
- * library grid under their own filter chip. v0.8.14: tapping one opens a
- * fullscreen preview and "Set as wallpaper" writes it as the plain SYSTEM
- * wallpaper (crop + WallpaperManager.setBitmap) — basic images never go
- * through the Wallpaper Engine renderer ("videos should though", and
- * video imports still do). Images can also be renamed in place via SAF.
+ * library grid under their own filter chip. v0.8.28: tapping one opens
+ * a fullscreen preview and "Set as wallpaper" routes the ORIGINAL file
+ * through WallpaperRouter into the app's own live wallpaper (the engine
+ * renders it and center-crops to the screen — no setBitmap, no
+ * re-encode; transparency and animation survive). Images can also be
+ * renamed in place via SAF.
  *
  * Multiple folders are supported — each is persisted as a tree URI with
  * a persistable read grant.

@@ -187,7 +187,7 @@ object DiscoverPrefs {
     const val SOURCE_GELBOORU = "gelbooru"
     const val SOURCE_BEHOIMI = "behoimi"
 
-    // v0.10.0: Gelbooru API credentials (its anonymous JSON API answers
+    // v0.8.28: Gelbooru API credentials (its anonymous JSON API answers
     // 401; the key + id are in the Gelbooru account options page). Empty
     // = the credentials are not set.
     private const val KEY_GELBOORU_API_KEY = "gelbooruApiKey"
@@ -247,7 +247,7 @@ object DiscoverPrefs {
     // ── Tri-state screens (v1.0.0 WallpaperTargetMode) ───────────────
 
     /**
-     * v0.10.0: BINARY screens — each toggle turns one screen on or off as
+     * v0.8.28: BINARY screens — each toggle turns one screen on or off as
      * a target. The tri-state (pink/blue) and its boolean-era migration
      * are GONE: both on → one image on both; one on → that screen; both
      * off → nothing. Different images per screen is the toggle dance
@@ -351,6 +351,16 @@ object DiscoverPrefs {
     }
 
     /** Remember [url] as the most recent (dedup, newest-last, capped). */
+    /** v0.8.28: keep only the newest [keep] recent URLs (dedup relief). */
+    fun trimRecentUrlsTo(context: Context, keep: Int) {
+        val list = readRecentUrlsList(context).toMutableList()
+        if (list.size > keep) {
+            prefs(context).edit()
+                .putString(KEY_RECENT_URLS, org.json.JSONArray(list.takeLast(keep)).toString())
+                .apply()
+        }
+    }
+
     fun pushRecentUrl(context: Context, url: String) {
         val list = readRecentUrlsList(context).toMutableList()
         list.remove(url)

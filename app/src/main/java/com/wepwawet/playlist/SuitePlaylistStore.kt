@@ -188,6 +188,14 @@ object SuitePlaylistStore {
         val store = readStore(context)
         val idx = store.playlists.indexOfFirst { it.id == playlist.id }
         if (idx >= 0) store.playlists[idx] = playlist else store.playlists.add(playlist)
+        // v0.8.28: a saved playlist with NO active one becomes the
+        // active one — an app with playlists but no active ran no rules
+        // at all (resolveActiveId enforces the same invariant on read).
+        if (store.activePlaylistId.isEmpty()) {
+            store.activePlaylistId = playlist.id
+            WepWawetLogger.appInfo("SuitePlaylistStore: playlist is now ACTIVE (none was)",
+                "id" to playlist.id)
+        }
         writeStore(context, store)
         WepWawetLogger.appInfo("SuitePlaylistStore: saved",
             "id" to playlist.id,
@@ -199,10 +207,25 @@ object SuitePlaylistStore {
 
     fun delete(context: Context, id: String) {
         val store = readStore(context)
+        val wasActive = store.activePlaylistId == id
         store.playlists.removeAll { it.id == id }
         if (store.activePlaylistId == id) store.activePlaylistId = ""
         writeStore(context, store)
-        WepWawetLogger.appInfo("SuitePlaylistStore: deleted", "id" to id)
+        WepWawetLogger.appInfo("SuitePlaylistStore: deleted",
+            "id" to id, "was_active" to wasActive)
+        // v0.8.28: deleting the ACTIVE playlist PROMOTES another one —
+        // the old code left no playlist active, and every remaining
+        // playlist's rules silently never ran again.
+        if (wasActive) {
+            val promoted = resolveActiveId(context)
+            if (promoted.isNotEmpty()) {
+                val name = readStore(context).playlists
+                    .firstOrNull { it.id == promoted }?.name ?: promoted
+                com.wepwawet.rules.RuleActivityLog.record(
+                    context, "info", promoted, name,
+                    "The active playlist was deleted — \"$name\" is the active playlist now")
+            }
+        }
         notifyService(context)
         // v0.8.25 (audit): a deleted playlist's rules, runtime step state
         // (cursor / bag / history / interval anchors) and the QS-tile +
@@ -285,8 +308,47 @@ object SuitePlaylistStore {
 
     /** v0.8.15: the stored active playlist id — ONE read instead of a
      * per-item isActive() file parse in the manager list. */
+    /**
+     * v0.8.28: every file path referenced by every playlist entry (the
+     * router's referenced-file check — ring cleanup never deletes these).
+     */
+    fun allEntryPaths(context: Context): List<String> =
+        readStore(context).playlists.flatMap { pl -> pl.entries.map { it.filepath } }
+
     fun activePlaylistId(context: Context): String =
         readStore(context).activePlaylistId
+
+    /**
+     * v0.8.28 (THE NO-ACTIVE-PLAYLIST BUG): THE ONE resolution function —
+     * the service AND the rule engine resolve through here so they can
+     * never disagree. The app is never in a state where playlists exist
+     * but none is active (that state made every remaining playlist's
+     * rules unrunnable after the active one was deleted):
+     *  • a VALID active id is returned as-is;
+     *  • a stale/empty one PROMOTES the first playlist automatically and
+     *    says which (log + journal);
+     *  • no playlists at all → "" (nothing to promote).
+     */
+    fun resolveActiveId(context: Context): String {
+        val store = readStore(context)
+        val current = store.activePlaylistId
+        if (current.isNotEmpty() && store.playlists.any { it.id == current }) {
+            return current
+        }
+        val promote = store.playlists.firstOrNull()?.id ?: ""
+        if (promote.isEmpty()) return ""
+        store.activePlaylistId = promote
+        writeStore(context, store)
+        val name = store.playlists.firstOrNull { it.id == promote }?.name ?: promote
+        WepWawetLogger.appWarn("SuitePlaylistStore: no active playlist — PROMOTED the first one",
+            "promoted" to name,
+            "stale_was" to current.ifEmpty { "(none)" })
+        com.wepwawet.rules.RuleActivityLog.record(
+            context, "info", promote, name,
+            "No playlist was active — \"$name\" is the active playlist now")
+        notifyService(context)
+        return promote
+    }
 
     fun isActive(context: Context, id: String): Boolean =
         readStore(context).activePlaylistId == id

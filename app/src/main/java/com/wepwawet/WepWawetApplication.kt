@@ -221,7 +221,7 @@ class WepWawetApplication : Application(), Configuration.Provider, ImageLoaderFa
         }
         runCatching {
             com.wepwawet.rules.RuleTriggerHub.start(this)
-            // v0.10.0: a Wait block that outlived the process resumes now
+            // v0.8.28: a Wait block that outlived the process resumes now
             // (its remaining time was persisted at wait start).
             runCatching { com.wepwawet.rules.RuleEngine.resumePendingWaits(this) }
                 .onFailure {

@@ -216,7 +216,20 @@ object DiscoverPreload {
                 "target" to target,
                 "concurrency" to concurrency,
                 "attempts" to attempts)
-            noteFillResult(added)
+            if (attempts == 0 && added == 0 &&
+                DiscoverPrefs.queueDepth(context, signature) >= target
+            ) {
+                // v0.8.28: the queue was ALREADY FULL — that is SUCCESS
+                // (the old path counted it as "nothing appended" and
+                // armed the exponential backoff; the field log showed the
+                // warning twice at startup with depth 8 == target 8).
+                WepWawetLogger.appInfo("$TAG: queue already full — success",
+                    "depth" to DiscoverPrefs.queueDepth(context, signature),
+                    "target" to target)
+                resetBackoff()
+            } else {
+                noteFillResult(added)
+            }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {

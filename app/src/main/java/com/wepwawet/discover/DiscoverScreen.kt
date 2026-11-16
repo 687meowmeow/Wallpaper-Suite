@@ -142,7 +142,11 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
 
     // ---- preview state ----
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    // v0.10.0: previewLockBitmap/previewingLock are GONE with dual mode
+    // v0.8.28: the shown image's source URL — Set encodes the crop in the
+    // SOURCE's format (PNG for png/gif/webp keeps transparency; JPEG
+    // stays JPEG) instead of always-JPEG-at-92.
+    var previewSourceUrl by remember { mutableStateOf<String?>(null) }
+    // v0.8.28: previewLockBitmap/previewingLock are GONE with dual mode
     // (there is no separate lock preview — one image, toggle-routed).
     // v0.8.14: true when the preview shows a freshly refreshed image that
     // has NOT been applied yet — Set then commits it as-is.
@@ -433,12 +437,13 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
         }
         previewBitmap = bmp
         previewIsFresh = true
+        previewSourceUrl = imgSrcUrl
         // v0.8.19: every NEW image starts with a centered, unzoomed window.
         resetPreviewWindow()
         // Keep the queue full for the NEXT Refresh.
         refillQueue()
 
-        // v0.10.0: the dual-mode lock-image fetch is GONE — there is no
+        // v0.8.28: the dual-mode lock-image fetch is GONE — there is no
         // separate lock image. One image; the toggles decide which
         // screens receive it.
     }
@@ -462,7 +467,7 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
         statusLine = "Applying…"
         scope.launch {
             try {
-                // v0.10.0: no separate lock image — one crop; the router
+                // v0.8.28: no separate lock image — one crop; the router
                 // sends it to the screens the toggles have ON.
                 val lockBmp = null
                 // v0.8.19 (preview window): a plain Set applies exactly the
@@ -490,7 +495,8 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                     }
                 }
                 val result = DiscoverApplier.applyScreens(
-                    context, homeCrop, homeState, lockState, lockCrop)
+                    context, homeCrop, homeState, lockState, lockCrop,
+                    sourcePath = previewSourceUrl)
                 if (result.ok) {
                     // v0.8.18: ok = ANY requested screen was written — the
                     // old strict AND meant a device whose lock write fails
@@ -706,7 +712,7 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            // v0.10.0: the one-tap prompt — when our live wallpaper isn't
+            // v0.8.28: the one-tap prompt — when our live wallpaper isn't
             // covering a screen the toggles have ON, nothing can apply;
             // this banner says so and offers the system's one-tap set.
             com.wepwawet.ui.components.LiveWallpaperPromptBanner()
@@ -1056,7 +1062,7 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            // ===== v0.10.0: Gelbooru credentials =====
+            // ===== v0.8.28: Gelbooru credentials =====
             // Gelbooru answers 401 without them. Both values sit in the
             // Gelbooru account options page (Settings → Account).
             var gelKey by remember {
@@ -1201,7 +1207,7 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                                             // v0.8.18: restores used to fail
                                             // SILENTLY ("the history doesnt
                                             // work" part two).
-                                            // v0.10.0: both toggles OFF says
+                                            // v0.8.28: both toggles OFF says
                                             // so instead of "failed".
                                             val bothOff =
                                                 homeState == DiscoverPrefs.SCREEN_OFF &&
@@ -1383,7 +1389,7 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                 onDismiss = { showCropDialog = false },
                 onApply = { cropped ->
                     showCropDialog = false
-                    // v0.10.0: the crop replaces the image the user was
+                    // v0.8.28: the crop replaces the image the user was
                     // looking at, for this apply only.
                     applyBitmap(homeOverride = cropped)
                 },

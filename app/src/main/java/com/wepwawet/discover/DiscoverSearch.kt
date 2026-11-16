@@ -125,6 +125,10 @@ object DiscoverSearch {
             else -> e.javaClass.simpleName
         }
         lastSourceFailure = kind + " — " + hostOf(url)
+        // v0.8.28: 3 consecutive failures (dead DNS like api.yetal.ml, a
+        // dead endpoint) DISABLE the host for the session — the 0.8.28
+        // log retried an unresolvable host 4× in a tenth of a second.
+        DiscoverSourceHealth.noteDeadCandidate(url, kind)
     }
 
     /**
@@ -191,10 +195,13 @@ object DiscoverSearch {
                 return@withContext url
             }
             if (attempts >= 8) {
-                // All draws seen — accept the freshest one anyway (1.0
-                // NEVER refuses to hand out an image just because of dedup).
-                WepWawetLogger.appInfo("$TAG: all draws already seen — reusing last draw",
+                // All draws seen — hand the fresh draw out (1.0 NEVER
+                // refuses because of dedup), and v0.8.28 TRIMS the recent
+                // list so the next searches can draw older images again
+                // instead of repeating the same "last draw" forever.
+                WepWawetLogger.appInfo("$TAG: all draws already seen — passing this draw and trimming the dedup list",
                     "attempt" to attempts)
+                DiscoverPrefs.trimRecentUrlsTo(context, 5)
                 return@withContext url
             }
         }
@@ -603,7 +610,16 @@ object DiscoverSearch {
         // candidate order — NOT shuffled; the pool's variety comes from
         // the random pick among results).
         for (tag in candidates) {
-            for (site in moeByMode.filter { it.sourceId in sources }) {
+            // v0.8.28: cooled-down and session-dead sources are dropped
+            // BEFORE the choice — the old code picked them, skipped them
+            // inside the HTTP layer, and burned an attempt (422 skip
+            // lines in 100 seconds in the field log).
+            for (site in moeByMode.filter {
+                it.sourceId in sources &&
+                    !DiscoverSourceHealth.isDead(it.endpoint) &&
+                    !DiscoverSourceHealth.isRateLimited(it.endpoint) &&
+                    !DiscoverSourceHealth.isSearchBlocked(it.endpoint)
+            }) {
                 val query = "$tag $ratingSuffix"
                 // v0.9.2 (the review): a NEW RANDOM PAGE each fetch — the
                 // old always-first-page fetch meant that once a page's 24
@@ -638,11 +654,16 @@ object DiscoverSearch {
         }
         // dapi-style (safebooru/tbib/gelbooru/xbooru).
         for (tag in candidates) {
-            for ((sourceId, base) in gelByMode.filter { it.first in sources }) {
+            for ((sourceId, base) in gelByMode.filter {
+                it.first in sources &&
+                    !DiscoverSourceHealth.isDead(it.second) &&
+                    !DiscoverSourceHealth.isRateLimited(it.second) &&
+                    !DiscoverSourceHealth.isSearchBlocked(it.second)
+            }) {
                 // v0.9.2 (the review): dapi offset (`pid`) randomized per
                 // fetch — same reason as the moebooru page above.
                 val pid = Random.nextInt(5)
-                // v0.10.0: Gelbooru requires authentication — the stored
+                // v0.8.28: Gelbooru requires authentication — the stored
                 // api_key + user_id ride along (they are in the Gelbooru
                 // account options page; without them it answers 401).
                 val authSuffix = if (sourceId == DiscoverPrefs.SOURCE_GELBOORU) {
@@ -899,17 +920,24 @@ object DiscoverSearch {
     }
 
     private fun httpGetJson(url: String): JSONObject? {
-        if (DiscoverSourceHealth.isSearchBlocked(url)) return null
+        // v0.8.28: session-dead hosts skip silently (their disable was
+        // already logged once).
+        if (DiscoverSourceHealth.isDead(url) ||
+            DiscoverSourceHealth.isSearchBlocked(url)) return null
         // v0.9.2: the 429 cool-down is checked here (the Inner functions
-        // are expression-bodied and can't early-return).
+        // are expression-bodied and can't early-return). v0.8.28: the
+        // skip log fires ONCE per cooldown window — the old per-call
+        // debug line fired 422 times in 100 seconds in the field log.
         if (DiscoverSourceHealth.isRateLimited(url)) {
-            WepWawetLogger.appDebug("$TAG: source cooling down after 429 — skipped",
-                "host" to hostOf(url))
+            DiscoverSourceHealth.noteCooldownSkipOnce(url)
             return null
         }
         val result = httpGetJsonInner(url)
         if (result == null) DiscoverSourceHealth.rememberSearchFailure(url)
-        else DiscoverSourceHealth.clearSearchFailure(url)
+        else {
+            DiscoverSourceHealth.clearSearchFailure(url)
+            DiscoverSourceHealth.noteHostAlive(url)
+        }
         return result
     }
 
@@ -932,6 +960,12 @@ object DiscoverSearch {
                         WepWawetLogger.appInfo("$TAG: source HTTP error",
                             "host" to url.take(60),
                             "code" to resp.code)
+                        if (resp.code == 404 || resp.code == 410) {
+                            // v0.8.28: a persistently dead endpoint (the
+                            // field log's xbooru 404) disables for the
+                            // session after 3 tries.
+                            DiscoverSourceHealth.noteDeadCandidate(url, "HTTP " + resp.code)
+                        }
                         null
                     }
                     else -> JSONObject(resp.body?.string() ?: return null)
@@ -946,15 +980,18 @@ object DiscoverSearch {
     }
 
     private fun httpGetJsonArray(url: String): JSONArray? {
-        if (DiscoverSourceHealth.isSearchBlocked(url)) return null
+        if (DiscoverSourceHealth.isDead(url) ||
+            DiscoverSourceHealth.isSearchBlocked(url)) return null
         if (DiscoverSourceHealth.isRateLimited(url)) {
-            WepWawetLogger.appDebug("$TAG: source cooling down after 429 — skipped",
-                "host" to hostOf(url))
+            DiscoverSourceHealth.noteCooldownSkipOnce(url)
             return null
         }
         val result = httpGetJsonArrayInner(url)
         if (result == null) DiscoverSourceHealth.rememberSearchFailure(url)
-        else DiscoverSourceHealth.clearSearchFailure(url)
+        else {
+            DiscoverSourceHealth.clearSearchFailure(url)
+            DiscoverSourceHealth.noteHostAlive(url)
+        }
         return result
     }
 
@@ -974,6 +1011,9 @@ object DiscoverSearch {
                         WepWawetLogger.appInfo("$TAG: source HTTP error",
                             "host" to url.take(60),
                             "code" to resp.code)
+                        if (resp.code == 404 || resp.code == 410) {
+                            DiscoverSourceHealth.noteDeadCandidate(url, "HTTP " + resp.code)
+                        }
                         null
                     }
                     else -> JSONArray(resp.body?.string() ?: return null)
@@ -1026,8 +1066,12 @@ object DiscoverSearch {
                 // hung 20s on every dead pixiv proxy candidate on every
                 // image while healthy sources sat unqueried.
                 if (DiscoverSourceHealth.isUrlFailed(candidate)) continue
-                if (DiscoverSourceHealth.isHostBlocked(candidate)) {
-                    WepWawetLogger.appDebug("$TAG: download host blocked — skipping candidate",
+                // v0.8.28: IMAGE hosts cool in their OWN short window
+                // (90 s) — the old shared 10-minute block meant one
+                // pixiv CDN timeout blocked EVERY pixiv image for ten
+                // minutes while the searches kept succeeding.
+                if (DiscoverSourceHealth.isImageBlocked(candidate)) {
+                    WepWawetLogger.appDebug("$TAG: image host cooling — skipping candidate",
                         "host" to hostOf(candidate))
                     continue
                 }
@@ -1067,6 +1111,41 @@ object DiscoverSearch {
                     }
             } catch (e: Exception) {
                 lastError = e
+                // v0.8.28: one short-backoff retry for a transient image
+                // fetch (a dropped idle connection) before the candidate
+                // chain moves on.
+                if (e is java.net.SocketTimeoutException) {
+                    try { Thread.sleep(400L) } catch (ie: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                    }
+                    try {
+                        val retry = client.newBuilder()
+                            .callTimeout(8, TimeUnit.SECONDS)
+                            .readTimeout(6, TimeUnit.SECONDS)
+                            .connectTimeout(4, TimeUnit.SECONDS)
+                            .build()
+                            .newCall(Request.Builder().url(candidate)
+                                .header("User-Agent", USER_AGENT)
+                                .apply {
+                                    val cl = candidate.lowercase()
+                                    if ("pximg.net" in cl || "pixiv.net" in cl) {
+                                        header("Referer", "https://www.pixiv.net/")
+                                    }
+                                }
+                                .build()).execute()
+                        retry.use { resp ->
+                            if (resp.isSuccessful) {
+                                val bytes = resp.body?.bytes()
+                                if (bytes != null && bytes.size > 1024) {
+                                    DiscoverSourceHealth.clearImageFailure(candidate)
+                                    return@withContext bytes
+                                }
+                            }
+                        }
+                    } catch (e2: Exception) {
+                        lastError = e2
+                    }
+                }
             }
         }
         if (!attemptedAny) {
@@ -1076,11 +1155,11 @@ object DiscoverSearch {
             DiscoverDedup.abandon(url)
             throw HostSkippedException(url)
         }
-        // v0.9.2: the failure is remembered per-URL AND per-host so the
-        // session stops paying for the same dead endpoint; the dedup
-        // handoff is dropped (the id STAYS seen — a failed image is never
-        // re-served this session).
-        DiscoverSourceHealth.markUrlFailed(url)
+        // v0.8.28: the failure is remembered per-URL (session) and the
+        // IMAGE host gets the SHORT 90 s window — the search side's
+        // health is never touched by an image download failure again.
+        DiscoverSourceHealth.rememberUrlFailedOnly(url)
+        DiscoverSourceHealth.rememberImageFailure(url)
         DiscoverDedup.abandon(url)
         throw lastError ?: IllegalStateException("Image download failed: $url")
     }

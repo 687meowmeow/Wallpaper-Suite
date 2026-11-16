@@ -328,10 +328,22 @@ fun RuleEditorScreen(
                 val gateCond = r.gate
                 if (gateCond == null) {
                     TextButton(onClick = {
+                        com.wepwawet.ui.screens.logEditor("gate condition added")
                         save { gate = RuleModel.Cond(type = RuleModel.COND_ALL) }
                     }) { Text("＋ Add a condition") }
                 } else {
-                    CondCard(cond = gateCond) { newGate -> save { gate = newGate } }
+                    CondCard(
+                        cond = gateCond,
+                        onChange = { newGate -> save { gate = newGate } },
+                        // v0.8.28: the gate trash CLEARS the gate (the old
+                        // trash replaced it with a fresh empty All — the
+                        // gate could never go back to empty).
+                        onRemove = {
+                            com.wepwawet.ui.screens.logEditor("gate condition cleared",
+                                "was" to gateCond.type)
+                            save { gate = null }
+                        },
+                    )
                 }
             }
 
@@ -367,15 +379,23 @@ fun RuleEditorScreen(
                                 if (i >= 0) {
                                     val moved = actions.removeAt(i)
                                     actions.add(j, moved)
+                                    com.wepwawet.ui.screens.logEditor("block moved",
+                                        "block" to block.type, "to" to j)
                                 }
                             }
                         },
-                        onDelete = { save { actions.removeAll { it.id == block.id } } },
+                        onDelete = {
+                            com.wepwawet.ui.screens.logEditor("block deleted",
+                                "block" to block.type)
+                            save { actions.removeAll { it.id == block.id } }
+                        },
                         onDuplicate = {
                             val copy = RuleModel.copyBlock(block)
                             save {
                                 val i = actions.indexOfFirst { it.id == block.id }
                                 if (i >= 0) actions.add(i + 1, copy)
+                                com.wepwawet.ui.screens.logEditor("block duplicated",
+                                    "block" to block.type)
                             }
                         },
                     )
@@ -401,6 +421,7 @@ fun RuleEditorScreen(
             onDismiss = { showTriggerSheet = false },
             onPick = { type ->
                 showTriggerSheet = false
+                com.wepwawet.ui.screens.logEditor("trigger added", "type" to type)
                 save { triggers.add(RuleModel.Trigger(type = type)) }
                 editingTriggerIdx = rule?.triggers?.size?.minus(1) ?: -1
             },
@@ -413,6 +434,7 @@ fun RuleEditorScreen(
                 onDismiss = { showBlockSheet = false },
                 onPick = { type ->
                     showBlockSheet = false
+                    com.wepwawet.ui.screens.logEditor("block added", "block" to type)
                     save { actions.add(newBlock(type)) }
                 },
             )
@@ -431,6 +453,8 @@ fun RuleEditorScreen(
                 trigger = current,
                 onDismiss = { editingTriggerIdx = null },
                 onDelete = {
+                    com.wepwawet.ui.screens.logEditor("trigger deleted",
+                        "type" to current.type)
                     save {
                         val i = triggers.indexOfFirst { it == current }
                         if (i >= 0) triggers.removeAt(i)

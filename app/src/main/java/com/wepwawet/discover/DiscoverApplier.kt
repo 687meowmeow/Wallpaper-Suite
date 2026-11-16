@@ -39,7 +39,7 @@ object DiscoverApplier {
     // ════════════════════════════════════════════════════════════════
 
     /**
-     * v0.10.0: the TRUE physical screen size (the whole display,
+     * v0.8.28: the TRUE physical screen size (the whole display,
      * including the system bars). The old reads used
      * displayMetrics.heightPixels — the app-window metrics, which EXCLUDE
      * system bars — so every crop computed a slightly wrong aspect and
@@ -96,7 +96,7 @@ object DiscoverApplier {
          *  exact aspect (no center-crop), just scale to screen width. */
         matchScreenAspect: Boolean = true,
     ): Bitmap {
-        // v0.10.0: the TRUE physical screen (was displayMetrics — the
+        // v0.8.28: the TRUE physical screen (was displayMetrics — the
         // app-window size without the system bars → a slightly wrong
         // aspect on every crop).
         val (screenWidth, screenHeight) = physicalScreenSize(context)
@@ -245,13 +245,15 @@ object DiscoverApplier {
     }
 
     /**
-     * v0.10.0: THE ROUTER — both screens are served by the app's own live
-     * wallpaper; WallpaperManager.setBitmap is GONE from normal operation
-     * (every call installed a NEW system wallpaper — a new
-     * WallpaperManager ID — filling the OnePlus "Wallpaper & style" list
-     * with entries, and it REPLACED the live wallpaper, stopping the
-     * playlist and rules). The bitmaps are saved to a small ring and
-     * loaded by the engines of the ON screens.
+     * v0.8.28 (THE LOCK-ONLY FIX): the apply goes to EXACTLY the screens
+     * that are on, and each screen's result comes ONLY from that
+     * screen's own router outcome.
+     *
+     * The old logic sent the home bitmap only when home was on and the
+     * lock bitmap only when a SEPARATE lock bitmap existed — so Home
+     * off + Lock on + one shared bitmap applied NOTHING and still
+     * reported lock_ok = home_ok (a lie the log exposed: the router said
+     * lock_ok=false, DiscoverScreen reported lock_ok=true).
      */
     suspend fun apply(
         context: Context,
@@ -259,23 +261,42 @@ object DiscoverApplier {
         homeOn: Boolean,
         lockOn: Boolean,
         lockBitmap: Bitmap? = null,
+        sourcePath: String? = null,
     ): ApplyResult = withContext(Dispatchers.IO) {
-        val target = when {
-            homeOn && lockOn -> "both"
-            homeOn -> "home"
-            lockOn -> "lock"
-            else -> "none"
+        val router = com.wepwawet.wallpaper.WallpaperRouter
+        val homeOk: Boolean
+        val lockOk: Boolean
+        when {
+            homeOn && lockOn && lockBitmap == null -> {
+                // Both on, ONE image: a single both-target apply.
+                val o = router.applyBitmap(context, bitmap, "both", sourcePath)
+                homeOk = o.homeOk
+                lockOk = o.lockOk
+            }
+            homeOn && lockOn -> {
+                // Both on with SEPARATE images: one apply per screen.
+                val oh = router.applyBitmap(context, bitmap, "home", sourcePath)
+                val ol = router.applyBitmap(context, lockBitmap ?: bitmap, "lock", sourcePath)
+                homeOk = oh.homeOk
+                lockOk = ol.lockOk
+            }
+            homeOn -> {
+                val o = router.applyBitmap(context, bitmap, "home", sourcePath)
+                homeOk = o.homeOk
+                lockOk = false
+            }
+            lockOn -> {
+                val o = router.applyBitmap(
+                    context, lockBitmap ?: bitmap, "lock", sourcePath)
+                homeOk = false
+                lockOk = o.lockOk
+            }
+            else -> {
+                // Both off: nothing anywhere (the router would say why).
+                homeOk = false
+                lockOk = false
+            }
         }
-        val homeOutcome = if (homeOn) {
-            com.wepwawet.wallpaper.WallpaperRouter.applyBitmap(context, bitmap, target)
-        } else null
-        // both → one image on both screens (the router writes the same
-        // path to both); a separate lock bitmap only applies to lock.
-        val lockOutcome = if (lockOn && lockBitmap != null) {
-            com.wepwawet.wallpaper.WallpaperRouter.applyBitmap(context, lockBitmap, "lock")
-        } else null
-        val homeOk = homeOutcome?.allOk ?: (lockOutcome?.allOk ?: false)
-        val lockOk = if (lockBitmap != null) (lockOutcome?.allOk ?: false) else homeOk
         WepWawetLogger.appInfo("$TAG: apply result",
             "home_ok" to homeOk,
             "lock_ok" to lockOk,
@@ -294,10 +315,11 @@ object DiscoverApplier {
         homeState: Int,
         lockState: Int,
         lockBitmap: Bitmap? = null,
+        sourcePath: String? = null,
     ): ApplyResult {
         val homeOn = DiscoverPrefs.homeRequired(homeState)
         val lockOn = DiscoverPrefs.lockRequired(lockState)
-        return apply(context, bitmap, homeOn, lockOn, lockBitmap)
+        return apply(context, bitmap, homeOn, lockOn, lockBitmap, sourcePath)
     }
 
     // ════════════════════════════════════════════════════════════════

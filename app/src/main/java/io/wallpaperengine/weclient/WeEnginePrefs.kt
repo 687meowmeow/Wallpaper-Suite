@@ -56,7 +56,7 @@ object WeEnginePrefs {
     const val PREF_KEY_HAS_SHOWN_ALIGN_OVERLAY = "hasShownAlignOverlay"
     const val PREF_KEY_HAS_SHOWN_LOCKSCREEN_WARNING = "hasShownLockscreenWarning"
 
-    // ═══ v0.10.0 (per-screen selected wallpapers) ═════════════════════
+    // ═══ v0.8.28 (per-screen selected wallpapers) ═════════════════════
     // One selection PER SCREEN: the home engine loads HOME, the lock engine
     // loads LOCK. An apply that targets one screen never touches the other
     // — exactly the user's toggle model (turn one off, set, turn it on,
@@ -688,13 +688,11 @@ object WeEnginePrefs {
      * entry on every apply.
      */
     fun isOurLiveWallpaperActive(context: Context): Boolean {
-        return try {
-            val info = WallpaperManager.getInstance(context).wallpaperInfo ?: return false
-            info.component.packageName == context.packageName &&
-                info.component.className == WEWallpaperService::class.java.name
-        } catch (t: Throwable) {
-            false
-        }
+        // v0.8.28: routed through the router's ENGINE ground truth — the
+        // old WallpaperManager.wallpaperInfo check was HOME-ONLY and
+        // answered false when a lock-only engine was all we had.
+        return com.wepwawet.wallpaper.WallpaperRouter.ourLiveOnHome(context) ||
+            com.wepwawet.wallpaper.WallpaperRouter.ourLiveOnLock(context)
     }
 
     /**
@@ -717,50 +715,61 @@ object WeEnginePrefs {
      *   official client after imports).
      * @return true when the wallpaper was applied without the picker.
      */
-    fun callApplyWallpaper(
+    /**
+     * v0.8.28: THE ROUTER — this was the fourth apply path the rework
+     * missed (Preview's scene/video path). It wrote the old single
+     * selection key, used a home-only active check, called the old
+     * reload with no confirmation, returned true with both toggles off,
+     * and opened the system picker without any of the router's checks.
+     * Now: toggles → router apply (engine-confirmed, honest); the
+     * one-tap prompt only when an ON screen is not covered.
+     *
+     * @return true when the apply happened WITHOUT the picker; false
+     *   when the prompt was opened (or nothing was on).
+     */
+    suspend fun callApplyWallpaper(
         context: Context,
         wallpaper: WallpaperInfoSparse,
         forceOpenPicker: Boolean,
     ): Boolean {
-        // v0.10.0: PER-SCREEN writes — only the screens the Home/Lock
-        // toggles have ON get the new image; an off screen keeps exactly
-        // what it has. (The legacy single key is kept in sync for the
-        // delete/active checks below.)
-        storeString(context, PREF_KEY_SELECTED_WALLPAPER, wallpaper.filePath)
         val screens = com.wepwawet.discover.DiscoverPrefs.readScreens(context)
         val homeOn = com.wepwawet.discover.DiscoverPrefs.homeRequired(screens.first)
         val lockOn = com.wepwawet.discover.DiscoverPrefs.lockRequired(screens.second)
-        if (homeOn) writeSelectedForScreen(context, "home", wallpaper.filePath)
-        if (lockOn) writeSelectedForScreen(context, "lock", wallpaper.filePath)
-        val service = WEWallpaperService.instance
-        if (!forceOpenPicker && service != null && service.isLiveWallpaperActive) {
-            service.requestWallpaperReload()
-            return true
+        if (!homeOn && !lockOn) {
+            // Both toggles off: NOTHING changes — the old code still
+            // wrote the selection and returned true.
+            WepWawetLogger.appWarn("Apply: both screens are off — nothing changed",
+                "file" to wallpaper.filePath.takeLast(56))
+            return false
         }
-        if (!forceOpenPicker && isOurLiveWallpaperActive(context)) {
-            // Our engine is the active live wallpaper but the in-process
-            // instance isn't reachable right now (e.g. the process was just
-            // restarted and the system hasn't re-bound the service yet).
-            // The stored selection above IS the change — the engine loads
-            // it on its next onCreate/reload cycle. Try the in-process poke
-            // once anyway (harmless when the engine is null).
-            WepWawetLogger.engine(
-                "Apply: our live wallpaper already active — swapping content in place",
-                "file" to wallpaper.filePath,
-                "engine_running" to (service != null))
-            service?.requestWallpaperReload()
-            return true
+        val router = com.wepwawet.wallpaper.WallpaperRouter
+        if (!forceOpenPicker) {
+            val homeCovered = !homeOn || router.ourLiveOnHome(context)
+            val lockCovered = !lockOn || router.ourLiveOnLock(context)
+            if (homeCovered && lockCovered) {
+                val target = if (homeOn && lockOn) "both"
+                else if (homeOn) "home" else "lock"
+                val o = router.applyPath(context, wallpaper.filePath, target)
+                if (o.allOk) return true
+                // The router already logged the honest reason (blocked
+                // shared engine, failed load, …) — fall through to the
+                // prompt only when coverage is the problem.
+                if (homeCovered && lockCovered) return false
+            }
         }
-        val intent = Intent("android.service.wallpaper.CHANGE_LIVE_WALLPAPER")
-        intent.putExtra(
-            "android.service.wallpaper.extra.LIVE_WALLPAPER_COMPONENT",
-            ComponentName(context, WEWallpaperService::class.java),
-        )
+        // Not covered on an ON screen: the ONE-TAP prompt.
+        val intent = router.setLiveWallpaperIntent(context)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         return try {
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(intent)
+            WepWawetLogger.appInfo("Apply: one-tap live-wallpaper prompt opened",
+                "file" to wallpaper.filePath.takeLast(56))
             false
         } catch (e: Exception) {
+            // v0.8.28: errors are NEVER swallowed silently — the caller
+            // sees false and the log says why.
+            WepWawetLogger.appError("Apply: could not open the live-wallpaper prompt",
+                "exception" to (e.message ?: e.javaClass.name))
             false
         }
     }

@@ -69,7 +69,7 @@ class VideoWallpaperView(context: Context) :
     companion object {
         private const val GL_TEXTURE_EXTERNAL_OES = 36197
 
-        /** v0.10.0: image decodes leave the main thread (one at a time). */
+        /** v0.8.28: image decodes leave the main thread (one at a time). */
         private val decodeExecutor =
             java.util.concurrent.Executors.newSingleThreadExecutor { r ->
                 Thread(r, "wallpaper-image-decode").apply { isDaemon = true }
@@ -262,6 +262,8 @@ class VideoWallpaperView(context: Context) :
     private var isLocalPlayer: Boolean = false
     private var customHandler: Handler? = null
     private var loadCallback: Runnable? = null
+    /** v0.8.28: content failed to load — the engine confirms FALSE. */
+    private var failCallback: Runnable? = null
     private var bitmapCallback: ((Bitmap?) -> Unit)? = null
     private var isLoaded: Boolean = false
     private var isPaused: Boolean = false
@@ -301,7 +303,7 @@ class VideoWallpaperView(context: Context) :
     private var updateSurface: Boolean = false
     private var surfaceTexture: SurfaceTexture? = null
 
-    // ═══ v0.10.0 (smooth changes) ════════════════════════════════════
+    // ═══ v0.8.28 (smooth changes) ════════════════════════════════════
     // Every reload fades the NEW content in over the old frame (350ms):
     //  • images/GIFs ALSO cross-fade at the Canvas layer (old bitmap kept
     //    inside the drawable, blended into the SurfaceTexture) — a
@@ -633,7 +635,7 @@ class VideoWallpaperView(context: Context) :
             GLES30.glUniformMatrix4fv(mvpMatrixHandle, 1, false, mvpMatrixPrlxCpy, 0)
         }
 
-        // v0.10.0: fade-in — blend the new quad over the OLD frame and
+        // v0.8.28: fade-in — blend the new quad over the OLD frame and
         // skip the clear while fading (the old frame shows through).
         val fading = shaderFade < 0.999f
         if (fading) {
@@ -804,26 +806,39 @@ class VideoWallpaperView(context: Context) :
         isLoaded = false
         currentFile = file
 
-        val type = try {
-            context.contentResolver.getType(Uri.parse(file))?.lowercase(Locale.ROOT) ?: ""
-        } catch (e: Exception) {
-            ""
-        }
-        val isGif = type.startsWith("image/gif")
-        // v0.10.0: the outgoing IMAGE drawable hands its bitmap to the new
+        // v0.8.28 (THE PLAIN-PATH FIX): contentResolver.getType answers
+        // null for every non-content path — every router_applied jpg and
+        // rule_picks img fell into the VIDEO branch and prepare() failed
+        // (0x1). The kind now comes from the file's HEADER BYTES, which
+        // work for content URIs, file URIs and bare absolute paths alike
+        // (and never trust the extension).
+        val kind = io.wallpaperengine.weutil.WallpaperFile.sniff(context, file)
+        val isPackage = isLocalPlayer.not() && kind == io.wallpaperengine.weutil.WallpaperFile.Kind.ZIP_PACKAGE
+        val isGif = kind == io.wallpaperengine.weutil.WallpaperFile.Kind.GIF
+        // v0.8.28: the outgoing IMAGE drawable hands its bitmap to the new
         // one — the Canvas cross-fade blends old → new inside the texture.
         val previousImage = wallpaperView as? WallpaperImageDrawable
         val previousBitmap = previousImage?.snapshotBitmapForFade()
         wallpaperView = when {
             isGif -> WallpaperGifDrawable()
-            type.startsWith("image/") -> WallpaperImageDrawable(previousBitmap)
+            kind == io.wallpaperengine.weutil.WallpaperFile.Kind.IMAGE ->
+                WallpaperImageDrawable(previousBitmap)
             else -> VideoDrawable()
         }
         WepWawetLogger.engine("VideoView: drawable chosen",
-            "mime" to (if (type.isEmpty()) "(package)" else type),
+            "kind" to kind.name,
+            "is_package" to isPackage,
             "drawable" to (wallpaperView?.javaClass?.simpleName ?: "(none)"),
             "local_player" to isLocalPlayer,
             "crossfade_from_previous" to (previousBitmap != null))
+        // v0.8.28: an IMAGE/GIF the sniffer could not even READ never
+        // becomes a stuck "loading" — it fails the load honestly.
+        if (!isPackage && kind == io.wallpaperengine.weutil.WallpaperFile.Kind.OTHER) {
+            WepWawetLogger.engineError("VideoView: unreadable file — failing the load",
+                "file" to file.takeLast(56))
+            getActiveHandler()?.post { failCallback?.run() }
+            return
+        }
         wallpaperView?.load(file)
 
         val defaults = Property.fromJson(PropertyList.defaultVideoProperties)
@@ -850,7 +865,7 @@ class VideoWallpaperView(context: Context) :
         } else {
             wallpaperView?.play()
         }
-        // v0.10.0: "loaded" now means CONTENT READY. Images/GIFs decode on
+        // v0.8.28: "loaded" now means CONTENT READY. Images/GIFs decode on
         // the background decode executor and call [completeLoad] when the
         // first frame is in the texture; videos finish [VideoDrawable.load]
         // synchronously (MediaPlayer.prepare blocks) so they complete here.
@@ -1178,6 +1193,10 @@ class VideoWallpaperView(context: Context) :
         loadCallback = runnable
     }
 
+    override fun setLoadFailedCallback(runnable: Runnable?) {
+        failCallback = runnable
+    }
+
     private fun updateParallaxOffsets() {
         if (parallaxMaxDistance != 0.0f || surfaceWidth <= 0) return
         if ((alignmentMode == WallpaperProperties.VALUE_COVER_INDEX ||
@@ -1282,7 +1301,7 @@ class VideoWallpaperView(context: Context) :
         }
 
         override fun load(file: String) {
-            // v0.10.0: decode on the BACKGROUND executor (the old path
+            // v0.8.28: decode on the BACKGROUND executor (the old path
             // decoded a full-resolution image on the engine handler — a
             // main-thread stall for every wallpaper change), sized to the
             // screen (no 12 MP bitmaps in memory), then post back.
@@ -1303,17 +1322,27 @@ class VideoWallpaperView(context: Context) :
                         rect.bottom = bmp.height
                         startFadeOrDraw()
                         completeLoad()
+                    } else {
+                        // v0.8.28: a decode failure is a LOAD FAILURE —
+                        // never a silent "loaded with nothing to show".
+                        WepWawetLogger.engineError("VideoView: image decode failed — failing the load",
+                            "file" to file.takeLast(56))
+                        failCallback?.run()
                     }
                 }
             }
         }
 
-        /** Screen-sized decode (sampling hint, ≤2160px) — background thread. */
+        /**
+         * Screen-sized decode (sampling hint, ≤2160px) — background
+         * thread. v0.8.28: opens through [io.wallpaperengine.weutil.
+         * WallpaperFile] — content URIs, file URIs AND bare absolute
+         * paths (the resolver alone cannot open a plain path).
+         */
         private fun decodeForScreen(file: String): Bitmap? {
             return try {
-                val resolver = context.contentResolver
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                resolver.openInputStream(Uri.parse(file))?.use {
+                io.wallpaperengine.weutil.WallpaperFile.open(context, file)?.use {
                     BitmapFactory.decodeStream(it, null, bounds)
                 }
                 if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
@@ -1323,7 +1352,7 @@ class VideoWallpaperView(context: Context) :
                     var sample = 1
                     while (maxOf(bounds.outWidth, bounds.outHeight) / sample > maxDim) sample *= 2
                     val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-                    resolver.openInputStream(Uri.parse(file))?.use {
+                    io.wallpaperengine.weutil.WallpaperFile.open(context, file)?.use {
                         BitmapFactory.decodeStream(it, null, opts)
                     }
                 }
@@ -1442,11 +1471,20 @@ class VideoWallpaperView(context: Context) :
         }
 
         override fun load(file: String) {
-            // v0.10.0: GIF decode also leaves the main thread.
+            // v0.8.28: GIF decode also leaves the main thread.
             val st = surfaceTexture ?: return
             decodeExecutor.execute {
                 val decoded = try {
-                    val source = ImageDecoder.createSource(context.contentResolver, Uri.parse(file))
+                    // v0.8.28: plain paths need the File source, content
+                    // URIs the resolver source — the resolver alone
+                    // cannot open a bare path.
+                    val source = if (file.startsWith("content://")) {
+                        ImageDecoder.createSource(context.contentResolver, Uri.parse(file))
+                    } else {
+                        val f = if (file.startsWith("file://"))
+                            File(Uri.parse(file).path ?: file) else File(file)
+                        ImageDecoder.createSource(f)
+                    }
                     ImageDecoder.decodeDrawable(source)
                 } catch (t: Throwable) {
                     WepWawetLogger.engineWarn("VideoView: gif decode failed",
@@ -1455,7 +1493,13 @@ class VideoWallpaperView(context: Context) :
                     null
                 }
                 getActiveHandler()?.post {
-                    if (destroyed || decoded == null) return@post
+                    if (destroyed) return@post
+                    if (decoded == null) {
+                        WepWawetLogger.engineError("VideoView: gif decode failed — failing the load",
+                            "file" to file.takeLast(56))
+                        failCallback?.run()
+                        return@post
+                    }
                     drawable = decoded
                     decoded.callback = gifCallback
                     st.setDefaultBufferSize(decoded.minimumWidth, decoded.minimumHeight)
@@ -1528,14 +1572,16 @@ class VideoWallpaperView(context: Context) :
                 // visible in the logs, not a silent return.
                 val engineLib = lib
                 if (engineLib == null) {
-                    WepWawetLogger.engineWarn("VideoView: SceneLib is NULL — cannot open package video (this is a bug; setLib was never called)",
+                    WepWawetLogger.engineError("VideoView: SceneLib is NULL — cannot open package video (this is a bug; setLib was never called)",
                         "file" to file)
+                    failCallback?.run()
                     return
                 }
                 val range = engineLib.getWallpaperFileVirtualOffset(file)
                 if (range == null) {
-                    WepWawetLogger.engineWarn("VideoView: no video byte range in package — not a video wallpaper?",
+                    WepWawetLogger.engineError("VideoView: no video byte range in package — not a video wallpaper?",
                         "file" to file)
+                    failCallback?.run()
                     return
                 }
                 WepWawetLogger.engine("VideoView: opening package video",
@@ -1564,8 +1610,13 @@ class VideoWallpaperView(context: Context) :
                     "width" to video.videoWidth,
                     "height" to video.videoHeight)
             } catch (t: Throwable) {
-                WepWawetLogger.engineWarn("VideoView: prepare failed — video will not play",
+                // v0.8.28: prepare failing (e.g. status 0x1 on a file the
+                // old mime check misrouted into this branch) is a LOAD
+                // FAILURE, raised to ERROR — the old path logged a warning
+                // and the engine still confirmed the apply as OK.
+                WepWawetLogger.engineError("VideoView: video prepare FAILED — the load fails",
                     "exception" to (t.message ?: t.javaClass.name))
+                failCallback?.run()
             }
         }
 

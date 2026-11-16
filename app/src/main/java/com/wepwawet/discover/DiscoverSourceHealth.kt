@@ -52,6 +52,23 @@ object DiscoverSourceHealth {
     private val hostCoolingUntil = HashMap<String, Long>()
     /** The search side's older behavior: any failure skips the host 10 min. */
     private val searchFailureUntil = HashMap<String, Long>()
+
+    // ═══ v0.8.28 (field-reported health bugs) ═══════════════════════
+    /** IMAGE hosts cool separately from SEARCH sources — a pixiv CDN
+     *  timeout must never block searches (they kept succeeding) NOR
+     *  block every pixiv image for 10 minutes: 90 s windows here. */
+    private val imageFailureUntil = HashMap<String, Long>()
+    private const val IMAGE_BLOCK_MS = 90_000L
+
+    /** A source that failed 3× in a row (dead DNS, dead endpoint) is
+     *  DISABLED for the session — retrying api.yetal.ml 4× in a tenth of
+     *  a second was pure log spam. */
+    private val deadHosts = HashMap<String, Int>()
+    private val deadHostCounts = HashMap<String, Int>()
+    private val deadReasons = HashMap<String, String>()
+
+    /** v0.8.28: the cooldown-skip log fires ONCE per cooldown window. */
+    private val notedCooldownSkips = HashSet<String>()
     /** v0.8.25 (Nyanpasu merge): per-host latency EWMA (ms) + reliability EWMA. */
     private val hostLatencyEwma = HashMap<String, Double>()
     private val hostReliabilityEwma = HashMap<String, Double>()
@@ -61,6 +78,12 @@ object DiscoverSourceHealth {
         url.substringAfter("//").substringBefore('/')
 
     // ── Failed URLs ─────────────────────────────────────────────────────
+
+    /** v0.8.28: mark ONLY the URL (an image download failure must not
+     *  block the SEARCH side's host health). */
+    fun rememberUrlFailedOnly(url: String) {
+        failedUrls.add(url)
+    }
 
     fun markUrlFailed(url: String) {
         failedUrls.add(url)
@@ -86,6 +109,11 @@ object DiscoverSourceHealth {
         hostLatencyEwma.clear()
         hostReliabilityEwma.clear()
         hostSamples.clear()
+        imageFailureUntil.clear()
+        deadHosts.clear()
+        deadHostCounts.clear()
+        deadReasons.clear()
+        notedCooldownSkips.clear()
     }
 
     /** v0.8.25 (Nyanpasu merge): a success with its observed latency. */
@@ -185,6 +213,61 @@ object DiscoverSourceHealth {
     fun clearSearchFailure(url: String) {
         searchFailureUntil.remove(hostOf(url))
         markHostOk(url)
+    }
+
+    // ── v0.8.28: image-host health (separate from search) ───────────────
+
+    fun rememberImageFailure(url: String) {
+        imageFailureUntil[hostOf(url)] = System.currentTimeMillis() + IMAGE_BLOCK_MS
+    }
+
+    fun isImageBlocked(url: String): Boolean =
+        System.currentTimeMillis() < (imageFailureUntil[hostOf(url)] ?: 0L)
+
+    fun clearImageFailure(url: String) {
+        imageFailureUntil.remove(hostOf(url))
+    }
+
+    // ── v0.8.28: dead sources (auto-disabled for the session) ───────────
+
+    /** A 3rd consecutive failure disables the host for the session. */
+    fun noteDeadCandidate(url: String, reason: String) {
+        val host = hostOf(url)
+        val n = (deadHostCounts[host] ?: 0) + 1
+        deadHostCounts[host] = n
+        deadReasons[host] = reason
+        if (n >= 3) {
+            if (host !in deadHosts) {
+                deadHosts[host] = 1
+                WepWawetLogger.appWarn("$TAG: source DISABLED for this session",
+                    "host" to host,
+                    "reason" to reason,
+                    "consecutive_failures" to n)
+            }
+        }
+    }
+
+    fun isDead(url: String): Boolean = hostOf(url) in deadHosts
+
+    fun noteHostAlive(url: String) {
+        deadHostCounts.remove(hostOf(url))
+    }
+
+    /** The settings screen's status line for a source's endpoint host. */
+    fun statusLineFor(url: String): String = when {
+        hostOf(url) in deadHosts ->
+            "offline — auto-disabled this session (" + (deadReasons[hostOf(url)] ?: "?") + ")"
+        else -> ""
+    }
+
+    /** Once-per-cooldown skip logging (the 0.8.28 log had 422 of them). */
+    fun noteCooldownSkipOnce(url: String): Boolean {
+        val host = hostOf(url)
+        if (host in notedCooldownSkips) return false
+        notedCooldownSkips.add(host)
+        WepWawetLogger.appInfo("$TAG: source cooling down — skipped until the window ends",
+            "host" to host)
+        return true
     }
 
     // ── 429 cool-downs (Retry-After honoured) ───────────────────────────

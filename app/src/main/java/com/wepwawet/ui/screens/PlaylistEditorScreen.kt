@@ -320,6 +320,11 @@ fun PlaylistEditorScreen(
                     start = 16.dp, end = 16.dp, top = 10.dp, bottom = 32.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
+                // v0.8.28: the live-wallpaper banner (coverage +
+                // shared-engine split advice) on every apply-capable screen.
+                item(key = "live-wallpaper-banner") {
+                    com.wepwawet.ui.components.LiveWallpaperPromptBanner()
+                }
                 // ═══════════════ WALLPAPERS ═══════════════
                 item(key = "wallpapers-header") {
                     Row(
@@ -444,7 +449,7 @@ fun PlaylistEditorScreen(
                             )
                         }
                     }
-                    // v0.10.0 (THE SILENT INACTIVE PLAYLIST): a permanent,
+                    // v0.8.28 (THE SILENT INACTIVE PLAYLIST): a permanent,
                     // clearly visible banner on any playlist that is not
                     // the active one — the old journal-only note was easy
                     // to miss, so a rule built here silently did nothing.

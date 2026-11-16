@@ -352,7 +352,7 @@ object EngineLibrary {
                 } else {
                     val file = File(context.filesDir, info.filePath)
                     if (file.exists()) deletedMain = file.delete()
-                    // v0.10.0: clear whichever SCREEN selection pointed at
+                    // v0.8.28: clear whichever SCREEN selection pointed at
                     // it (either or both); the playlist/default logic
                     // re-picks on the next reload.
                     for (screen in listOf("home", "lock")) {
@@ -441,7 +441,7 @@ object EngineLibrary {
     // Selection
     // =====================================================================
 
-    /** v0.10.0: the HOME screen's selection (the rotation owner's). */
+    /** v0.8.28: the HOME screen's selection (the rotation owner's). */
     fun getSelectedWallpaper(context: Context): String? =
         WeEnginePrefs.readSelectedForScreen(context, "home")
 

@@ -186,9 +186,30 @@ fun LogsScreen(onBack: () -> Unit) {
                         } else {
                             engineLog.readText()
                         }
+                        // v0.8.28: the engine tail is LABELED WITH ITS AGE.
+                        // The field log carried a six-day-old tail appended
+                        // right after the current session — indistinguish-
+                        // able from today's engine output.
+                        val lastModified = engineLog.lastModified()
+                        val ageMs = System.currentTimeMillis() - lastModified
+                        val ageLabel = if (ageMs < 24 * 3600_000L) {
+                            "current — last written " +
+                                java.text.SimpleDateFormat(
+                                    "yyyy-MM-dd HH:mm", java.util.Locale.ROOT)
+                                    .format(java.util.Date(lastModified))
+                        } else {
+                            ("STALE — last written " +
+                                java.text.SimpleDateFormat(
+                                    "yyyy-MM-dd HH:mm", java.util.Locale.ROOT)
+                                    .format(java.util.Date(lastModified)) +
+                                " (" + (ageMs / 86400_000L) + " days ago) — " +
+                                "NOT from this session")
+                        }
                         sb.append("\n=== Engine log (tail of ")
                             .append(engineLog.absolutePath)
-                            .append(") ===\n")
+                            .append(") — ")
+                            .append(ageLabel)
+                            .append(" ===\n")
                         sb.append(text)
                         sb.append("\n=== end of engine log ===\n")
                     }

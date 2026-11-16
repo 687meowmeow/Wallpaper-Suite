@@ -53,7 +53,7 @@ object RuleEngine {
     class RunContext(
         val playlistId: String,
         val manual: Boolean,
-        /** v0.10.0: the running rule id (wait persistence keys on it). */
+        /** v0.8.28: the running rule id (wait persistence keys on it). */
         val ruleId: String = "",
         /** blockId → highlight-until epoch ms (the editor animates these). */
         val highlights: MutableMap<String, Long> = HashMap(),
@@ -75,7 +75,7 @@ object RuleEngine {
     /** Control flow result of a block/stack execution. */
     enum class Flow { CONTINUE, STOPPED }
 
-    /** v0.10.0: how many rule Discover picks stay on disk (newest kept). */
+    /** v0.8.28: how many rule Discover picks stay on disk (newest kept). */
     private const val RULE_PICKS_LIMIT = 5
 
     /** v0.8.26: playlists already journaled as not-active this session. */
@@ -96,7 +96,7 @@ object RuleEngine {
      * and the editor's play button all end up here. Time triggers arrive
      * as events too (the hub computes their wakes).
      */
-    // ═══ v0.10.0: EVENT-RUN MACHINERY ═══════════════════════════════
+    // ═══ v0.8.28: EVENT-RUN MACHINERY ═══════════════════════════════
     // The user's demands, made real:
     //  • rules of one playlist run ONE AT A TIME (a screen-on and an
     //    unlock arriving together used to run their rules concurrently —
@@ -151,7 +151,7 @@ object RuleEngine {
         lastEventRunAt["$playlistId|$type"] = now
     }
 
-    // ═══ v0.10.0: persistent waits across process death ══════════════
+    // ═══ v0.8.28: persistent waits across process death ══════════════
     // A Wait block used to hold a plain coroutine — lost when OnePlus
     // killed the process; the rest of the rule never ran. Now the
     // remaining wait is persisted at wait START; on the next process
@@ -291,10 +291,11 @@ object RuleEngine {
 
     suspend fun onEvent(context: Context, type: String, extra: Map<String, String> = emptyMap()) {
         val all = SuiteRulesStore.readAll(context)
-        // v0.10.0: the decision log lives BEFORE any early return — an
+        // v0.8.28: the decision log lives BEFORE any early return — an
         // event with no rule sets says so (a log alone must tell a
         // broadcast that never arrived from a rule that did not run).
-        val activeId = if (all.isEmpty()) "" else SuitePlaylistStore.activePlaylistId(context)
+        val activeId = if (all.isEmpty()) ""
+        else SuitePlaylistStore.resolveActiveId(context)
         WepWawetLogger.appInfo("$TAG: event received",
             "event" to type,
             "rule_sets" to all.size,
@@ -302,7 +303,7 @@ object RuleEngine {
             "extra_keys" to extra.keys.joinToString(","))
         if (all.isEmpty()) return
         for (pr in all) {
-            // v0.10.0: same-type events inside the window join the run in
+            // v0.8.28: same-type events inside the window join the run in
             // progress instead of starting a duplicate.
             val nowMs = System.currentTimeMillis()
             if (coalescedRecently(pr.playlistId, type, nowMs)) {
@@ -352,7 +353,7 @@ object RuleEngine {
                         "rule" to rule.name, "event" to type)
                     continue
                 }
-                // Cooldown — v0.10.0: stamped at run START (below), so a
+                // Cooldown — v0.8.28: stamped at run START (below), so a
                 // long-running rule can never be started twice by events
                 // that arrive while it runs.
                 if (rule.cooldownMinutes > 0 &&
@@ -376,7 +377,7 @@ object RuleEngine {
                         "Conditions not met (event: $type)")
                     continue
                 }
-                // v0.10.0: the cooldown is stamped the moment the run
+                // v0.8.28: the cooldown is stamped the moment the run
                 // starts, BEFORE the blocks execute.
                 if (rule.cooldownMinutes > 0) {
                     SuiteRulesStore.stampLastFiredAt(context, pr.playlistId, rule)
@@ -392,7 +393,7 @@ object RuleEngine {
                     "Failed: ${e.message ?: e.javaClass.simpleName}"
                 }
                 firedThisPlaylist.append("${rule.name} → $result; ")
-                // v0.10.0 (first-match-wins, FIXED): a rule whose actions
+                // v0.8.28 (first-match-wins, FIXED): a rule whose actions
                 // FAILED or did nothing no longer blocks the later rules —
                 // only a rule that actually did its job wins the match.
                 val didSomething = result.contains("applied") ||
@@ -877,7 +878,7 @@ object RuleEngine {
                     flow
                 }
                 RuleModel.BLOCK_WAIT -> {
-                    // v0.10.0 (THE WAIT THAT SURVIVES DEATH): the remaining
+                    // v0.8.28 (THE WAIT THAT SURVIVES DEATH): the remaining
                     // wait is PERSISTED at wait start (resumeAt); if the
                     // process dies, resumePendingWaits/onWaitAlarm re-runs
                     // the rule's REMAINING blocks after the remaining time.
@@ -1054,7 +1055,7 @@ object RuleEngine {
                 "group" -> candidatesFor(context, ctx, b.copy(type = RuleModel.BLOCK_PICK_GROUP))
                 "playlist" -> candidatesFor(context, ctx, b.copy(type = RuleModel.BLOCK_PICK_PLAYLIST))
                 "discover" -> {
-                    // v0.10.0: the PRELOADED Discover queue first — a
+                    // v0.8.28: the PRELOADED Discover queue first — a
                     // screen-on or unlock rotation pops an already-
                     // downloaded image (instant, offline-safe). The live
                     // search + download only runs when the queue is empty.
@@ -1126,7 +1127,7 @@ object RuleEngine {
 
 
     /**
-     * v0.10.0: write a rule Discover pick into filesDir/rule_picks, keeping
+     * v0.8.28: write a rule Discover pick into filesDir/rule_picks, keeping
      * only the newest [RULE_PICKS_LIMIT] files — the old path wrote a full
      * image per pick and NEVER deleted any (storage grew forever).
      */
@@ -1135,10 +1136,24 @@ object RuleEngine {
             val dir = java.io.File(context.filesDir, "rule_picks").apply { mkdirs() }
             val f = java.io.File(dir, "pick_${System.currentTimeMillis()}.img")
             f.writeBytes(bytes)
+            // v0.8.28: the ring keeps only the newest picks, but NEVER
+            // deletes a file a screen selection, playlist, or rule still
+            // references — a screen can hold an older pick for a long
+            // time while the other screen's applies push it out of the
+            // ring (the deleted file broke the next screen-on load).
             dir.listFiles()
                 ?.sortedBy { it.name }
                 ?.dropLast(RULE_PICKS_LIMIT)
-                ?.forEach { runCatching { it.delete() } }
+                ?.forEach { candidate ->
+                    if (com.wepwawet.wallpaper.WallpaperRouter
+                            .isPathReferenced(context, candidate.absolutePath)
+                    ) {
+                        WepWawetLogger.appInfo("$TAG: rule_picks ring kept a REFERENCED file",
+                            "file" to candidate.name)
+                        return@forEach
+                    }
+                    runCatching { candidate.delete() }
+                }
             f.absolutePath
         } catch (e: Exception) {
             WepWawetLogger.appWarn("$TAG: rule pick write failed",
@@ -1214,7 +1229,7 @@ object RuleEngine {
      * keeps it — the editor still offers per-block choices.
      */
     fun resolvedTarget(context: Context, target: String): String {
-        // v0.10.0: the saved rule's own target wins, with the LEGACY
+        // v0.8.28: the saved rule's own target wins, with the LEGACY
         // bothDifferent folded into "both" (dual mode is gone — the
         // toggles are the single screen model now).
         if (target.isNotEmpty()) return if (target == "bothDifferent") "both" else target
@@ -1225,7 +1240,7 @@ object RuleEngine {
             home && lock -> "both"
             home -> "home"
             lock -> "lock"
-            // v0.10.0: both toggles off → NOTHING changes. The old code
+            // v0.8.28: both toggles off → NOTHING changes. The old code
             // applied to both screens here — exactly backwards. A manual
             // run gets the honest reason ("both screens are switched
             // off") instead of an unwanted apply.
@@ -1269,7 +1284,7 @@ object RuleEngine {
     /**
      * Apply one picked path to the target screen(s) — THE ONE PATH.
      *
-     * v0.10.0 (research-corrected): the old home path silently "succeeded"
+     * v0.8.28 (research-corrected): the old home path silently "succeeded"
      * the moment it poked the service (a null-safe no-op when no engine
      * was attached), and the lock path called WallpaperManager.setBitmap
      * — every setBitmap installs a NEW system wallpaper (a new

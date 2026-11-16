@@ -60,7 +60,7 @@ class WEWallpaperService : WallpaperService() {
 
     private var screenRotation: Int = 0
 
-    // ═══ v0.10.0: ONE ENGINE PER SCREEN ══════════════════════════════
+    // ═══ v0.8.28: ONE ENGINE PER SCREEN ══════════════════════════════
     // Android creates one engine per screen our live wallpaper owns
     // (Engine.getWallpaperFlags(), API 34+: FLAG_SYSTEM = home,
     // FLAG_LOCK = lock). The old single currentEngine pointer meant the
@@ -77,6 +77,41 @@ class WEWallpaperService : WallpaperService() {
     private val rotationOwner: GLWallpaperEngine?
         get() = homeEngine ?: sharedEngine ?: lockEngine
 
+    /**
+     * v0.8.28: the ENGINE TOPOLOGY — the ground truth for every
+     * per-screen decision. A "both at once" set gives ONE shared engine
+     * (flags = SYSTEM|LOCK): one surface, both screens mirror it, and
+     * different images per screen are IMPOSSIBLE through it. Setting the
+     * live wallpaper separately on home and on lock gives one engine per
+     * screen (the system's per-screen destinations, Android 14+).
+     */
+    enum class EngineTopology { NONE, SHARED, SEPARATE, HOME_ONLY, LOCK_ONLY }
+
+    fun engineTopology(): EngineTopology = when {
+        homeEngine != null && lockEngine != null -> EngineTopology.SEPARATE
+        homeEngine != null -> EngineTopology.HOME_ONLY
+        lockEngine != null -> EngineTopology.LOCK_ONLY
+        sharedEngine != null -> EngineTopology.SHARED
+        else -> EngineTopology.NONE
+    }
+
+    /** The topology as a plain string for logs and the UI. */
+    fun engineTopologyLabel(): String = when (engineTopology()) {
+        EngineTopology.SEPARATE -> "separate home+lock engines"
+        EngineTopology.HOME_ONLY -> "home engine only"
+        EngineTopology.LOCK_ONLY -> "lock engine only"
+        EngineTopology.SHARED -> "ONE shared engine (both screens)"
+        EngineTopology.NONE -> "no engine"
+    }
+
+    /** A snapshot of the engine flags — coverage decisions log this. */
+    fun engineFlagsSnapshot(): String {
+        return "home=${homeEngine?.rawWallpaperFlags() ?: "none"} " +
+            "lock=${lockEngine?.rawWallpaperFlags() ?: "none"} " +
+            "shared=${sharedEngine?.rawWallpaperFlags() ?: "none"} " +
+            "topology=${engineTopologyLabel()}"
+    }
+
     private fun allEngines(): List<GLWallpaperEngine> =
         listOfNotNull(homeEngine, lockEngine, sharedEngine)
 
@@ -92,7 +127,11 @@ class WEWallpaperService : WallpaperService() {
             "flags" to e.rawWallpaperFlags(),
             "home_engines" to (homeEngine != null),
             "lock_engines" to (lockEngine != null),
-            "shared" to (sharedEngine != null))
+            "shared" to (sharedEngine != null),
+            "topology" to engineTopologyLabel())
+        // v0.8.28: coverage banners and per-screen rules re-evaluate the
+        // moment the engine set changes.
+        com.wepwawet.wallpaper.WallpaperRouter.notifyTopologyChanged()
     }
 
     private fun detachEngine(e: GLWallpaperEngine) {
@@ -101,7 +140,9 @@ class WEWallpaperService : WallpaperService() {
         if (sharedEngine === e) sharedEngine = null
         WepWawetLogger.engine("Service: engine detached",
             "screen" to e.screenLabel,
-            "remaining" to allEngines().size)
+            "remaining" to allEngines().size,
+            "topology" to engineTopologyLabel())
+        com.wepwawet.wallpaper.WallpaperRouter.notifyTopologyChanged()
     }
 
     /** Classify an engine by its wallpaper flags ("home"|"lock"|"both"). */
@@ -125,10 +166,50 @@ class WEWallpaperService : WallpaperService() {
     }
 
     /**
-     * v0.10.0: the router's engine-confirmed apply. Reloads each wanted
-     * screen's engine with ITS selection and reports which screens an
-     * engine actually LOADED (never a silent no-op).
+     * v0.8.28: load a CANDIDATE path on the wanted screens WITHOUT
+     * committing their selections. The router calls this first, and only
+     * commits a screen's saved selection after its engine CONFIRMED the
+     * load — a failed apply leaves the saved selection (and the screen)
+     * exactly as they were.
      */
+    suspend fun loadCandidateToEngines(
+        path: String,
+        wantHome: Boolean,
+        wantLock: Boolean,
+    ): Pair<Boolean, Boolean> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+        val homeNow = homeEngine
+        val lockNow = lockEngine
+        val sharedNow = sharedEngine
+        var homeDef: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
+        var lockDef: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
+        if (wantHome) {
+            homeDef = homeNow?.loadPathWithConfirm(path)
+                ?: sharedNow?.loadPathWithConfirm(path)
+        }
+        if (wantLock) {
+            lockDef = lockNow?.loadPathWithConfirm(path)
+                ?: (if (homeNow == null) sharedNow?.loadPathWithConfirm(path) else null)
+        }
+        val homeOk = if (!wantHome) false else homeDef?.let {
+            kotlinx.coroutines.withTimeoutOrNull(8000L) { it.await() }
+        } ?: false
+        val lockOk = if (!wantLock) false else lockDef?.let {
+            kotlinx.coroutines.withTimeoutOrNull(8000L) { it.await() }
+        } ?: false
+        if (wantHome && homeDef == null && homeNow == null && sharedNow == null) {
+            WepWawetLogger.engineError("Service: no HOME engine — is the live wallpaper set on home?",
+                "path" to path.takeLast(56))
+        }
+        if (wantLock && lockDef == null && lockNow == null &&
+            (homeNow != null || sharedNow == null)
+        ) {
+            WepWawetLogger.engineError("Service: no LOCK engine — set the live wallpaper on the lock screen separately",
+                "path" to path.takeLast(56))
+        }
+        Pair(homeOk, lockOk)
+    }
+
+    /** Reload each wanted screen's engine with its SAVED selection. */
     suspend fun applySelectedToEngines(wantHome: Boolean, wantLock: Boolean): Pair<Boolean, Boolean> =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
             var homeDef: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
@@ -154,7 +235,21 @@ class WEWallpaperService : WallpaperService() {
         }
 
     /**
-     * v0.10.0: every ENGINE-side rotation (the playlist tick, the
+     * v0.8.28: restore one screen's PREVIOUS wallpaper after a failed
+     * candidate (the failed load may have torn the old content down).
+     * Best effort — the old selection is what goes back on screen.
+     */
+    fun restoreScreenSelection(screen: String) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            when (screen) {
+                "lock" -> (lockEngine ?: sharedEngine)?.reloadActiveWallpaper()
+                else -> (homeEngine ?: sharedEngine)?.reloadActiveWallpaper()
+            }
+        }
+    }
+
+    /**
+     * v0.8.28: every ENGINE-side rotation (the playlist tick, the
      * activation switch, a random slot's fresh pull) applies through HERE
      * — the Home/Lock toggles decide which screens change; an off screen
      * keeps exactly its image. MUST run on the main looper.
@@ -180,7 +275,7 @@ class WEWallpaperService : WallpaperService() {
         }
     }
 
-    /** v0.10.0: stamp the rotation clock (the interval restarts on change). */
+    /** v0.8.28: stamp the rotation clock (the interval restarts on change). */
     fun stampRotationClock() {
         rotationOwner?.onWallpaperChangedExternally()
     }
@@ -242,7 +337,7 @@ class WEWallpaperService : WallpaperService() {
         get() = allEngines().isNotEmpty()
 
     /**
-     * v0.10.0: reload EVERY attached engine with its own screen's
+     * v0.8.28: reload EVERY attached engine with its own screen's
      * selection (an engine already showing its selection is a no-op —
      * see the same-file skip in the engine's loadWallpaper).
      */
@@ -379,7 +474,7 @@ class WEWallpaperService : WallpaperService() {
         var currentFile: String? = null
             private set
 
-        // ═══ v0.10.0 ═════════════════════════════════════════════════
+        // ═══ v0.8.28 ═════════════════════════════════════════════════
         /** Which screen this engine renders ("home" | "lock" | "both"). */
         var screenLabel: String = "home"
             internal set
@@ -414,8 +509,21 @@ class WEWallpaperService : WallpaperService() {
             val d = loadConfirm
             loadConfirm = null
             confirmPath = null
-            if (ok) shownPath = currentFile
+            if (ok) shownPath = currentFile else shownPath = null
             d?.complete(ok)
+        }
+
+        /**
+         * v0.8.28 (THE FALSE SUCCESS): the view reported the content
+         * FAILED (decode error, prepare error, unreadable file). The
+         * pending confirmation completes FALSE — an apply never reports
+         * OK for a file that is not on screen — and nothing is
+         * considered shown anymore.
+         */
+        fun failLoadConfirm() {
+            WepWawetLogger.engineError("Service: wallpaper load FAILED on the $screenLabel screen",
+                "file" to (currentFile ?: "(none)").toString().takeLast(56))
+            completeLoadConfirm(false)
         }
         var wallpaper: GLSurfaceView? = null
             private set
@@ -505,7 +613,7 @@ class WEWallpaperService : WallpaperService() {
                     parallaxController.resume()
                 }
             }
-            // v0.10.0: ONLY the rotation owner runs the playlist tick —
+            // v0.8.28: ONLY the rotation owner runs the playlist tick —
             // with a home engine AND a lock engine, ONE logical rotation
             // drives both screens (through applyPathToOnScreens); two
             // independent ticks would race and double-rotate.
@@ -590,7 +698,7 @@ class WEWallpaperService : WallpaperService() {
                 if (changed && prevActiveId != null) {
                     val next = suitePickNew()
                     if (next.isNotEmpty()) {
-                        // v0.10.0: the toggles-aware apply — only ON
+                        // v0.8.28: the toggles-aware apply — only ON
                         // screens change; the rotation stamps itself.
                         this@WEWallpaperService.applyPathToOnScreens(next)
                         WepWawetLogger.engine("Service: playlist change — applied now",
@@ -792,7 +900,7 @@ class WEWallpaperService : WallpaperService() {
                         val path = com.wepwawet.playlist.RandomPullEngine
                             .pull(svc, playlist, slot)
                         if (path != null) {
-                            // v0.10.0: toggles-aware apply (writes the
+                            // v0.8.28: toggles-aware apply (writes the
                             // per-screen selections + reloads + stamps).
                             svc.applyPathToOnScreens(path)
                         }
@@ -1160,7 +1268,7 @@ class WEWallpaperService : WallpaperService() {
             if (playlist.shouldUpdateWallpaper()) {
                 val newWallpaper = playlist.getNewWallpaper()
                 if (newWallpaper.isNotEmpty()) {
-                    // v0.10.0: the toggles-aware apply (writes the
+                    // v0.8.28: the toggles-aware apply (writes the
                     // per-screen selections of ON screens, reloads their
                     // engines, and stamps the rotation clock itself).
                     this@WEWallpaperService.applyPathToOnScreens(newWallpaper)
@@ -1281,6 +1389,29 @@ class WEWallpaperService : WallpaperService() {
         }
 
         /**
+         * v0.8.28: load an explicit CANDIDATE path on THIS engine and
+         * confirm it — the selection pref is untouched (the router
+         * commits it only after a confirmed load).
+         */
+        fun loadPathWithConfirm(path: String): kotlinx.coroutines.CompletableDeferred<Boolean> {
+            if (path == shownPath && wallpaper != null) {
+                WepWawetLogger.engine("Service: candidate already showing — confirmed no-op",
+                    "file" to path.takeLast(56),
+                    "screen" to screenLabel)
+                val d = kotlinx.coroutines.CompletableDeferred<Boolean>()
+                d.complete(true)
+                return d
+            }
+            val confirm = beginLoadConfirm(path)
+            if (holder == null) {
+                pendingFile = path
+            } else {
+                loadWallpaper(path)
+            }
+            return confirm
+        }
+
+        /**
          * Load THIS engine's screen selection. Returns a confirmation the
          * router awaits: true once the view actually shows the file
          * (instantly true when it is already showing — the same-file
@@ -1369,7 +1500,7 @@ class WEWallpaperService : WallpaperService() {
         }
 
         /**
-         * v0.10.0 (SMOOTH CHANGES):
+         * v0.8.28 (SMOOTH CHANGES):
          *  • the same path that is already SHOWING is a confirmed no-op
          *    (no reload, no flash — this kills the wake + rule double
          *    load);
@@ -1442,6 +1573,9 @@ class WEWallpaperService : WallpaperService() {
                 // swaps its content internally and cross-fades.
                 currentFile = file
                 wallpaperControls?.setLoadCallback(onLoaded)
+                wallpaperControls?.setLoadFailedCallback {
+                    this@GLWallpaperEngine.failLoadConfirm()
+                }
                 wallpaperControls?.loadWallpaper(file)
                 refreshWallpaperColors()
                 return
@@ -1479,6 +1613,11 @@ class WEWallpaperService : WallpaperService() {
             wallpaper?.setVisibility(GLSurfaceView.VISIBLE)
             wallpaperControls?.let { parallaxController.linkWallpaper(it) }
             wallpaperControls?.setLoadCallback(onLoaded)
+            // v0.8.28: content failures (decode/prepare/unreadable)
+            // confirm FALSE — never a silent success again.
+            wallpaperControls?.setLoadFailedCallback {
+                this@GLWallpaperEngine.failLoadConfirm()
+            }
 
             if (!isPreview) {
                 wallpaperControls?.setScreenRotation(screenRotation)
@@ -1507,7 +1646,16 @@ class WEWallpaperService : WallpaperService() {
             if (Build.VERSION.SDK_INT >= 31) {
                 var maxFps = generalSettings.maxFps
                 var frameRateCompatibility = 0
-                if (wallpaperType != "Scene") {
+                // v0.8.28: probe the file's own FPS ONLY for real videos —
+                // the old "not a scene" check made every IMAGE take the
+                // video path and log a getWallpaperFPS failure warning at
+                // every startup. Images/GIFs use the general limit with
+                // scene-like compatibility.
+                val contentKind = io.wallpaperengine.weutil.WallpaperFile.sniff(
+                    this@WEWallpaperService, file)
+                if (wallpaperType != "Scene" &&
+                    contentKind == io.wallpaperengine.weutil.WallpaperFile.Kind.VIDEO
+                ) {
                     var wallpaperFPS = WeEnginePrefs.getWallpaperFPS(this@WEWallpaperService, lib, file)
                     if (wallpaperFPS <= 0) {
                         wallpaperFPS = generalSettings.maxFps
@@ -1539,7 +1687,7 @@ class WEWallpaperService : WallpaperService() {
                 synchronized(Companion) {
                     instance = this@WEWallpaperService
                 }
-                // v0.10.0: classify THIS engine by its screen and track
+                // v0.8.28: classify THIS engine by its screen and track
                 // it separately — the second engine no longer overwrites
                 // the first, and neither destroy nulls the other.
                 val screen = this@WEWallpaperService.engineScreenOf(this)
@@ -1567,7 +1715,7 @@ class WEWallpaperService : WallpaperService() {
                 this.pendingFile = null
                 loadWallpaper(pending)
             } else {
-                // v0.10.0: a surviving view already showing the selection
+                // v0.8.28: a surviving view already showing the selection
                 // makes this a confirmed no-op (same-file skip) — waking
                 // the screen no longer reloads or flashes anything.
                 reloadActiveWallpaper()
@@ -1575,7 +1723,7 @@ class WEWallpaperService : WallpaperService() {
         }
 
         override fun onSurfaceDestroyed(holder: android.view.SurfaceHolder) {
-            // v0.10.0 (THE SCREEN-OFF REBUILD): the surface goes away on
+            // v0.8.28 (THE SCREEN-OFF REBUILD): the surface goes away on
             // screen off; the VIEW and its content SURVIVE (the GL context
             // is preserved). The old teardown here forced a full rebuild +
             // reload on every wake — the blank flash AND the double load.
@@ -1586,7 +1734,7 @@ class WEWallpaperService : WallpaperService() {
 
         override fun onWallpaperFlagsChanged(which: Int) {
             super.onWallpaperFlagsChanged(which)
-            // v0.10.0: the system re-assigned this engine's screen —
+            // v0.8.28: the system re-assigned this engine's screen —
             // re-classify, then load the NEW screen's selection.
             val newScreen = this@WEWallpaperService.engineScreenOf(this)
             if (newScreen != screenLabel) {
@@ -1613,7 +1761,7 @@ class WEWallpaperService : WallpaperService() {
                 wallpaperControls?.onDestroyWallpaper()
                 wallpaper = null
             }
-            // v0.10.0: only THIS engine's pointer goes away — the other
+            // v0.8.28: only THIS engine's pointer goes away — the other
             // screen's engine (a separate instance) stays fully alive.
             completeLoadConfirm(false)
             this@WEWallpaperService.detachEngine(this)

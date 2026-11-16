@@ -6,7 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * v0.10.0: the regression tests for the ONE-APPLY-PATH architecture —
+ * v0.8.28: the regression tests for the ONE-APPLY-PATH architecture —
  * the invariants that keep the wallpaper system honest:
  *
  *  1. the toggle model: OFF/ON only, both-off = nothing anywhere;

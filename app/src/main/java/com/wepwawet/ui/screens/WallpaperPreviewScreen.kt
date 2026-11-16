@@ -177,9 +177,11 @@ fun WallpaperPreviewScreen(
     // ----- v0.8.13: STATIC IMAGE support -----
     // "normal images should not be handled by the wallpaper engine
     // renderer": a local/imported image (type "Image") gets a plain
-    // bitmap preview and a system-wallpaper apply (WallpaperManager
-    // setBitmap underneath) — no SceneWallpaperView / VideoWallpaperView,
-    // no GL surface, no engine.
+    // bitmap preview — and since v0.8.28 its SET goes through
+    // WallpaperRouter (the app's own live wallpaper renders it; the old
+    // WallpaperManager.setBitmap apply is gone) — no
+    // SceneWallpaperView / VideoWallpaperView, no GL surface in the
+    // PREVIEW.
     // `resolvedType` is computed off the main thread once (the native
     // getWallpaperType is a JNI metadata read; the MIME fallback needs a
     // resolver round-trip). While null we keep the (fast) synchronous
@@ -302,30 +304,35 @@ fun WallpaperPreviewScreen(
             "force_picker" to forcePicker,
             "is_image" to isImageWallpaper)
         scope.launch {
-            // v0.8.13: static images are set as the plain SYSTEM wallpaper
-            // (decode → screen crop → setBitmap). They never go through
-            // the Wallpaper Engine live-wallpaper machinery.
+            // v0.8.28: images route the ORIGINAL FILE through the router —
+            // no decode, no re-encode (transparency and animation
+            // survive), and the ENGINE center-crops to the screen at
+            // render, exactly like the old pre-crop did. The old path
+            // decoded, cropped and re-encoded to JPEG (lossy, no alpha)
+            // before the setBitmap call that is gone entirely.
             if (isImageWallpaper) {
-                val ok = withContext(Dispatchers.IO) {
-                    val bmp = ImageFolderAssets.decodeBitmapScaled(context, wallpaper.filePath, 4096)
-                        ?: return@withContext false
-                    val crop = com.wepwawet.discover.DiscoverApplier.cropForScreen(context, bmp)
-                    // v0.10.0: the toggles ARE the model — both OFF
-                    // means NOTHING is written (the old "no preference"
-                    // fallback wrote both screens against the toggles).
-                    val screens = com.wepwawet.discover.DiscoverPrefs.readScreens(context)
-                    val homeOn = com.wepwawet.discover.DiscoverPrefs.homeRequired(screens.first)
-                    val lockOn = com.wepwawet.discover.DiscoverPrefs.lockRequired(screens.second)
-                    com.wepwawet.discover.DiscoverApplier.apply(
-                        context, crop, homeOn = homeOn, lockOn = lockOn).ok
+                val screens = com.wepwawet.discover.DiscoverPrefs.readScreens(context)
+                val homeOn = com.wepwawet.discover.DiscoverPrefs.homeRequired(screens.first)
+                val lockOn = com.wepwawet.discover.DiscoverPrefs.lockRequired(screens.second)
+                val target = when {
+                    homeOn && lockOn -> "both"
+                    homeOn -> "home"
+                    lockOn -> "lock"
+                    else -> "none"
                 }
+                val outcome = com.wepwawet.wallpaper.WallpaperRouter.applyPath(
+                    context, wallpaper.filePath, target)
+                val ok = outcome.allOk
                 applied = ok
-                WepWawetLogger.engine("Preview: image applied as system wallpaper",
-                    "ok" to ok)
+                WepWawetLogger.engine("Preview: image applied via the router",
+                    "ok" to ok,
+                    "reason" to outcome.reason,
+                    "home_ok" to outcome.homeOk,
+                    "lock_ok" to outcome.lockOk)
                 android.widget.Toast.makeText(
                     context,
-                    if (ok) "Wallpaper set" else "Could not set the wallpaper",
-                    android.widget.Toast.LENGTH_SHORT).show()
+                    if (ok) "Wallpaper set" else (outcome.reason.ifEmpty { "Could not set the wallpaper" }),
+                    android.widget.Toast.LENGTH_LONG).show()
                 return@launch
             }
             if (!forcePicker && playlistActiveWithoutService) {
@@ -350,7 +357,8 @@ fun WallpaperPreviewScreen(
                     "added" to added)
                 return@launch
             }
-            val hotReloaded = WeEnginePrefs.callApplyWallpaper(context, wallpaper, forcePicker)
+            val hotReloaded = WeEnginePrefs.callApplyWallpaper(
+                context, wallpaper, forcePicker)
             // v0.8.18 (review B3): callApplyWallpaper returns false exactly
             // when it had to open the system picker instead of hot-reloading.
             // The old code marked `applied = true` unconditionally, so a user
@@ -791,6 +799,9 @@ fun WallpaperPreviewScreen(
                     .fillMaxWidth()
                     .height(drawerHeightDp),
             ) {
+                // v0.8.28: the live-wallpaper banner (coverage +
+                // shared-engine split advice) — Preview applies too.
+                com.wepwawet.ui.components.LiveWallpaperPromptBanner()
                 // The 16dp accent strip (official wp_blue strip)
                 Box(
                     modifier = Modifier
