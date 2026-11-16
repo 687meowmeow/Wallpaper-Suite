@@ -355,10 +355,25 @@ object SuitePlaylistStore {
 
     fun setActive(context: Context, id: String?) {
         val store = readStore(context)
-        store.activePlaylistId = id ?: ""
+        // v0.8.29 (the 149 log's "active changed id=none"): an EMPTY or
+        // STALE id (a rule block whose playlist was never picked or was
+        // deleted) must NEVER leave the app with no active playlist —
+        // that state silently disabled every remaining playlist's rules.
+        // Promote the first real playlist instead (none only when the
+        // store is empty).
+        val valid = !id.isNullOrEmpty() && store.playlists.any { it.id == id }
+        store.activePlaylistId = if (valid) id!! else {
+            val promoted = store.playlists.firstOrNull()?.id ?: ""
+            if (!valid && !id.isNullOrEmpty()) {
+                WepWawetLogger.appWarn("SuitePlaylistStore: setActive got a STALE id — promoting the first playlist",
+                    "stale_id" to id!!,
+                    "promoted" to promoted)
+            }
+            promoted
+        }
         writeStore(context, store)
         WepWawetLogger.appInfo("SuitePlaylistStore: active changed",
-            "id" to (id ?: "none"))
+            "id" to store.activePlaylistId.ifEmpty { "none (no playlists)" })
         notifyService(context)
         // v0.8.25 (settings take effect immediately): the ACTIVE playlist
         // decides which rules may run — its change re-arms the hub's

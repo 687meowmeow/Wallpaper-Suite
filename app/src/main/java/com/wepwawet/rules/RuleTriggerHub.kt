@@ -53,6 +53,71 @@ object RuleTriggerHub {
 
     private val handler = Handler(Looper.getMainLooper())
     private var started = false
+
+    /**
+     * v0.8.29 (THE UNLOCK WATCH): USER_PRESENT is not delivered to
+     * backgrounded apps on many OEM builds (the 149 log shows
+     * screen-on/off arriving and NO USER_PRESENT ever, while the user
+     * unlocked ~1.3 s later). When the screen turns on WITH the keyguard
+     * up, watch the keyguard directly: poll isKeyguardLocked every
+     * 400 ms for up to ~40 s; the moment it clears, that IS the unlock.
+     * Stopped by screen-off, by a real USER_PRESENT, or by the 40 s cap.
+     */
+    @Volatile
+    private var appContext: Context? = null
+    @Volatile
+    private var unlockWatchRunning = false
+    private var unlockWatchTicks = 0
+    private val unlockWatch = object : Runnable {
+        override fun run() {
+            if (!unlockWatchRunning) return
+            val ctx = appContext ?: return
+            try {
+                val km = ctx.getSystemService(android.app.KeyguardManager::class.java)
+                val pm = ctx.getSystemService(Context.POWER_SERVICE)
+                    as? android.os.PowerManager
+                if (km == null || pm?.isInteractive != true) {
+                    unlockWatchRunning = false
+                    WepWawetLogger.appInfo("$TAG: unlock watch stopped — screen off or no keyguard manager")
+                    return
+                }
+                if (!km.isKeyguardLocked) {
+                    unlockWatchRunning = false
+                    WepWawetLogger.appInfo(
+                        "$TAG: unlock DETECTED by the keyguard watch " +
+                            "(USER_PRESENT never arrived — OEM background delivery)",
+                        "ticks" to unlockWatchTicks)
+                    dispatch(ctx, RuleModel.TRIG_UNLOCKED)
+                    return
+                }
+            } catch (t: Throwable) {
+                WepWawetLogger.appWarn("$TAG: unlock watch tick failed",
+                    "exception" to (t.message ?: t.javaClass.name))
+            }
+            if (++unlockWatchTicks > 100) {
+                unlockWatchRunning = false
+                WepWawetLogger.appInfo("$TAG: unlock watch expired — keyguard never cleared (screen on >40s locked)")
+                return
+            }
+            handler.postDelayed(this, 400L)
+        }
+    }
+
+    private fun startUnlockWatch(ctx: Context) {
+        if (appContext == null) appContext = ctx.applicationContext
+        if (unlockWatchRunning) return
+        unlockWatchTicks = 0
+        unlockWatchRunning = true
+        WepWawetLogger.appInfo("$TAG: keyguard up at screen-on — unlock watch armed (USER_PRESENT is unreliable on this OEM)")
+        handler.postDelayed(unlockWatch, 400L)
+    }
+
+    private fun stopUnlockWatch(why: String) {
+        if (unlockWatchRunning) {
+            unlockWatchRunning = false
+            WepWawetLogger.appInfo("$TAG: unlock watch stopped", "why" to why)
+        }
+    }
     private var registeredTypes: Set<String> = emptySet()
     @Volatile
     private var registrationFailed = false
@@ -138,6 +203,12 @@ object RuleTriggerHub {
                             WepWawetLogger.appInfo("$TAG: unlock DERIVED — screen on with no keyguard",
                                 "keyguard_locked" to false)
                             dispatch(ctx, RuleModel.TRIG_UNLOCKED)
+                        } else if (km != null) {
+                            // v0.8.29: the keyguard is up — the unlock
+                            // happens when the USER clears it; USER_PRESENT
+                            // may never tell us (OEM background delivery),
+                            // so watch the keyguard ourselves.
+                            startUnlockWatch(ctx)
                         }
                     } catch (t: Throwable) {
                         WepWawetLogger.appWarn("$TAG: keyguard check failed",
@@ -147,11 +218,22 @@ object RuleTriggerHub {
                 Intent.ACTION_SCREEN_OFF -> {
                     WepWawetLogger.appInfo("$TAG: broadcast arrived",
                         "action" to "SCREEN_OFF")
+                    stopUnlockWatch("screen off before unlock")
                     dispatch(ctx, RuleModel.TRIG_SCREEN_OFF)
                 }
                 Intent.ACTION_USER_PRESENT -> {
                     WepWawetLogger.appInfo("$TAG: broadcast arrived",
                         "action" to "USER_PRESENT (unlocked)")
+                    stopUnlockWatch("real USER_PRESENT arrived")
+                    dispatch(ctx, RuleModel.TRIG_UNLOCKED)
+                }
+                // v0.8.29: the post-boot credential unlock (the storage
+                // becomes user-unlocked) — a genuine "device unlocked"
+                // moment that arrives even when USER_PRESENT is dropped.
+                Intent.ACTION_USER_UNLOCKED -> {
+                    WepWawetLogger.appInfo("$TAG: broadcast arrived",
+                        "action" to "USER_UNLOCKED (credential-encrypted storage unlocked)")
+                    stopUnlockWatch("USER_UNLOCKED arrived")
                     dispatch(ctx, RuleModel.TRIG_UNLOCKED)
                 }
                 Intent.ACTION_POWER_CONNECTED -> dispatch(ctx, RuleModel.TRIG_CHARGER_IN)
@@ -217,6 +299,7 @@ object RuleTriggerHub {
 
     /** Start (or re-aggregate) the hub for the trigger types rules use. */
     fun start(context: Context) {
+        appContext = context.applicationContext
         val types = try {
             SuiteRulesStore.usedTriggerTypes(context)
         } catch (e: Exception) {
@@ -260,6 +343,7 @@ object RuleTriggerHub {
             actions.add(Intent.ACTION_SCREEN_ON)
             actions.add(Intent.ACTION_SCREEN_OFF)
             actions.add(Intent.ACTION_USER_PRESENT)
+            actions.add(Intent.ACTION_USER_UNLOCKED)
             actions.add(Intent.ACTION_POWER_CONNECTED)
             actions.add(Intent.ACTION_POWER_DISCONNECTED)
             actions.add(android.os.PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)

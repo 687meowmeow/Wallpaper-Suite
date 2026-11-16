@@ -161,6 +161,9 @@ fun LibraryScreen(
 
     // Search + sort (the top-bar sort drives EVERY view incl. folders)
     var searching by remember { mutableStateOf(false) }
+    // v0.8.29: the guided split flow shows exactly when a single-screen
+    // apply is blocked by the ONE shared engine.
+    var showSplitDialog by remember { mutableStateOf(false) }
     var filterText by remember { mutableStateOf("") }
     var sortMethod by remember { mutableStateOf(SortMethod.NEWEST) }
 
@@ -480,6 +483,7 @@ fun LibraryScreen(
                 val outcome = com.wepwawet.wallpaper.WallpaperRouter.applyPath(
                     context, resolved, target)
                 val ok = outcome.allOk
+                if (outcome.blockedBySharedEngine) showSplitDialog = true
                 snackbar.showSnackbar(
                     if (ok) "Wallpaper set — \"${entry.displayName.substringBeforeLast('.')}\""
                     else (outcome.reason.ifEmpty { "Wallpaper write failed" }))
@@ -1686,6 +1690,13 @@ fun LibraryScreen(
     // v0.8.20: the "＋" dropdown's Make-a-group flow — a name dialog; the
     // created group appears as a chip (assign wallpapers from each
     // wallpaper's own "Add to group" menu).
+    if (showSplitDialog) {
+        com.wepwawet.ui.components.SharedEngineSplitDialog(
+            reason = "The last apply changed nothing.",
+            onDismiss = { showSplitDialog = false },
+        )
+    }
+
     if (showMakeGroup) {
         var newGroupName by remember { mutableStateOf("") }
         AlertDialog(

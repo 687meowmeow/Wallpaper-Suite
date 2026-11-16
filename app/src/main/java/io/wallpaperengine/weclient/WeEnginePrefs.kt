@@ -727,11 +727,19 @@ object WeEnginePrefs {
      * @return true when the apply happened WITHOUT the picker; false
      *   when the prompt was opened (or nothing was on).
      */
+    /** v0.8.29: what one callApplyWallpaper did. */
+    class CallApplyResult(
+        val ok: Boolean,
+        /** A single-screen apply was blocked by the ONE shared engine —
+         *  the caller offers the guided split flow. */
+        val blockedShared: Boolean = false,
+    )
+
     suspend fun callApplyWallpaper(
         context: Context,
         wallpaper: WallpaperInfoSparse,
         forceOpenPicker: Boolean,
-    ): Boolean {
+    ): CallApplyResult {
         val screens = com.wepwawet.discover.DiscoverPrefs.readScreens(context)
         val homeOn = com.wepwawet.discover.DiscoverPrefs.homeRequired(screens.first)
         val lockOn = com.wepwawet.discover.DiscoverPrefs.lockRequired(screens.second)
@@ -740,7 +748,7 @@ object WeEnginePrefs {
             // wrote the selection and returned true.
             WepWawetLogger.appWarn("Apply: both screens are off — nothing changed",
                 "file" to wallpaper.filePath.takeLast(56))
-            return false
+            return CallApplyResult(false)
         }
         val router = com.wepwawet.wallpaper.WallpaperRouter
         if (!forceOpenPicker) {
@@ -750,11 +758,15 @@ object WeEnginePrefs {
                 val target = if (homeOn && lockOn) "both"
                 else if (homeOn) "home" else "lock"
                 val o = router.applyPath(context, wallpaper.filePath, target)
-                if (o.allOk) return true
+                if (o.allOk) return CallApplyResult(true)
                 // The router already logged the honest reason (blocked
                 // shared engine, failed load, …) — fall through to the
-                // prompt only when coverage is the problem.
-                if (homeCovered && lockCovered) return false
+                // prompt only when coverage is the problem. A blocked
+                // shared-engine apply reports the flag: the caller shows
+                // the guided split flow.
+                if (homeCovered && lockCovered) {
+                    return CallApplyResult(false, o.blockedBySharedEngine)
+                }
             }
         }
         // Not covered on an ON screen: the ONE-TAP prompt.
@@ -764,13 +776,13 @@ object WeEnginePrefs {
             context.startActivity(intent)
             WepWawetLogger.appInfo("Apply: one-tap live-wallpaper prompt opened",
                 "file" to wallpaper.filePath.takeLast(56))
-            false
+            CallApplyResult(false)
         } catch (e: Exception) {
             // v0.8.28: errors are NEVER swallowed silently — the caller
             // sees false and the log says why.
             WepWawetLogger.appError("Apply: could not open the live-wallpaper prompt",
                 "exception" to (e.message ?: e.javaClass.name))
-            false
+            CallApplyResult(false)
         }
     }
 

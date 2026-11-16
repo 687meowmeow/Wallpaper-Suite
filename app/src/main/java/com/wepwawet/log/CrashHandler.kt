@@ -352,8 +352,31 @@ class CrashHandler private constructor(
                 if (line.isNotBlank()) lines.add(line)
             }
         }
-        sb.append("\n--- Engine log (last ${minOf(300, lines.size)} of ${lines.size} lines) ---\n")
+        // v0.8.29: the native engine writes a per-frame debug line
+        // ("Log: x y 0") that can run for THOUSANDS of identical lines —
+        // the 149 crash report's whole 300-line tail was that one line.
+        // Collapse runs of identical lines so real diagnostics show.
+        val tail = ArrayList<String>()
+        var runLine: String? = null
+        var runCount = 0
         for (line in lines.takeLast(300)) {
+            if (line == runLine) {
+                runCount++
+            } else {
+                if (runCount > 1) {
+                    tail.add("… ($runCount identical lines elided)")
+                }
+                tail.add(line)
+                runLine = line
+                runCount = 1
+            }
+        }
+        if (runCount > 1) {
+            tail.add("… ($runCount identical lines elided)")
+        }
+        sb.append("\n--- Engine log (last ${minOf(300, lines.size)} of ${lines.size} lines, " +
+            "duplicate runs collapsed) ---\n")
+        for (line in tail) {
             sb.append(line).append("\n")
         }
     }

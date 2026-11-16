@@ -171,6 +171,15 @@ object EngineLogTailer {
                 // (it's plain text), so this is best-effort.
                 for (line in linesToForward) {
                     val trimmed = line.take(2000)  // cap absurdly long lines
+                    // v0.8.29: the native engine's per-frame debug print
+                    // ("Log: <time> <delta> 0") runs for THOUSANDS of
+                    // identical lines per session — it must never flood
+                    // the main ring buffer.
+                    if (trimmed.startsWith("Log: ") &&
+                        trimmed.count { it == ' ' } == 2
+                    ) {
+                        continue
+                    }
                     val lower = trimmed.lowercase()
                     val level = when {
                         lower.contains("fatal") || lower.contains("panic") -> Level.ERROR

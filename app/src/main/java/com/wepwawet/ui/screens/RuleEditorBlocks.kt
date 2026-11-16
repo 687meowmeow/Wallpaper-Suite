@@ -887,19 +887,29 @@ private fun InnerStack(
                         rule = rule,
                         depth = depth,
                         highlights = highlights,
+                        // v0.8.29 (audit — the stale-index crash class):
+                        // every op resolves THIS block by id at click
+                        // time; a captured index can go stale after a
+                        // sibling delete recomposes the list.
                         onEdit = { mutate ->
                             val list = blocks.toMutableList()
-                            mutate(list[idx])
-                            setBlocks(list)
+                            val i = list.indexOfFirst { it.id == b.id }
+                            if (i >= 0) {
+                                mutate(list[i])
+                                setBlocks(list)
+                            }
                         },
                         onMove = { delta ->
                             val list = blocks.toMutableList()
-                            val j = (idx + delta).coerceIn(0, list.size - 1)
-                            val moved = list.removeAt(idx)
-                            list.add(j, moved)
-                            logEditor("nested block moved",
-                                "block" to b.type, "in" to label, "to" to j)
-                            setBlocks(list)
+                            val i = list.indexOfFirst { it.id == b.id }
+                            if (i >= 0) {
+                                val j = (i + delta).coerceIn(0, list.size - 1)
+                                val moved = list.removeAt(i)
+                                list.add(j, moved)
+                                logEditor("nested block moved",
+                                    "block" to b.type, "in" to label, "to" to j)
+                                setBlocks(list)
+                            }
                         },
                         onDelete = {
                             logEditor("nested block deleted",
@@ -909,7 +919,8 @@ private fun InnerStack(
                         onDuplicate = {
                             val copy = RuleModel.copyBlock(b)
                             val list = blocks.toMutableList()
-                            list.add(idx + 1, copy)
+                            val i = list.indexOfFirst { it.id == b.id }
+                            list.add(if (i >= 0) i + 1 else list.size, copy)
                             logEditor("nested block duplicated",
                                 "block" to b.type, "in" to label)
                             setBlocks(list)
@@ -1377,13 +1388,20 @@ internal fun BlockCard(
                                 // v0.8.28: EVERY option deletes ITSELF —
                                 // the old "remove the last option" button
                                 // could not remove a specific option.
+                                // v0.8.29 (THE 0.8.21 CRASH): remove by
+                                // IDENTITY — a captured index went stale
+                                // after another delete recomposed the
+                                // list (IndexOutOfBoundsException).
                                 IconButton(onClick = {
                                     onEdit {
                                         if (it.options.size > 1) {
-                                            logEditor("choose option removed",
-                                                "label" to opt.label,
-                                                "remaining" to (it.options.size - 1))
-                                            it.options.removeAt(oi)
+                                            val idx = it.options.indexOf(opt)
+                                            if (idx >= 0) {
+                                                logEditor("choose option removed",
+                                                    "label" to opt.label,
+                                                    "remaining" to (it.options.size - 1))
+                                                it.options.removeAt(idx)
+                                            }
                                         }
                                     }
                                 }) {
@@ -1693,10 +1711,14 @@ internal fun CondCard(
                     },
                     // v0.8.28: the child trash removes EXACTLY this child
                     // (any position, including the last one).
+                    // v0.8.29 (THE 0.8.21 CRASH): remove by IDENTITY —
+                    // the captured index can go stale after a sibling
+                    // delete recomposes the children list.
                     onRemove = {
                         val list = cond.children.toMutableList()
-                        if (ci < list.size) {
-                            list.removeAt(ci)
+                        val idx = list.indexOf(child)
+                        if (idx >= 0) {
+                            list.removeAt(idx)
                             logEditor("condition child removed",
                                 "parent" to cond.type,
                                 "child" to child.type,

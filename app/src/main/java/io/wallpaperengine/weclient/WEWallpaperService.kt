@@ -1402,6 +1402,15 @@ class WEWallpaperService : WallpaperService() {
                 d.complete(true)
                 return d
             }
+            // v0.8.29 (THE CRASH): same-path in-flight reuse — never a
+            // second loadWallpaper for a path that is loading right now.
+            val inFlight = loadConfirm
+            if (inFlight != null && confirmPath == path && !inFlight.isCompleted) {
+                WepWawetLogger.engine("Service: candidate load skipped — the same path is already loading",
+                    "file" to path.takeLast(56),
+                    "screen" to screenLabel)
+                return inFlight
+            }
             val confirm = beginLoadConfirm(path)
             if (holder == null) {
                 pendingFile = path
@@ -1521,6 +1530,19 @@ class WEWallpaperService : WallpaperService() {
                 val d = kotlinx.coroutines.CompletableDeferred<Boolean>()
                 d.complete(true)
                 return d
+            }
+            // v0.8.29 (THE CRASH): the SAME path already loading must
+            // not start a SECOND loadWallpaper — the playlist-activation
+            // refresh and the rotation apply landed 14ms apart on the
+            // same drawable and the racing surface work threw
+            // IllegalArgumentException from lockCanvas. The pending
+            // confirm answers this request too.
+            val inFlight = loadConfirm
+            if (inFlight != null && confirmPath == file && !inFlight.isCompleted) {
+                WepWawetLogger.engine("Service: loadWallpaper skipped — the same path is already loading",
+                    "file" to file.takeLast(56),
+                    "screen" to screenLabel)
+                return inFlight
             }
             val confirm = beginLoadConfirm(file)
             loadWallpaper(file)

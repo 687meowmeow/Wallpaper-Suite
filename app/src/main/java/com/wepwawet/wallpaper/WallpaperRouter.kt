@@ -58,6 +58,9 @@ object WallpaperRouter {
         val lockOk: Boolean,
         /** "" or the human reason nothing changed (both off / not live / …). */
         val reason: String,
+        /** v0.8.29: a single-screen apply blocked by the ONE shared
+         *  engine — the apply surfaces show the guided split dialog. */
+        val blockedBySharedEngine: Boolean = false,
     ) {
         val anyOk: Boolean get() = homeOk || lockOk
         val allOk: Boolean get() = (homeOk || !homeRequested) && (lockOk || !lockRequested)
@@ -142,9 +145,38 @@ object WallpaperRouter {
     private fun systemSaysOurs(context: Context, screen: String): Boolean = try {
         val wm = context.getSystemService(Context.WALLPAPER_SERVICE) as? WallpaperManager
         if (android.os.Build.VERSION.SDK_INT >= 34) {
-            val which = if (screen == "lock") WallpaperManager.FLAG_LOCK
-            else WallpaperManager.FLAG_SYSTEM
-            wm?.getWallpaperInfo(which)?.component?.packageName == context.packageName
+            if (screen != "lock") {
+                wm?.getWallpaperInfo(WallpaperManager.FLAG_SYSTEM)
+                    ?.component?.packageName == context.packageName
+            } else {
+                // v0.8.29 (THE LOCK ANSWER): getWallpaperInfo(FLAG_LOCK)
+                // answers NULL when the lock screen simply FOLLOWS the
+                // home wallpaper (the system keeps no separate lock
+                // wallpaper then) — that null is NOT "not ours". The
+                // truth table:
+                //   • a LIVE lock wallpaper → ours iff it is our package;
+                //   • a STATIC lock wallpaper exists → not ours;
+                //   • neither → lock follows home → ours iff HOME is.
+                val lockInfo = wm?.getWallpaperInfo(WallpaperManager.FLAG_LOCK)
+                when {
+                    lockInfo != null ->
+                        lockInfo.component.packageName == context.packageName
+                    else -> {
+                        val hasStaticLock = try {
+                            wm?.getWallpaperFile(WallpaperManager.FLAG_LOCK) != null
+                        } catch (se: SecurityException) {
+                            false
+                        }
+                        if (hasStaticLock) {
+                            false
+                        } else {
+                            // Lock follows home.
+                            wm?.getWallpaperInfo(WallpaperManager.FLAG_SYSTEM)
+                                ?.component?.packageName == context.packageName
+                        }
+                    }
+                }
+            }
         } else {
             // Pre-34: one live-wallpaper concept; the system answer only
             // knows the home screen (an honest limitation, logged above).
@@ -280,7 +312,9 @@ object WallpaperRouter {
             WepWawetLogger.appError("$TAG: single-screen apply blocked — shared engine",
                 "path" to path.takeLast(56),
                 "topology" to svc.engineTopologyLabel())
-            return@withContext ApplyOutcome(wantHome, wantLock, false, false, why)
+            return@withContext ApplyOutcome(
+                wantHome, wantLock, false, false, why,
+                blockedBySharedEngine = true)
         }
 
         // Load the candidate WITHOUT committing; remember the previous

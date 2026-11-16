@@ -819,7 +819,14 @@ object RuleEngine {
                 }
                 RuleModel.BLOCK_SWITCH_PLAYLIST -> {
                     if (b.param.isNotEmpty()) {
-                        SuitePlaylistStore.setActive(context, b.param)
+                        if (b.param.isEmpty()) {
+                            // v0.8.29: a Set-Active block with no
+                            // playlist picked is a no-op with a visible
+                            // reason, never a "deactivate everything".
+                            WepWawetLogger.appWarn("RuleEngine: set-active block has no playlist picked — skipped")
+                        } else {
+                            SuitePlaylistStore.setActive(context, b.param)
+                        }
                     }
                     Flow.CONTINUE
                 }

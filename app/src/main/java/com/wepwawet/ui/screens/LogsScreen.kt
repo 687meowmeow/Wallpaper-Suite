@@ -135,6 +135,32 @@ fun LogsScreen(onBack: () -> Unit) {
      * scene-load failures and shader compile errors live there, not in the
      * app log.
      */
+    /**
+     * v0.8.29: collapse consecutive identical lines (the native engine's
+     * per-frame debug spam runs for thousands of lines) — "… (N identical
+     * lines elided)" keeps the export readable and the real diagnostics
+     * visible.
+     */
+    fun collapseDuplicateRuns(text: String): String {
+        val out = StringBuilder()
+        var runLine: String? = null
+        var runCount = 0
+        for (line in text.split('\n')) {
+            if (line == runLine) {
+                runCount++
+            } else {
+                if (runCount > 1) out.append("… (").append(runCount)
+                    .append(" identical lines elided)\n")
+                out.append(line).append('\n')
+                runLine = line
+                runCount = 1
+            }
+        }
+        if (runCount > 1) out.append("… (").append(runCount)
+            .append(" identical lines elided)\n")
+        return out.toString()
+    }
+
     fun downloadLogs() {
         if (isDownloading) return
         isDownloading = true
@@ -210,7 +236,9 @@ fun LogsScreen(onBack: () -> Unit) {
                             .append(") — ")
                             .append(ageLabel)
                             .append(" ===\n")
-                        sb.append(text)
+                        // v0.8.29: collapse runs of identical lines (the
+                        // engine's per-frame debug spam drowned everything).
+                        sb.append(collapseDuplicateRuns(text))
                         sb.append("\n=== end of engine log ===\n")
                     }
                 }.onFailure {

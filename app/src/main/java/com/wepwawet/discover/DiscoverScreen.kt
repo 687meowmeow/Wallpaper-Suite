@@ -146,6 +146,9 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
     // SOURCE's format (PNG for png/gif/webp keeps transparency; JPEG
     // stays JPEG) instead of always-JPEG-at-92.
     var previewSourceUrl by remember { mutableStateOf<String?>(null) }
+    // v0.8.29: the guided split flow shows exactly when a single-screen
+    // apply is blocked by the ONE shared engine.
+    var showSplitDialog by remember { mutableStateOf(false) }
     // v0.8.28: previewLockBitmap/previewingLock are GONE with dual mode
     // (there is no separate lock preview — one image, toggle-routed).
     // v0.8.14: true when the preview shows a freshly refreshed image that
@@ -519,7 +522,11 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
                         "lock_ok" to result.lockOk)
                 } else {
                     statusLine = "Wallpaper write failed (home=${result.homeOk}, lock=${result.lockOk})"
-                    snackbar.showSnackbar("Wallpaper write failed (see logs)")
+                    snackbar.showSnackbar(
+                        if (result.blockedBySharedEngine)
+                            "One engine serves both screens — split them for different wallpapers"
+                        else "Wallpaper write failed (see logs)")
+                    if (result.blockedBySharedEngine) showSplitDialog = true
                 }
 
                 // Keep the preload queue full for the next Refresh (v0.8.16).
@@ -1380,6 +1387,13 @@ fun DiscoverScreen(onBack: (() -> Unit)? = null) {
 
     // ===== v0.8.17: the crop-before-setting dialog (shared surface with
     // the image editor: handles, presets incl. Phone, rule of thirds) ====
+    if (showSplitDialog) {
+        com.wepwawet.ui.components.SharedEngineSplitDialog(
+            reason = "The last apply changed nothing.",
+            onDismiss = { showSplitDialog = false },
+        )
+    }
+
     if (showCropDialog) {
         val cropBmp =
             previewBitmap

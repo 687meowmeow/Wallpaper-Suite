@@ -234,7 +234,15 @@ object DiscoverApplier {
     // Apply (home / lock / both)
     // ════════════════════════════════════════════════════════════════
 
-    class ApplyResult(val homeOk: Boolean, val lockOk: Boolean) {
+    class ApplyResult(
+        val homeOk: Boolean,
+        val lockOk: Boolean,
+        /** v0.8.29: a single-screen apply was blocked by the shared
+         *  engine — the UI offers the guided split flow. */
+        val blockedBySharedEngine: Boolean = false,
+        /** First non-empty human reason, "" when everything applied. */
+        val reason: String = "",
+    ) {
         /** v0.8.18: history-worthy when ANY screen write succeeded — the old
          *  strict AND meant a device whose lock write fails never recorded
          *  history even though the home wallpaper visibly changed ("the
@@ -264,14 +272,18 @@ object DiscoverApplier {
         sourcePath: String? = null,
     ): ApplyResult = withContext(Dispatchers.IO) {
         val router = com.wepwawet.wallpaper.WallpaperRouter
-        val homeOk: Boolean
-        val lockOk: Boolean
+        var homeOk: Boolean = false
+        var lockOk: Boolean = false
+        var blockedShared: Boolean = false
+        var reason: String = ""
         when {
             homeOn && lockOn && lockBitmap == null -> {
                 // Both on, ONE image: a single both-target apply.
                 val o = router.applyBitmap(context, bitmap, "both", sourcePath)
                 homeOk = o.homeOk
                 lockOk = o.lockOk
+                blockedShared = blockedShared || o.blockedBySharedEngine
+                reason = reason.ifEmpty { o.reason }
             }
             homeOn && lockOn -> {
                 // Both on with SEPARATE images: one apply per screen.
@@ -279,17 +291,23 @@ object DiscoverApplier {
                 val ol = router.applyBitmap(context, lockBitmap ?: bitmap, "lock", sourcePath)
                 homeOk = oh.homeOk
                 lockOk = ol.lockOk
+                blockedShared = blockedShared || oh.blockedBySharedEngine || ol.blockedBySharedEngine
+                reason = reason.ifEmpty { oh.reason.ifEmpty { ol.reason } }
             }
             homeOn -> {
                 val o = router.applyBitmap(context, bitmap, "home", sourcePath)
                 homeOk = o.homeOk
                 lockOk = false
+                blockedShared = blockedShared || o.blockedBySharedEngine
+                reason = reason.ifEmpty { o.reason }
             }
             lockOn -> {
                 val o = router.applyBitmap(
                     context, lockBitmap ?: bitmap, "lock", sourcePath)
                 homeOk = false
                 lockOk = o.lockOk
+                blockedShared = blockedShared || o.blockedBySharedEngine
+                reason = reason.ifEmpty { o.reason }
             }
             else -> {
                 // Both off: nothing anywhere (the router would say why).
@@ -300,8 +318,9 @@ object DiscoverApplier {
         WepWawetLogger.appInfo("$TAG: apply result",
             "home_ok" to homeOk,
             "lock_ok" to lockOk,
-            "separate_lock" to (lockBitmap != null))
-        ApplyResult(homeOk, lockOk)
+            "separate_lock" to (lockBitmap != null),
+            "blocked_shared_engine" to blockedShared)
+        ApplyResult(homeOk, lockOk, blockedShared, reason)
     }
 
     /**

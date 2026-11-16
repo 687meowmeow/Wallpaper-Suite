@@ -160,6 +160,9 @@ fun WallpaperPreviewScreen(
     var livePreviewBlack by remember { mutableStateOf(false) }
 
     // ----- UI state -----
+    // v0.8.29: the guided split flow shows exactly when a single-screen
+    // apply is blocked by the ONE shared engine.
+    var showSplitDialog by remember { mutableStateOf(false) }
     var applied by remember {
         mutableStateOf(EngineLibrary.getSelectedWallpaper(context) == wallpaper.filePath)
     }
@@ -324,6 +327,7 @@ fun WallpaperPreviewScreen(
                     context, wallpaper.filePath, target)
                 val ok = outcome.allOk
                 applied = ok
+                if (outcome.blockedBySharedEngine) showSplitDialog = true
                 WepWawetLogger.engine("Preview: image applied via the router",
                     "ok" to ok,
                     "reason" to outcome.reason,
@@ -357,8 +361,12 @@ fun WallpaperPreviewScreen(
                     "added" to added)
                 return@launch
             }
-            val hotReloaded = WeEnginePrefs.callApplyWallpaper(
+            val callResult = WeEnginePrefs.callApplyWallpaper(
                 context, wallpaper, forcePicker)
+            val hotReloaded = callResult.ok
+            // v0.8.29: a single-screen apply blocked by the shared
+            // engine offers the guided split flow right here.
+            if (callResult.blockedShared) showSplitDialog = true
             // v0.8.18 (review B3): callApplyWallpaper returns false exactly
             // when it had to open the system picker instead of hot-reloading.
             // The old code marked `applied = true` unconditionally, so a user

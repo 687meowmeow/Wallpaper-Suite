@@ -1287,6 +1287,15 @@ class VideoWallpaperView(context: Context) :
         private val rect = Rect()
         private var destroyed: Boolean = false
         private var fadeRunning: Boolean = false
+        private var fadeAnimator: android.animation.ValueAnimator? = null
+        /**
+         * v0.8.29: the load GENERATION. A same-view reload can queue a
+         * second decode while the first is still in flight; the stale
+         * completion must never touch the surface (two Surface objects
+         * over one SurfaceTexture → lockCanvas throws IAE — the 149
+         * crash).
+         */
+        private var loadGeneration: Int = 0
 
         override fun applyProperties(properties: HashMap<String, Property>) {
         }
@@ -1306,10 +1315,23 @@ class VideoWallpaperView(context: Context) :
             // main-thread stall for every wallpaper change), sized to the
             // screen (no 12 MP bitmaps in memory), then post back.
             val st = surfaceTexture ?: return
+            // v0.8.29 (THE CRASH): a reload of THIS drawable tears the
+            // outgoing state down FIRST — stop the cross-fade animator,
+            // release the outgoing Surface (constructing a second Surface
+            // over a still-attached SurfaceTexture is what made
+            // lockCanvas throw) — and the stale decode's completion is
+            // dropped via the generation counter.
+            fadeAnimator?.cancel()
+            fadeAnimator = null
+            fadeRunning = false
+            surface?.release()
+            surface = null
+            bitmap = null
+            val generation = ++loadGeneration
             decodeExecutor.execute {
                 val decoded = decodeForScreen(file)
                 getActiveHandler()?.post {
-                    if (destroyed) {
+                    if (destroyed || generation != loadGeneration) {
                         decoded?.recycle()
                         return@post
                     }
@@ -1375,7 +1397,7 @@ class VideoWallpaperView(context: Context) :
             // the SurfaceTexture; the GL quad then shows the blend at full
             // alpha (driver-independent, no backbuffer assumptions).
             fadeRunning = true
-            android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
+            fadeAnimator = android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
                 duration = 350
                 interpolator = android.view.animation.DecelerateInterpolator()
                 addUpdateListener { anim ->
@@ -1384,6 +1406,7 @@ class VideoWallpaperView(context: Context) :
                 addListener(object : android.animation.AnimatorListenerAdapter() {
                     override fun onAnimationEnd(animation: android.animation.Animator) {
                         fadeRunning = false
+                        fadeAnimator = null
                         fadeFrom?.recycle()
                         fadeFrom = null
                     }
@@ -1392,12 +1415,30 @@ class VideoWallpaperView(context: Context) :
             }
         }
 
-        /** old at full + new at [alpha] — one frame into the texture. */
+        /**
+         * old at full + new at [alpha] — one frame into the texture.
+         * v0.8.29 (THE CRASH): lockCanvas throws IllegalArgumentException
+         * when the surface is released or its buffer queue is re-attached
+         * mid-draw (AOSP: "if the canvas cannot be locked") — that
+         * killed the app from the main thread. A bad surface is logged
+         * and dropped, NEVER propagated.
+         */
         private fun drawFrame(alpha: Float) {
             if (destroyed) return
             val bmp = bitmap ?: return
             val s = surface ?: return
-            val canvas = s.lockCanvas(rect)
+            if (!s.isValid) {
+                surface = null
+                return
+            }
+            val canvas = try {
+                s.lockCanvas(rect)
+            } catch (e: IllegalArgumentException) {
+                WepWawetLogger.engineWarn("VideoView: image draw skipped — surface would not lock",
+                    "exception" to (e.message ?: e.javaClass.name))
+                surface = null
+                return
+            }
             if (canvas != null) {
                 canvas.drawColor(android.graphics.Color.BLACK)
                 fadeFrom?.let { old ->
@@ -1405,7 +1446,12 @@ class VideoWallpaperView(context: Context) :
                 }
                 fadePaint.alpha = (alpha * 255).toInt().coerceIn(0, 255)
                 canvas.drawBitmap(bmp, 0.0f, 0.0f, fadePaint)
-                s.unlockCanvasAndPost(canvas)
+                try {
+                    s.unlockCanvasAndPost(canvas)
+                } catch (e: Exception) {
+                    WepWawetLogger.engineWarn("VideoView: image draw post failed (ignored)",
+                        "exception" to (e.javaClass.name))
+                }
             }
             this@VideoWallpaperView.onFrameAvailable(surfaceTexture)
         }
@@ -1436,6 +1482,8 @@ class VideoWallpaperView(context: Context) :
         private var surface: Surface? = null
         private val rect = Rect()
         private var destroyed: Boolean = false
+        /** v0.8.29: see WallpaperImageDrawable.loadGeneration. */
+        private var loadGeneration: Int = 0
 
         private val gifCallback = object : Drawable.Callback {
             override fun invalidateDrawable(who: Drawable) {
@@ -1445,11 +1493,18 @@ class VideoWallpaperView(context: Context) :
                 }
                 queueEvent {
                     val s = surface
-                    if (s != null) {
-                        val canvas: Canvas? = s.lockCanvas(rect)
-                        if (canvas != null) {
-                            drawable?.draw(canvas)
-                            s.unlockCanvasAndPost(canvas)
+                    if (s != null && s.isValid) {
+                        try {
+                            val canvas: Canvas? = s.lockCanvas(rect)
+                            if (canvas != null) {
+                                drawable?.draw(canvas)
+                                s.unlockCanvasAndPost(canvas)
+                            }
+                        } catch (e: IllegalArgumentException) {
+                            // v0.8.29 (THE CRASH): never propagate a
+                            // dead surface out of the frame callback.
+                            WepWawetLogger.engineWarn("VideoView: gif draw skipped — surface would not lock",
+                                "exception" to (e.message ?: e.javaClass.name))
                         }
                     }
                     this@VideoWallpaperView.onFrameAvailable(surfaceTexture)
@@ -1473,6 +1528,12 @@ class VideoWallpaperView(context: Context) :
         override fun load(file: String) {
             // v0.8.28: GIF decode also leaves the main thread.
             val st = surfaceTexture ?: return
+            // v0.8.29 (THE CRASH): same teardown + generation as the
+            // image drawable — a reload tears the outgoing state down and
+            // drops the stale decode's completion.
+            surface?.release()
+            surface = null
+            val generation = ++loadGeneration
             decodeExecutor.execute {
                 val decoded = try {
                     // v0.8.28: plain paths need the File source, content
@@ -1493,7 +1554,7 @@ class VideoWallpaperView(context: Context) :
                     null
                 }
                 getActiveHandler()?.post {
-                    if (destroyed) return@post
+                    if (destroyed || generation != loadGeneration) return@post
                     if (decoded == null) {
                         WepWawetLogger.engineError("VideoView: gif decode failed — failing the load",
                             "file" to file.takeLast(56))

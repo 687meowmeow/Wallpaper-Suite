@@ -30,13 +30,11 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.wepwawet.log.WepWawetLogger
 import com.wepwawet.wallpaper.WallpaperRouter
 
-/** What the banners have to say right now (computed + logged together). */
+/** What the banner has to say right now (computed + logged together). */
 private data class BannerState(
     /** An ON screen our live wallpaper is not covering. */
     val missingHome: Boolean,
     val missingLock: Boolean,
-    /** ONE shared engine serves both screens — per-screen images blocked. */
-    val sharedEngine: Boolean,
     /** Opening the system one-tap flow failed on this device. */
     val promptUnavailable: Boolean,
 )
@@ -57,6 +55,11 @@ private data class BannerState(
  * and every system wallpaper change; the banner shows on every screen
  * that can apply a wallpaper; each decision and display is logged; the
  * one-tap flow reports its failures instead of swallowing them.
+ *
+ * v0.8.29: the banner reports MISSING COVERAGE only. The shared-engine
+ * split advice is NOT a banner anymore — it appears as
+ * [SharedEngineSplitDialog] exactly when a single-screen apply is
+ * blocked, which is when the user actually wants it.
  */
 @Composable
 fun LiveWallpaperPromptBanner(modifier: Modifier = Modifier) {
@@ -119,34 +122,6 @@ fun LiveWallpaperPromptBanner(modifier: Modifier = Modifier) {
             }
         }
 
-        // ── One SHARED engine: per-screen images are blocked ───────────
-        state.sharedEngine -> Row(
-            modifier = modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(10.dp))
-                .background(MaterialTheme.colorScheme.tertiaryContainer)
-                .padding(horizontal = 10.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    "Both screens share ONE wallpaper engine — they always show the same image.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer,
-                )
-                Text(
-                    "For different wallpapers per screen: split them — set Wallpaper Suite " +
-                        "choosing \"Home screen\", then set it again choosing \"Lock screen\".",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer,
-                )
-            }
-            Spacer(Modifier.width(8.dp))
-            OutlinedButton(onClick = { launchOneTap(context, "split") }) {
-                Text("Split them")
-            }
-        }
-
         // ── The one-tap flow cannot even run here ──────────────────────
         state.promptUnavailable -> Row(
             modifier = modifier
@@ -173,14 +148,16 @@ private fun computeBannerState(context: android.content.Context): BannerState? {
     val lockOn = com.wepwawet.discover.DiscoverPrefs.lockRequired(screens.second)
     val homeLive = WallpaperRouter.ourLiveOnHome(context)
     val lockLive = WallpaperRouter.ourLiveOnLock(context)
-    val shared = WallpaperRouter.splitNeeded(context)
     val canPrompt = WallpaperRouter.canPromptLiveWallpaper(context)
     val svc = io.wallpaperengine.weclient.WEWallpaperService.instance
-    val show = (homeOn && !homeLive) || (lockOn && !lockLive) || shared || !canPrompt
+    // v0.8.29: the SHARED-ENGINE advice no longer has a banner — it
+    // appears as a dialog exactly when a single-screen apply is blocked
+    // (SharedEngineSplitDialog). The banner only reports missing
+    // coverage now.
+    val show = (homeOn && !homeLive) || (lockOn && !lockLive) || !canPrompt
     val state = if (show) BannerState(
         missingHome = homeOn && !homeLive,
         missingLock = lockOn && !lockLive,
-        sharedEngine = shared,
         promptUnavailable = !canPrompt,
     ) else null
     // v0.8.28: every banner DECISION is logged with what it saw — the
@@ -190,7 +167,6 @@ private fun computeBannerState(context: android.content.Context): BannerState? {
         "lock_toggle_on" to lockOn,
         "home_live" to homeLive,
         "lock_live" to lockLive,
-        "shared_engine" to shared,
         "banner_shown" to (state != null),
         "engines" to (svc?.engineFlagsSnapshot() ?: "(no service)"))
     return state
