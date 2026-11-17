@@ -97,17 +97,142 @@ object SteamCredentialsStore {
         }
     }
 
-    fun saveCredentials(context: Context, username: String, password: String) {
-        val prefs = prefs(context)
-        val oldUsername = prefs.getString(KEY_USERNAME, null)
-        val usernameChanged = oldUsername != null && oldUsername != username
-        // v0.7.24 (M-P2): commit() instead of apply() — credentials must be
-        // durably on disk before we return; a crash right after apply()
-        // silently lost the user's login.
-        prefs.edit()
-            .putString(KEY_USERNAME, username)
-            .putString(KEY_PASSWORD, password)
-            .commit()
+    /**
+     * v0.8.30: run one prefs operation with SELF-HEALING. When the
+     * encrypted store's Keystore keyset is corrupted (EncryptedShared-
+     * Preferences throws GeneralSecurityException/SecurityException at
+     * READ or WRITE time — create() succeeded, so the old guard never
+     * fired), the corrupted file is deleted and a fresh keyset built;
+     * the operation then retries ONCE on the healthy store.
+     */
+    private fun <T> withHealing(context: Context, which: String, op: (SharedPreferences) -> T): T? {
+        return try {
+            op(prefs(context))
+        } catch (e: java.security.GeneralSecurityException) {
+            healCorruptedStore(context, which, e)
+            try {
+                op(prefs(context))
+            } catch (e2: Throwable) {
+                WepWawetLogger.proxyError("SteamCredentialsStore: $which op failed AGAIN after healing",
+                    "exception" to (e2.message ?: e2.javaClass.name))
+                null
+            }
+        } catch (e: SecurityException) {
+            healCorruptedStore(context, which, e)
+            try {
+                op(prefs(context))
+            } catch (e2: Throwable) {
+                WepWawetLogger.proxyError("SteamCredentialsStore: $which op failed AGAIN after healing",
+                    "exception" to (e2.message ?: e2.javaClass.name))
+                null
+            }
+        }
+    }
+
+    private fun healCorruptedStore(context: Context, which: String, e: Throwable) {
+        WepWawetLogger.proxyWarn(
+            "SteamCredentialsStore: $which store CORRUPTED (Keystore) — deleting and rebuilding",
+            "exception" to (e.message ?: e.javaClass.name))
+        try {
+            context.deleteSharedPreferences("${PREF_NAME}_secure")
+        } catch (t: Throwable) {
+            WepWawetLogger.proxyWarn("SteamCredentialsStore: corrupted file delete failed",
+                "exception" to t.javaClass.name)
+        }
+        encryptionBroken = false
+        encryptedPrefs = null
+    }
+
+    private fun healCorruptedTokenStore(context: Context, e: Throwable) {
+        WepWawetLogger.proxyWarn(
+            "SteamCredentialsStore: token store CORRUPTED (Keystore) — deleting and rebuilding",
+            "exception" to (e.message ?: e.javaClass.name))
+        try {
+            context.deleteSharedPreferences("${TOKEN_PREF_NAME}_secure")
+        } catch (t: Throwable) {
+            WepWawetLogger.proxyWarn("SteamCredentialsStore: corrupted token file delete failed",
+                "exception" to t.javaClass.name)
+        }
+        tokenEncryptionBroken = false
+        encryptedTokenPrefs = null
+    }
+
+    private fun <T> withTokenHealing(context: Context, op: (SharedPreferences) -> T): T? {
+        return try {
+            op(tokenPrefs(context))
+        } catch (e: java.security.GeneralSecurityException) {
+            healCorruptedTokenStore(context, e)
+            try {
+                op(tokenPrefs(context))
+            } catch (e2: Throwable) {
+                WepWawetLogger.proxyError("SteamCredentialsStore: token op failed AGAIN after healing",
+                    "exception" to (e2.message ?: e2.javaClass.name))
+                null
+            }
+        } catch (e: SecurityException) {
+            healCorruptedTokenStore(context, e)
+            try {
+                op(tokenPrefs(context))
+            } catch (e2: Throwable) {
+                WepWawetLogger.proxyError("SteamCredentialsStore: token op failed AGAIN after healing",
+                    "exception" to (e2.message ?: e2.javaClass.name))
+                null
+            }
+        }
+    }
+
+    /**
+     * v0.8.30: the refresh-token save — commit() (durable BEFORE the
+     * caller proceeds; the old apply() could lose the token to a process
+     * kill right after a successful Steam Guard auth, forcing a full
+     * re-login that read as "the password never saved"), with the same
+     * Keystore self-healing as the credentials.
+     */
+    fun saveRefreshToken(context: Context, token: String, accountName: String): Boolean {
+        val ok = withTokenHealing(context) { p ->
+            p.edit()
+                .putString("refresh_token", token)
+                .putString("account_name", accountName)
+                .commit()
+        } == true
+        if (!ok) {
+            WepWawetLogger.proxyError("SteamCredentialsStore: refresh token COMMIT FAILED")
+        }
+        return ok
+    }
+
+    /**
+     * v0.8.30: the healing read of the saved token pair — a corrupted
+     * Keystore store must not crash the login path; it heals and
+     * answers null (the next login uses modern auth and re-saves).
+     */
+    fun readRefreshTokenPair(context: Context): Pair<String?, String?> =
+        withTokenHealing(context) { p ->
+            Pair(
+                p.getString("refresh_token", null),
+                p.getString("account_name", null),
+            )
+        } ?: Pair(null, null)
+
+    fun clearRefreshToken(context: Context) {
+        withTokenHealing(context) { p -> p.edit().clear().commit() }
+    }
+
+    fun saveCredentials(context: Context, username: String, password: String): Boolean {
+        val saved = withHealing(context, "credentials") { prefs ->
+            val oldUsername = prefs.getString(KEY_USERNAME, null)
+            val usernameChanged = oldUsername != null && oldUsername != username
+            val ok = prefs.edit()
+                .putString(KEY_USERNAME, username)
+                .putString(KEY_PASSWORD, password)
+                .commit()
+            if (ok) usernameChanged else null
+        }
+        if (saved == null) {
+            WepWawetLogger.proxyError("SteamCredentialsStore: credentials COMMIT FAILED — NOT saved")
+            return false
+        }
+        val usernameChanged = saved
         // Only clear the saved refresh token if the USERNAME CHANGED.
         // Previously: we cleared the token on EVERY save, which meant re-saving
         // the same credentials (e.g., user pressed Save again by accident, or
@@ -120,21 +245,25 @@ object SteamCredentialsStore {
         // Now: only clear the token if the user changed their username (which
         // genuinely invalidates the old token). Re-saving the same username
         // just updates the password without touching the token.
-        val tokenPrefs = tokenPrefs(context)
-        val hadToken = tokenPrefs.getString("refresh_token", null) != null
-        val hadAccountName = tokenPrefs.getString("account_name", null) != null
-        if (usernameChanged && (hadToken || hadAccountName)) {
-            tokenPrefs.edit().clear().apply()
-            WepWawetLogger.proxy("SteamCredentialsStore: cleared refresh token (username changed)",
-                "had_token" to hadToken,
-                "had_account_name" to hadAccountName)
-        } else if (hadToken) {
-            WepWawetLogger.proxy("SteamCredentialsStore: refresh token PRESERVED (username unchanged — only password updated)",
-                "had_token" to hadToken)
+        // v0.8.30: the token bookkeeping heals a corrupted token store
+        // instead of crashing the save after the credentials were written.
+        withTokenHealing(context) { tokenPrefs ->
+            val hadToken = tokenPrefs.getString("refresh_token", null) != null
+            val hadAccountName = tokenPrefs.getString("account_name", null) != null
+            if (usernameChanged && (hadToken || hadAccountName)) {
+                tokenPrefs.edit().clear().commit()
+                WepWawetLogger.proxy("SteamCredentialsStore: cleared refresh token (username changed)",
+                    "had_token" to hadToken,
+                    "had_account_name" to hadAccountName)
+            } else if (hadToken) {
+                WepWawetLogger.proxy("SteamCredentialsStore: refresh token PRESERVED (username unchanged — only password updated)",
+                    "had_token" to hadToken)
+            }
         }
         WepWawetLogger.proxy("SteamCredentialsStore: credentials saved",
             "username" to username,
             "username_changed" to usernameChanged)
+        return true
     }
 
     // v0.7.4: Steam Guard CODE storage removed. The app never collected a
@@ -146,13 +275,11 @@ object SteamCredentialsStore {
     // Steam mobile app) — see WorkshopDownloader.GuardAuthenticator.
     // acceptDeviceConfirmation().
 
-    fun getUsername(context: Context): String? {
-        return prefs(context).getString(KEY_USERNAME, null)
-    }
+    fun getUsername(context: Context): String? =
+        withHealing(context, "credentials") { it.getString(KEY_USERNAME, null) }
 
-    fun getPassword(context: Context): String? {
-        return prefs(context).getString(KEY_PASSWORD, null)
-    }
+    fun getPassword(context: Context): String? =
+        withHealing(context, "credentials") { it.getString(KEY_PASSWORD, null) }
 
     fun hasCredentials(context: Context): Boolean {
         val username = getUsername(context)
@@ -161,10 +288,9 @@ object SteamCredentialsStore {
     }
 
     fun clearCredentials(context: Context) {
-        prefs(context).edit().clear().commit()
-        // Also clear the saved refresh token + account name (they're stored
-        // in a separate SharedPreferences file by WorkshopDownloader).
-        tokenPrefs(context).edit().clear().apply()
+        withHealing(context, "credentials") { it.edit().clear().commit() }
+        // Also clear the saved refresh token + account name.
+        clearRefreshToken(context)
         WepWawetLogger.proxy("SteamCredentialsStore: credentials cleared (incl. refresh token)")
     }
 
@@ -241,17 +367,17 @@ object SteamCredentialsStore {
      * flag, Steam invalidated the token after one use, causing the user's
      * "steam login only lasts one wallpaper then access denies me" bug.
      */
-    fun hasRefreshToken(context: Context): Boolean {
-        return tokenPrefs(context)
-            .getString("refresh_token", null)?.isNotBlank() == true
-    }
+    fun hasRefreshToken(context: Context): Boolean =
+        withTokenHealing(context) {
+            it.getString("refresh_token", null)?.isNotBlank() == true
+        } == true
 
     /**
      * Get the saved Steam account name (canonical case from Steam backend).
      * Returns null if no refresh token has been saved yet.
      */
-    fun getSavedAccountName(context: Context): String? {
-        return tokenPrefs(context)
-            .getString("account_name", null)?.takeIf { it.isNotBlank() }
-    }
+    fun getSavedAccountName(context: Context): String? =
+        withTokenHealing(context) {
+            it.getString("account_name", null)?.takeIf { it.isNotBlank() }
+        }
 }

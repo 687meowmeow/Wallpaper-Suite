@@ -353,6 +353,47 @@ object SuitePlaylistStore {
     fun isActive(context: Context, id: String): Boolean =
         readStore(context).activePlaylistId == id
 
+    // ── v0.8.30 (THE DIRECT-APPLY PIN) ───────────────────────────────
+    // A direct apply while a playlist is active must STICK: the engine
+    // tick's scope enforcement used to revert it on the next tick (the
+    // applied file is never in the playlist's set). The pin marks the
+    // directly-applied file as the legitimate current wallpaper until
+    // the playlist itself advances.
+
+    private fun pinPrefs(context: Context) =
+        context.getSharedPreferences("suite_playlist_pin", Context.MODE_PRIVATE)
+
+    /** Pin [path] as the current wallpaper of the ACTIVE playlist (no-op without one). */
+    fun pinCurrent(context: Context, path: String) {
+        val active = activePlaylist(context) ?: return
+        pinPrefs(context).edit()
+            .putString("pinned_current", path)
+            .putString("pinned_playlist", active.id)
+            .apply()
+        WepWawetLogger.appInfo("SuitePlaylistStore: direct apply PINNED (scope enforcement will not revert it)",
+            "path" to path.takeLast(56),
+            "playlist" to active.id)
+    }
+
+    /** The pinned current file, or null when void (no pin / active playlist changed). */
+    fun pinnedCurrent(context: Context): String? {
+        val pinned = pinPrefs(context).getString("pinned_current", null) ?: return null
+        if (pinned.isBlank()) return null
+        val forPlaylist = pinPrefs(context).getString("pinned_playlist", null) ?: return null
+        val active = activePlaylist(context) ?: return null
+        if (forPlaylist != active.id) return null
+        return pinned
+    }
+
+    /** Clear the pin (a playlist-driven apply / a content change consumed it). */
+    fun clearPin(context: Context, why: String) {
+        if (pinPrefs(context).getString("pinned_current", null) != null) {
+            pinPrefs(context).edit().remove("pinned_current")
+                .remove("pinned_playlist").apply()
+            WepWawetLogger.appInfo("SuitePlaylistStore: pin cleared", "why" to why)
+        }
+    }
+
     fun setActive(context: Context, id: String?) {
         val store = readStore(context)
         // v0.8.29 (the 149 log's "active changed id=none"): an EMPTY or
@@ -372,6 +413,8 @@ object SuitePlaylistStore {
             promoted
         }
         writeStore(context, store)
+        // v0.8.30: a different playlist is active now — an old pin is void.
+        clearPin(context, "the active playlist changed")
         WepWawetLogger.appInfo("SuitePlaylistStore: active changed",
             "id" to store.activePlaylistId.ifEmpty { "none (no playlists)" })
         notifyService(context)

@@ -155,9 +155,17 @@ private fun computeBannerState(context: android.content.Context): BannerState? {
     // (SharedEngineSplitDialog). The banner only reports missing
     // coverage now.
     val show = (homeOn && !homeLive) || (lockOn && !lockLive) || !canPrompt
+    // v0.8.30: a lock the user DELIBERATELY set static (the lock-only
+    // image apply under a shared engine) is not missing coverage — the
+    // banner must not nag about a choice the app itself made possible.
+    val lockDeliberatelyStatic =
+        lockOn && !lockLive && io.wallpaperengine.weclient.WeEnginePrefs.readStaticLockChosen(context)
+    if (lockDeliberatelyStatic) {
+        WepWawetLogger.appInfo("Banner: lock is deliberately STATIC (no lock engine) — no lock banner")
+    }
     val state = if (show) BannerState(
         missingHome = homeOn && !homeLive,
-        missingLock = lockOn && !lockLive,
+        missingLock = lockOn && !lockLive && !lockDeliberatelyStatic,
         promptUnavailable = !canPrompt,
     ) else null
     // v0.8.28: every banner DECISION is logged with what it saw — the

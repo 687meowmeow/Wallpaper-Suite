@@ -87,6 +87,9 @@ class WEWallpaperService : WallpaperService() {
      */
     enum class EngineTopology { NONE, SHARED, SEPARATE, HOME_ONLY, LOCK_ONLY }
 
+    /** v0.8.30: can a LIVE lock engine take a lock apply? (router) */
+    fun hasLockEngine(): Boolean = lockEngine != null
+
     fun engineTopology(): EngineTopology = when {
         homeEngine != null && lockEngine != null -> EngineTopology.SEPARATE
         homeEngine != null -> EngineTopology.HOME_ONLY
@@ -129,6 +132,11 @@ class WEWallpaperService : WallpaperService() {
             "lock_engines" to (lockEngine != null),
             "shared" to (sharedEngine != null),
             "topology" to engineTopologyLabel())
+        if (screen == "lock") {
+            // v0.8.30: a LIVE lock engine now owns the lock screen —
+            // the deliberate-static-lock marker is obsolete.
+            WeEnginePrefs.writeStaticLockChosen(this, false)
+        }
         // v0.8.28: coverage banners and per-screen rules re-evaluate the
         // moment the engine set changes.
         com.wepwawet.wallpaper.WallpaperRouter.notifyTopologyChanged()
@@ -273,6 +281,10 @@ class WEWallpaperService : WallpaperService() {
                 reloadEnginesFor(homeOn, lockOn)
             }
         }
+        // v0.8.30: THIS is a playlist-driven advance — the direct-apply
+        // pin has served its purpose.
+        com.wepwawet.playlist.SuitePlaylistStore.clearPin(
+            this, "a playlist-driven apply advanced the wallpaper")
     }
 
     /** v0.8.28: stamp the rotation clock (the interval restarts on change). */
@@ -695,6 +707,13 @@ class WEWallpaperService : WallpaperService() {
                 // slider finish rotate the wallpaper.
                 val changed =
                     lastSyncedActiveId != prevActiveId || lastSyncedPlaylistFingerprint != prevFingerprint
+                if (changed) {
+                    // v0.8.30: the playlist's own content/active state
+                    // changed — a direct-apply pin from the OLD shape is
+                    // obsolete.
+                    com.wepwawet.playlist.SuitePlaylistStore.clearPin(
+                        this@WEWallpaperService, "the active playlist changed")
+                }
                 if (changed && prevActiveId != null) {
                     val next = suitePickNew()
                     if (next.isNotEmpty()) {
@@ -1213,12 +1232,22 @@ class WEWallpaperService : WallpaperService() {
                     // SCOPE ENFORCEMENT: a boundary or condition change that
                     // no longer allows the current wallpaper switches it
                     // immediately (into the new scope's set).
+                    //
+                    // v0.8.30 (THE PLAYLIST REVERT FIX): a DIRECTLY applied
+                    // wallpaper (user or rule, via WallpaperRouter.applyPath)
+                    // is PINNED as the legitimate current — scope enforcement
+                    // must NOT yank it back on the next tick. The pin clears
+                    // when the playlist itself advances.
                     val set = suiteSetForNow()
                     if (set.isEmpty()) return false
                     val current = currentFile
                     if (current != null && current !in set &&
                         !com.wepwawet.playlist.RandomPullEngine.isSlotFile(current)
-                    ) return true
+                    ) {
+                        val pinned = com.wepwawet.playlist.SuitePlaylistStore
+                            .pinnedCurrent(this@WEWallpaperService)
+                        return !(pinned != null && pinned == current)
+                    }
                     return false
                 }
                 val currentTime = System.currentTimeMillis()

@@ -1369,9 +1369,9 @@ class WorkshopDownloader(
         isRetrying = false  // clear retry flag on new connection
 
         // Step 1: Try saved refresh token first (no 2FA needed)
-        val prefs = SteamCredentialsStore.tokenPrefs(context)
-        val savedToken = prefs.getString(KEY_REFRESH_TOKEN, null)
-        val savedAccountName = prefs.getString(KEY_ACCOUNT_NAME, null)
+        // v0.8.30: through the healing store read — a corrupted Keystore
+        // token store must not crash the login path.
+        val (savedToken, savedAccountName) = SteamCredentialsStore.readRefreshTokenPair(context)
         WepWawetLogger.proxy("$TAG: checking for saved refresh token",
             "has_token" to !savedToken.isNullOrBlank(),
             "has_account_name" to !savedAccountName.isNullOrBlank(),
@@ -1449,13 +1449,13 @@ class WorkshopDownloader(
                         "account" to result.accountName,
                         "has_refresh_token" to !result.refreshToken.isNullOrBlank())
 
-                    // Save refresh token + account name for future logins (survives app updates)
+                    // Save refresh token + account name for future logins
+                    // (survives app updates). v0.8.30: through the healing
+                    // store helper with commit() — the old apply() could
+                    // lose the token to a process kill right after auth.
                     if (!result.refreshToken.isNullOrBlank()) {
-                        SteamCredentialsStore.tokenPrefs(context)
-                            .edit()
-                            .putString(KEY_REFRESH_TOKEN, result.refreshToken)
-                            .putString(KEY_ACCOUNT_NAME, result.accountName)
-                            .apply()
+                        SteamCredentialsStore.saveRefreshToken(
+                            context, result.refreshToken, result.accountName ?: "")
                         hasValidToken = true
                         WepWawetLogger.proxy("$TAG: refresh token + account name saved ✓ (survives app updates)",
                             "account_name" to result.accountName)
@@ -1549,8 +1549,7 @@ class WorkshopDownloader(
                 usedRefreshToken = false
                 authInProgress = false
                 // Clear the stale refresh token so the next attempt uses modern auth
-                appContext?.let { SteamCredentialsStore.tokenPrefs(it) }
-                    ?.edit()?.remove(KEY_REFRESH_TOKEN)?.remove(KEY_ACCOUNT_NAME)?.apply()
+                appContext?.let { SteamCredentialsStore.clearRefreshToken(it) }
                 WepWawetLogger.proxy("$TAG: stale refresh token cleared (was rejected with ${callback.result})")
                 // Set a user-friendly error and let the caller handle it.
                 // The user can immediately retry — each retry creates a fresh
@@ -1563,8 +1562,7 @@ class WorkshopDownloader(
             }
             // Clear stale token on RateLimitExceeded
             if (callback.result == EResult.RateLimitExceeded) {
-                appContext?.let { SteamCredentialsStore.tokenPrefs(it) }
-                    ?.edit()?.remove(KEY_REFRESH_TOKEN)?.remove(KEY_ACCOUNT_NAME)?.apply()
+                appContext?.let { SteamCredentialsStore.clearRefreshToken(it) }
             }
             // Provide user-friendly error messages
             val friendlyError = when (callback.result) {

@@ -728,6 +728,20 @@ object WeEnginePrefs {
      *   when the prompt was opened (or nothing was on).
      */
     /** v0.8.29: what one callApplyWallpaper did. */
+    /**
+     * v0.8.30: TRUE when the lock screen's STATIC wallpaper was set by
+     * THIS app's lock-only apply flow (one shared engine — the lock
+     * cannot be live without a second engine). The coverage banner does
+     * not nag about a lock the user deliberately set static; a live lock
+     * engine attaching clears the marker.
+     */
+    fun readStaticLockChosen(context: Context): Boolean =
+        prefs(context).getBoolean("static_lock_chosen", false)
+
+    fun writeStaticLockChosen(context: Context, chosen: Boolean) {
+        prefs(context).edit().putBoolean("static_lock_chosen", chosen).apply()
+    }
+
     class CallApplyResult(
         val ok: Boolean,
         /** A single-screen apply was blocked by the ONE shared engine —

@@ -231,6 +231,9 @@ fun SettingsScreen(
         mutableStateOf(SteamCredentialsStore.getUsername(context) ?: "")
     }
     var steamPassword by remember { mutableStateOf("") }
+    // v0.8.30: the save's VISIBLE result — the old blank-field no-op was
+    // silent (the user could not tell a refused save from a saved one).
+    var steamSaveNote by remember { mutableStateOf<String?>(null) }
     var testLoginResult by remember { mutableStateOf<String?>(null) }
     var testLoginInProgress by remember { mutableStateOf(false) }
 
@@ -292,17 +295,25 @@ fun SettingsScreen(
                     onUsernameChange = { steamUsername = it },
                     onPasswordChange = { steamPassword = it },
                     onSave = {
-                        if (steamUsername.isBlank() || steamPassword.isBlank()) return@SteamAccountCard
-                        SteamCredentialsStore.saveCredentials(
+                        if (steamUsername.isBlank() || steamPassword.isBlank()) {
+                            steamSaveNote = "Enter both a username and a password to save"
+                            return@SteamAccountCard
+                        }
+                        val ok = SteamCredentialsStore.saveCredentials(
                             context, steamUsername, steamPassword,
                         )
+                        steamSaveNote = if (ok)
+                            "Saved ✓ (password stored encrypted on this device)"
+                        else
+                            "NOT saved — the encrypted store failed; check the logs"
                         WepWawetLogger.appInfo(
                             "settings_steam_credentials_saved",
                             "username" to steamUsername,
+                            "ok" to ok,
                         )
                         // Clear the in-memory password field for safety; the
                         // username is left populated since it's already shown.
-                        steamPassword = ""
+                        if (ok) steamPassword = ""
                     },
                     onTestLogin = {
                         if (!SteamCredentialsStore.hasCredentials(context)) {
@@ -341,6 +352,7 @@ fun SettingsScreen(
                     },
                     testLoginInProgress = testLoginInProgress,
                     testLoginResult = testLoginResult,
+                    saveNote = steamSaveNote,
                 )
             }
 
@@ -532,6 +544,7 @@ private fun SteamAccountCard(
     onClear: () -> Unit,
     testLoginInProgress: Boolean,
     testLoginResult: String?,
+    saveNote: String? = null,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -546,6 +559,14 @@ private fun SteamAccountCard(
             Spacer(Modifier.height(8.dp))
 
             // Show saved status (only username — never display the password)
+            if (saveNote != null) {
+                Text(
+                    saveNote,
+                    color = MaterialTheme.colorScheme.primary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(4.dp))
+            }
             Text(
                 if (hasCredentials) {
                     "Credentials saved for: ${savedUsername ?: "unknown"}"

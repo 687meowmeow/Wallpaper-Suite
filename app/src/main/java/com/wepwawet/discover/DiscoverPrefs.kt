@@ -153,6 +153,7 @@ object DiscoverPrefs {
             .putStringSet(KEY_STRICT_TAGS, strict.filter { it.isNotBlank() }.toSet())
             .putStringSet(KEY_SOFT_TAGS, soft.filter { it.isNotBlank() }.toSet())
             .apply()
+        onSearchParamsChanged(context)
     }
 
     fun readStyle(context: Context): Int =
@@ -160,6 +161,7 @@ object DiscoverPrefs {
 
     fun writeStyle(context: Context, value: Int) {
         prefs(context).edit().putInt(KEY_STYLE, value.coerceIn(0, 100)).apply()
+        onSearchParamsChanged(context)
     }
 
     fun readR18(context: Context): Int = when (prefs(context).getInt(KEY_R18, R18_PURE)) {
@@ -170,6 +172,8 @@ object DiscoverPrefs {
 
     fun writeR18(context: Context, mode: Int) {
         prefs(context).edit().putInt(KEY_R18, mode).apply()
+        // v0.8.30: the CONTENT choice — the queue must reflect it NOW.
+        onSearchParamsChanged(context)
     }
 
     // ── v0.8.18: booru sources ────────────────────────────────────────
@@ -228,6 +232,7 @@ object DiscoverPrefs {
 
     fun writeSources(context: Context, sources: Set<String>) {
         prefs(context).edit().putStringSet(KEY_SOURCES, sources).apply()
+        onSearchParamsChanged(context)
     }
 
     /** UI labels for the source chips. */
@@ -408,6 +413,38 @@ object DiscoverPrefs {
      * do nothing. Slots are now stamped; only slots whose signature matches
      * the CURRENT search are eligible.
      */
+    /**
+     * v0.8.30: a search parameter (tags / style / CONTENT tier /
+     * sources) changed — the queue's stale entries are purged NOW (files
+     * + slots) and the preloader is kicked so the next images come from
+     * the NEW choice. Before this, old-content entries lingered until
+     * consumed one by one and nothing refilled proactively.
+     */
+    fun onSearchParamsChanged(context: Context) {
+        val strict = readStrictTags(context)
+        val soft = readSoftTags(context)
+        val style = readStyle(context)
+        val r18 = readR18(context)
+        val sources = readSources(context)
+        val signature = searchSignature(strict, soft, style, r18, sources)
+        val p = prefs(context)
+        var purged = 0
+        for (s in 0 until QUEUE_SIZE) {
+            val sig = p.getString("discover_q_sig_$s", null)
+            if (sig != null && sig != signature) {
+                queueFile(context, s).delete()
+                p.edit().remove("discover_q_url_$s").remove("discover_q_at_$s")
+                    .remove("discover_q_sig_$s").apply()
+                purged++
+            }
+        }
+        WepWawetLogger.appInfo("DiscoverPrefs: search parameters changed — stale queue purged + preload kicked",
+            "purged_slots" to purged,
+            "content_tier" to r18,
+            "sources" to sources.sorted().joinToString(","))
+        DiscoverPreload.kick(context)
+    }
+
     fun searchSignature(
         strictTags: Collection<String>,
         softTags: Collection<String>,

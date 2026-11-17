@@ -215,7 +215,13 @@ object DiscoverPreload {
                 "depth" to DiscoverPrefs.queueDepth(context, signature),
                 "target" to target,
                 "concurrency" to concurrency,
-                "attempts" to attempts)
+                "attempts" to attempts,
+                "content_tier" to when (r18) {
+                    DiscoverPrefs.R18_PURE -> "pure"
+                    DiscoverPrefs.R18_NSFW -> "nsfw"
+                    else -> "mix"
+                },
+                "sources" to sources.sorted().joinToString(","))
             if (attempts == 0 && added == 0 &&
                 DiscoverPrefs.queueDepth(context, signature) >= target
             ) {

@@ -51,8 +51,12 @@ fun SharedEngineSplitDialog(
                     modifier = Modifier.padding(top = 10.dp),
                 )
                 Text(
-                    "1. Set Wallpaper Suite choosing “Home screen”.\n" +
-                        "2. Set it again choosing “Lock screen”.",
+                    "To use a different wallpaper on each screen:\n" +
+                        "1. Set Wallpaper Suite choosing “Home screen”.\n" +
+                        "2. Set it again choosing “Lock screen”.\n\n" +
+                        "Or, right now: apply any image choosing “Lock” — it becomes the " +
+                        "Lock screen's static wallpaper while Home keeps its live one. " +
+                        "(Animated Lock wallpapers need separate engines.)",
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(top = 4.dp),
                 )

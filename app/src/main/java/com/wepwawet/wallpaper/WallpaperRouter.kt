@@ -162,12 +162,16 @@ object WallpaperRouter {
                     lockInfo != null ->
                         lockInfo.component.packageName == context.packageName
                     else -> {
-                        val hasStaticLock = try {
-                            wm?.getWallpaperFile(WallpaperManager.FLAG_LOCK) != null
-                        } catch (se: SecurityException) {
-                            false
+                        // v0.8.30: getWallpaperFile throws SecurityException
+                        // for normal apps on 13+; getWallpaperId is
+                        // permission-free and answers the same question
+                        // (a negative id = no lock wallpaper configured).
+                        val hasLockWallpaper = try {
+                            (wm?.getWallpaperId(WallpaperManager.FLAG_LOCK) ?: -1) >= 0
+                        } catch (t: Throwable) {
+                            true // unknown — assume a lock wallpaper exists
                         }
-                        if (hasStaticLock) {
+                        if (hasLockWallpaper) {
                             false
                         } else {
                             // Lock follows home.
@@ -293,6 +297,22 @@ object WallpaperRouter {
             return@withContext ApplyOutcome(wantHome, wantLock, false, false, why)
         }
 
+        // v0.8.30 (LOCK WITHOUT A SECOND ENGINE): a Lock-only apply of a
+        // STATIC image does not need a lock engine at all — the OS takes
+        // it as the lock screen's static wallpaper while Home keeps its
+        // live one. This works under the ONE shared engine (where the
+        // guided split can NEVER produce two engines — the system merges
+        // them, flags=3) and even with no engine running. Before this,
+        // every lock-only apply on such devices was blocked forever.
+        if (wantLock && !wantHome) {
+            val svcForLock = WEWallpaperService.instance
+            val lockEngineLive = svcForLock?.hasLockEngine() == true
+            val kind = io.wallpaperengine.weutil.WallpaperFile.sniff(context, path)
+            if (!lockEngineLive && kind == io.wallpaperengine.weutil.WallpaperFile.Kind.IMAGE) {
+                return@withContext applyStaticLock(context, path)
+            }
+        }
+
         val svc = WEWallpaperService.instance
         if (svc == null) {
             val why = "the live wallpaper isn't active — open the app and set it once"
@@ -341,6 +361,11 @@ object WallpaperRouter {
         if (confirmed.first || confirmed.second) {
             // Stamp the rotation clock — the interval restarts on change.
             svc.stampRotationClock()
+            // v0.8.30 (THE PLAYLIST REVERT FIX): pin the direct apply as
+            // the legitimate current wallpaper — with a playlist active,
+            // the tick's scope enforcement used to revert it within a
+            // second. No-op without an active playlist.
+            com.wepwawet.playlist.SuitePlaylistStore.pinCurrent(context, path)
         }
         val outcome = ApplyOutcome(
             wantHome, wantLock,
@@ -352,6 +377,85 @@ object WallpaperRouter {
             "topology" to svc.engineTopologyLabel(),
             "target" to t.ifEmpty { "(toggles)" })
         outcome
+    }
+
+    /**
+     * v0.8.30: write ONE static image to the LOCK screen
+     * (WallpaperManager.setBitmap, FLAG_LOCK). Called for a Lock-only
+     * apply when no lock engine exists (one shared engine or none at
+     * all) — the OS swaps the lock's overlay to the image; Home keeps
+     * its live wallpaper untouched. Returns an honest outcome: success
+     * only when the system accepted the write (a non-zero wallpaper id).
+     */
+    private suspend fun applyStaticLock(
+        context: Context,
+        path: String,
+    ): ApplyOutcome = withContext(Dispatchers.IO) {
+        val wm = context.getSystemService(Context.WALLPAPER_SERVICE) as? WallpaperManager
+        if (wm == null || !wm.isWallpaperSupported || !wm.isSetWallpaperAllowed) {
+            val why = "this device does not allow this app to set wallpapers"
+            WepWawetLogger.appError("$TAG: static lock write refused — not allowed",
+                "path" to path.takeLast(56))
+            return@withContext ApplyOutcome(false, true, false, false, why)
+        }
+        val bmp = decodeForStaticLock(context, path)
+        if (bmp == null) {
+            val why = "the image could not be decoded for the lock screen"
+            WepWawetLogger.appError("$TAG: static lock write failed — decode",
+                "path" to path.takeLast(56))
+            return@withContext ApplyOutcome(false, true, false, false, why)
+        }
+        val id = try {
+            wm.setBitmap(bmp, null, false, WallpaperManager.FLAG_LOCK)
+        } catch (e: Exception) {
+            WepWawetLogger.appError("$TAG: static lock write THREW",
+                "path" to path.takeLast(56),
+                "exception" to (e.message ?: e.javaClass.name))
+            0
+        }
+        if (id == 0) {
+            val why = "the system refused the lock-screen wallpaper write"
+            WepWawetLogger.appError("$TAG: static lock write refused — system said no",
+                "path" to path.takeLast(56))
+            return@withContext ApplyOutcome(false, true, false, false, why)
+        }
+        // Success — remember the lock's selection + the deliberate
+        // static choice (the banner must not nag about it).
+        WeEnginePrefs.writeSelectedForScreen(context, "lock", path)
+        WeEnginePrefs.writeStaticLockChosen(context, true)
+        WepWawetLogger.appInfo("$TAG: lock apply OK — STATIC lock wallpaper written " +
+            "(no lock engine: Home keeps its live wallpaper)",
+            "path" to path.takeLast(56),
+            "wallpaper_id" to id)
+        ApplyOutcome(
+            homeRequested = false, lockRequested = true,
+            homeOk = false, lockOk = true,
+            reason = "Lock: set as a static image — one engine serves both screens, " +
+                "so Home keeps its live wallpaper")
+    }
+
+    /** Decode sampled to the lock's desired size (≤2160px on the long side). */
+    private fun decodeForStaticLock(context: Context, path: String): android.graphics.Bitmap? {
+        return try {
+            val bounds = android.graphics.BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+            }
+            io.wallpaperengine.weutil.WallpaperFile.open(context, path)?.use {
+                android.graphics.BitmapFactory.decodeStream(it, null, bounds)
+            }
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+            var sample = 1
+            while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 2160) sample *= 2
+            val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+            io.wallpaperengine.weutil.WallpaperFile.open(context, path)?.use {
+                android.graphics.BitmapFactory.decodeStream(it, null, opts)
+            }
+        } catch (t: Throwable) {
+            WepWawetLogger.appWarn("$TAG: static lock decode failed",
+                "path" to path.takeLast(56),
+                "exception" to (t.message ?: t.javaClass.name))
+            null
+        }
     }
 
     private val appliedCounter = AtomicLong(0)
